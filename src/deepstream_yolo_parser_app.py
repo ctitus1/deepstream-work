@@ -82,7 +82,7 @@ symmetric-padding=1
 cluster-mode=2
 
 [class-attrs-all]
-pre-cluster-threshold=0.25
+pre-cluster-threshold=0.2
 nms-iou-threshold=0.45
 topk=300
 """
@@ -128,18 +128,23 @@ def ensure_model(model: str, stream: Path, long_side: int, src_w: int, src_h: in
     return w, h, p["config"]
 
 
-def conf_color(conf: float, min_conf: float = 0.25, max_conf: float = 1.0):
-    t = (conf - min_conf) / max(max_conf - min_conf, 1e-6)
-    t = max(0.0, min(1.0, t))
+def conf_color(conf: float):
+    # Piecewise linear interpolation:
+    #   0.2 -> red
+    #   0.5 -> yellow
+    #   0.8+ -> green
+    if conf <= 0.2:
+        return 1.0, 0.0, 0.0, 1.0
 
-    if t < 0.5:
-        # red -> yellow
-        u = t * 2.0
+    if conf < 0.5:
+        u = (conf - 0.2) / 0.3
         return 1.0, u, 0.0, 1.0
 
-    # yellow -> green
-    u = (t - 0.5) * 2.0
-    return 1.0 - u, 1.0, 0.0, 1.0
+    if conf < 0.8:
+        u = (conf - 0.5) / 0.3
+        return 1.0 - u, 1.0, 0.0, 1.0
+
+    return 0.0, 1.0, 0.0, 1.0
 
 
 def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color) -> None:

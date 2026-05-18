@@ -47,6 +47,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgstreamer1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
+# Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
+RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/deepstream_python_apps \
+    && cd /opt/deepstream_python_apps \
+    && git submodule update --init \
+    && cd bindings \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. \
+    && make -j"$(nproc)" \
+    && PY_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+    && cp pyds*.so "$PY_SITE/" \
+    && python3 -c 'import pyds; print("pyds OK:", pyds)'
+
 RUN set -eux; \
     if getent group "${USER_GID}" >/dev/null; then \
         EXISTING_GROUP="$(getent group "${USER_GID}" | cut -d: -f1)"; \

@@ -4,7 +4,9 @@ import json
 import shutil
 import subprocess
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 
 import gi
@@ -302,6 +304,88 @@ class TimeLog:
         self.last_timing_time = now
 
 
+
+class RateLimiter:
+    def __init__(self, base_fps: float = 30.0, rate: float = 1.0):
+        self.base_fps = base_fps
+        self.rate = rate
+        self.last_time = 0.0
+
+    @property
+    def max_fps(self) -> float:
+        return self.base_fps * self.rate
+
+    def set_rate(self, rate: float) -> None:
+        self.rate = round(max(0.05, min(8.0, rate)), 2)
+        print(f"rate={self.rate:.2f}x max_fps={self.max_fps:.1f}", flush=True)
+
+    def probe(self, _pad, _info, _data):
+        max_fps = self.max_fps
+        if max_fps <= 0:
+            return Gst.PadProbeReturn.OK
+
+        now = time.perf_counter()
+        period = 1.0 / max_fps
+
+        if self.last_time:
+            wait = period - (now - self.last_time)
+            if wait > 0:
+                time.sleep(wait)
+
+        self.last_time = time.perf_counter()
+        return Gst.PadProbeReturn.OK
+
+
+class KeyboardControls:
+    def __init__(self, pipeline, loop, limiter: RateLimiter):
+        self.pipeline = pipeline
+        self.loop = loop
+        self.limiter = limiter
+        self.paused = False
+        self.old_term = termios.tcgetattr(sys.stdin)
+
+    def start(self):
+        tty.setcbreak(sys.stdin.fileno())
+        GLib.io_add_watch(sys.stdin, GLib.IO_IN, self.on_key)
+        print(
+            "keys: right/up speed up | left/down slow down | r reset 1x | space pause/play | q quit",
+            flush=True,
+        )
+
+    def stop(self):
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_term)
+
+    def on_key(self, _source, _condition):
+        key = sys.stdin.read(1)
+        if key == "\x1b":
+            key += sys.stdin.read(2)
+
+        if key == "q":
+            self.loop.quit()
+            return False
+
+        if key == " ":
+            self.toggle_pause()
+        elif key == "r":
+            self.limiter.set_rate(1.0)
+        elif key == "\x1b[C":      # right
+            self.limiter.set_rate(self.limiter.rate + 0.5)
+        elif key == "\x1b[D":      # left
+            self.limiter.set_rate(self.limiter.rate - 0.5)
+        elif key == "\x1b[A":      # up
+            self.limiter.set_rate(self.limiter.rate + 0.05)
+        elif key == "\x1b[B":      # down
+            self.limiter.set_rate(self.limiter.rate - 0.05)
+
+        return True
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        self.pipeline.set_state(Gst.State.PAUSED if self.paused else Gst.State.PLAYING)
+        print("paused" if self.paused else "playing", flush=True)
+
+
+
 def element(factory: str, name: str):
     e = Gst.ElementFactory.make(factory, name)
     if e is None:
@@ -330,6 +414,7 @@ def main():
     ap.add_argument("--long-side", type=int, default=640)
     ap.add_argument("--stream", default=str(DEFAULT_STREAM))
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--base-fps", type=float, default=30.0)
     args = ap.parse_args()
 
     Gst.init(None)
@@ -403,6 +488,10 @@ def main():
             pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
     loop = GLib.MainLoop()
+    limiter = RateLimiter(base_fps=args.base_fps)
+    sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
+    controls = KeyboardControls(pipeline, loop, limiter)
+    controls.start()
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", on_message, loop)
@@ -412,6 +501,7 @@ def main():
     try:
         loop.run()
     finally:
+        controls.stop()
         pipeline.set_state(Gst.State.NULL)
 
 

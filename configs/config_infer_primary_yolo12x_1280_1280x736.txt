@@ -20,6 +20,6 @@ symmetric-padding=1
 cluster-mode=2
 
 [class-attrs-all]
-pre-cluster-threshold=0.25
+pre-cluster-threshold=0.2
 nms-iou-threshold=0.45
 topk=300

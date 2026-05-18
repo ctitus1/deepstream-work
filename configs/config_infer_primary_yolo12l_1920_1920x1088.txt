@@ -2,8 +2,8 @@
 gpu-id=0
 net-scale-factor=0.00392156862745098
 model-color-format=0
-onnx-file=/home/user/deepstream-work/models/yolo12x_640_640x384.onnx
-model-engine-file=/home/user/deepstream-work/models/yolo12x_640_640x384.onnx_b1_gpu0_fp16.engine
+onnx-file=/home/user/deepstream-work/models/yolo12l_1920_1920x1088.onnx
+model-engine-file=/home/user/deepstream-work/models/yolo12l_1920_1920x1088.onnx_b1_gpu0_fp16.engine
 labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
 batch-size=1
 network-mode=2

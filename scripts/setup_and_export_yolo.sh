@@ -216,15 +216,18 @@ for x in m.graph.output:
     print("OUTPUT", x.name, dims)
 PY
 
-rm -f models/*.engine
-rm -f labels.txt
+rm -f "models/${MODEL_STEM}"*.engine "models/${MODEL_STEM}.onnx"*.engine
+
+ENGINE="${ONNX}_b1_gpu0_fp16.engine"
 
 echo
 echo "Done."
 echo "PT:     models/$MODEL_BASENAME"
 echo "ONNX:   $ONNX"
+echo "Engine: $ENGINE"
 echo "Labels: models/coco_labels.txt"
 echo
 echo "For nvinfer, use:"
 echo "  onnx-file=/home/user/deepstream-work/$ONNX"
+echo "  model-engine-file=/home/user/deepstream-work/$ENGINE"
 echo "  output-blob-names=output"

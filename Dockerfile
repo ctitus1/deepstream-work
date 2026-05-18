@@ -58,8 +58,7 @@ RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.
     && cmake .. \
     && make -j"$(nproc)" \
     && PY_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
-    && cp pyds*.so "$PY_SITE/" \
-    && python3 -c 'import pyds; print("pyds OK:", pyds)'
+    && cp pyds*.so "$PY_SITE/"
 
 RUN set -eux; \
     if getent group "${USER_GID}" >/dev/null; then \

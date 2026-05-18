@@ -337,11 +337,11 @@ class RateLimiter:
 
 
 class KeyboardControls:
-    def __init__(self, pipeline, loop, limiter: RateLimiter):
+    def __init__(self, pipeline, loop, limiter: RateLimiter, start_paused=False):
         self.pipeline = pipeline
         self.loop = loop
         self.limiter = limiter
-        self.paused = False
+        self.paused = start_paused
         self.old_term = termios.tcgetattr(sys.stdin)
 
     def start(self):
@@ -386,6 +386,21 @@ class KeyboardControls:
 
 
 
+
+def pause_on_first_buffer_probe(controls):
+    state = {"done": False}
+
+    def _probe(_pad, _info, _data):
+        if not state["done"]:
+            state["done"] = True
+            controls.paused = True
+            controls.pipeline.set_state(Gst.State.PAUSED)
+            print("paused", flush=True)
+        return Gst.PadProbeReturn.OK
+
+    return _probe
+
+
 def element(factory: str, name: str):
     e = Gst.ElementFactory.make(factory, name)
     if e is None:
@@ -415,6 +430,7 @@ def main():
     ap.add_argument("--stream", default=str(DEFAULT_STREAM))
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--base-fps", type=float, default=30.0)
+    ap.add_argument("--start-paused", action="store_true")
     args = ap.parse_args()
 
     Gst.init(None)
@@ -490,8 +506,15 @@ def main():
     loop = GLib.MainLoop()
     limiter = RateLimiter(base_fps=args.base_fps)
     sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
-    controls = KeyboardControls(pipeline, loop, limiter)
+    controls = KeyboardControls(pipeline, loop, limiter, args.start_paused)
     controls.start()
+
+    if args.start_paused:
+        sink.get_static_pad("sink").add_probe(
+            Gst.PadProbeType.BUFFER,
+            pause_on_first_buffer_probe(controls),
+            None,
+        )
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", on_message, loop)

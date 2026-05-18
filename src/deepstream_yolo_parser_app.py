@@ -21,7 +21,7 @@ DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d4.ts"
 SETUP_SCRIPT = PROJECT_DIR / "scripts/setup_and_export_yolo.sh"
 
 PERSON_CLASS_ID = 0
-CACHE_POLICY = "parser_bbox_straight_debug_v2"
+CACHE_POLICY = "parser_bbox_default_size_preferred_v4"
 
 
 def model_stem_from_name(model: str) -> str:
@@ -210,7 +210,7 @@ def ensure_model_and_config(
                 "engine": str(paths["engine"].relative_to(PROJECT_DIR)),
                 "labels": "models/coco_labels.txt",
                 "cache_policy": CACHE_POLICY,
-                "note": "DeepStream-Yolo parser plus original bbox correction method with debug/fallback",
+                "note": "DeepStream-Yolo parser path. Non-default custom input sizes are allowed but may have unreliable bbox metadata; default-size YOLO exports are preferred.",
             },
             indent=2,
         )
@@ -293,7 +293,14 @@ def apply_rect(rect, values):
     rect.height = float(values[3])
 
 
-def bbox_correction_probe(model_w, model_h, bbox_mode, debug_bboxes, debug_frames):
+def bbox_correction_probe(
+    model_w,
+    model_h,
+    bbox_mode,
+    anchor_box_to_label,
+    debug_bboxes,
+    debug_frames,
+):
     def _probe(_pad, info, _user_data):
         gst_buffer = info.get_buffer()
         if not gst_buffer:
@@ -351,14 +358,27 @@ def bbox_correction_probe(model_w, model_h, bbox_mode, debug_bboxes, debug_frame
                     and bottom <= model_h * 1.05
                 )
 
+                corrected = transform_model_rect_to_frame_values(
+                    orig[0],
+                    orig[1],
+                    orig[2],
+                    orig[3],
+                    frame_w,
+                    frame_h,
+                    model_w,
+                    model_h,
+                )
+
+                label_x = float(getattr(obj_meta.text_params, "x_offset", 0) or 0)
+                label_y = float(getattr(obj_meta.text_params, "y_offset", 0) or 0)
+
+                def dist_to_label(box):
+                    x, y, _w, _h = box
+                    return abs(x - label_x) + abs(y - label_y)
+
                 correction_used = "none"
 
                 if bbox_mode == "letterbox" or (bbox_mode == "auto" and looks_like_model_space):
-                    corrected = transform_model_rect_to_frame_values(
-                        orig[0], orig[1], orig[2], orig[3],
-                        frame_w, frame_h, model_w, model_h,
-                    )
-
                     if box_is_usable(*corrected, frame_w, frame_h):
                         apply_rect(rect, corrected)
                         correction_used = "letterbox"
@@ -366,22 +386,55 @@ def bbox_correction_probe(model_w, model_h, bbox_mode, debug_bboxes, debug_frame
                         apply_rect(rect, orig)
                         correction_used = "fallback-original"
 
+                elif bbox_mode == "auto2":
+                    orig_ok = box_is_usable(*orig, frame_w, frame_h)
+                    corrected_ok = box_is_usable(*corrected, frame_w, frame_h)
+
+                    if corrected_ok and not orig_ok:
+                        apply_rect(rect, corrected)
+                        correction_used = "auto2-letterbox-only-valid"
+                    elif orig_ok and not corrected_ok:
+                        apply_rect(rect, orig)
+                        correction_used = "auto2-original-only-valid"
+                    elif orig_ok and corrected_ok:
+                        if dist_to_label(corrected) < dist_to_label(orig):
+                            apply_rect(rect, corrected)
+                            correction_used = "auto2-letterbox-nearer-label"
+                        else:
+                            apply_rect(rect, orig)
+                            correction_used = "auto2-original-nearer-label"
+                    else:
+                        apply_rect(rect, orig)
+                        correction_used = "auto2-fallback-original"
+
                 elif bbox_mode == "off":
+                    apply_rect(rect, orig)
                     correction_used = "off"
 
                 elif bbox_mode == "auto":
+                    apply_rect(rect, orig)
                     correction_used = "auto-original"
 
                 clamp_rect(rect, frame_w, frame_h)
 
-                # NvOSD rectangles are axis-aligned. This explicitly writes only
-                # left/top/width/height, so this script never creates rotated boxes.
+                if anchor_box_to_label and label_x > 0 and label_y > 0:
+                    rect.left = float(clamp(label_x, 0.0, frame_w - 1.0))
+                    rect.top = float(clamp(label_y, 0.0, frame_h - 1.0))
+                    rect.width = float(clamp(rect.width, 2.0, frame_w - rect.left))
+                    rect.height = float(clamp(rect.height, 2.0, frame_h - rect.top))
+
+                # NvOSD rectangles are axis-aligned. This script only writes
+                # left/top/width/height, so it never intentionally creates rotation.
                 rect.border_width = 3
                 rect.has_bg_color = 0
                 rect.border_color.set(0.0, 1.0, 0.0, 1.0)
 
                 confidence = float(obj_meta.confidence)
                 obj_meta.text_params.display_text = f"person {confidence:.2f}"
+
+                # Force label and box to stay attached.
+                obj_meta.text_params.x_offset = int(rect.left)
+                obj_meta.text_params.y_offset = max(0, int(rect.top) - 10)
 
                 final = box_tuple(rect)
 
@@ -393,9 +446,12 @@ def bbox_correction_probe(model_w, model_h, bbox_mode, debug_bboxes, debug_frame
                         f"frame_size={frame_w}x{frame_h} "
                         f"model_size={model_w}x{model_h} "
                         f"mode={bbox_mode} "
+                        f"anchor_label={anchor_box_to_label} "
                         f"looks_model={looks_like_model_space} "
                         f"correction={correction_used} "
+                        f"label=({label_x:.1f},{label_y:.1f}) "
                         f"orig=({orig[0]:.1f},{orig[1]:.1f},{orig[2]:.1f},{orig[3]:.1f}) "
+                        f"letterbox=({corrected[0]:.1f},{corrected[1]:.1f},{corrected[2]:.1f},{corrected[3]:.1f}) "
                         f"final=({final[0]:.1f},{final[1]:.1f},{final[2]:.1f},{final[3]:.1f})",
                         flush=True,
                     )
@@ -453,9 +509,15 @@ def main():
     argp.add_argument("--stream", default=str(DEFAULT_STREAM), help="Input video/stream path")
     argp.add_argument(
         "--bbox-mode",
-        choices=["auto", "letterbox", "off"],
+        choices=["auto", "auto2", "letterbox", "off"],
         default="letterbox",
         help="BBox correction mode. Default: letterbox",
+    )
+    argp.add_argument(
+        "--anchor-box-to-label",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Force bbox top-left to follow label position. Default: enabled",
     )
     argp.add_argument(
         "--debug-bboxes",
@@ -495,6 +557,7 @@ def main():
     print(f"Display:      {source_w}x{source_h}")
     print(f"Infer config: {infer_config}")
     print(f"BBox mode:    {args.bbox_mode}")
+    print(f"Anchor label: {args.anchor_box_to_label}")
 
     pipeline = Gst.Pipeline.new("deepstream-yolo-parser-pipeline")
 
@@ -579,6 +642,7 @@ def main():
             model_w=model_w,
             model_h=model_h,
             bbox_mode=args.bbox_mode,
+            anchor_box_to_label=args.anchor_box_to_label,
             debug_bboxes=args.debug_bboxes,
             debug_frames=args.debug_frames,
         ),

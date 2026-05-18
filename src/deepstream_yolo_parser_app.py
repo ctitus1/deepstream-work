@@ -11,7 +11,6 @@ import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
-
 from gi.repository import GLib, Gst, GstPbutils
 
 import pyds
@@ -22,78 +21,52 @@ DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d4.ts"
 SETUP_SCRIPT = PROJECT_DIR / "scripts/setup_and_export_yolo.sh"
 
 PERSON_CLASS_ID = 0
-CACHE_POLICY = "parser_bbox_default_size_preferred_v4"
+CACHE_POLICY = "parser_line_osd_timing_v1"
 
 
-def model_stem_from_name(model: str) -> str:
-    name = Path(model).name
-    return name[:-3] if name.endswith(".pt") else name
+def discover_size(path: Path) -> tuple[int, int]:
+    info = GstPbutils.Discoverer.new(5 * Gst.SECOND).discover_uri(path.resolve().as_uri())
+    stream = info.get_video_streams()[0]
+    return int(stream.get_width()), int(stream.get_height())
 
 
-def discover_video_size(path: Path) -> tuple[int, int]:
-    uri = path.resolve().as_uri()
-    discoverer = GstPbutils.Discoverer.new(5 * Gst.SECOND)
-    info = discoverer.discover_uri(uri)
-
-    for stream in info.get_video_streams():
-        width = stream.get_width()
-        height = stream.get_height()
-        if width and height:
-            return int(width), int(height)
-
-    raise RuntimeError(f"Could not discover video size for {path}")
+def model_stem(model: str) -> str:
+    return Path(model).stem
 
 
-def get_onnx_input_size(onnx_path: Path) -> tuple[int, int]:
-    python_bin = PROJECT_DIR / ".venv-yolo/bin/python"
-
-    if not python_bin.exists():
-        raise FileNotFoundError(
-            f"Missing {python_bin}. The export script should create this venv."
-        )
-
-    code = f"""
-import onnx
-m = onnx.load({str(onnx_path)!r})
-x = m.graph.input[0]
-dims = [d.dim_value if d.dim_value else d.dim_param for d in x.type.tensor_type.shape.dim]
-print(int(dims[3]), int(dims[2]))
-"""
-
-    result = subprocess.run(
-        [str(python_bin), "-c", code],
-        check=True,
-        text=True,
-        capture_output=True,
+def onnx_size(path: Path) -> tuple[int, int]:
+    code = (
+        "import onnx;"
+        f"m=onnx.load({str(path)!r});"
+        "d=[x.dim_value or x.dim_param for x in m.graph.input[0].type.tensor_type.shape.dim];"
+        "print(int(d[3]), int(d[2]))"
     )
+    out = subprocess.check_output(
+        [str(PROJECT_DIR / ".venv-yolo/bin/python"), "-c", code],
+        text=True,
+    )
+    return tuple(map(int, out.split()))
 
-    w, h = result.stdout.strip().split()
-    return int(w), int(h)
 
-
-def cached_paths(model_stem: str, long_side: int, model_w: int, model_h: int) -> dict[str, Path]:
-    tag = f"{model_stem}_{long_side}_{model_w}x{model_h}"
-
+def paths(stem: str, long_side: int, w: int, h: int) -> dict[str, Path]:
+    tag = f"{stem}_{long_side}_{w}x{h}"
     return {
-        "tag": tag,
         "onnx": PROJECT_DIR / "models" / f"{tag}.onnx",
         "meta": PROJECT_DIR / "models" / f"{tag}.meta.json",
         "engine": PROJECT_DIR / "models" / f"{tag}.onnx_b1_gpu0_fp16.engine",
-        "infer_config": PROJECT_DIR / "configs" / f"config_infer_primary_{tag}.txt",
+        "config": PROJECT_DIR / "configs" / f"config_infer_primary_{tag}.txt",
     }
 
 
-def write_infer_config(paths: dict[str, Path]) -> None:
-    paths["infer_config"].write_text(
+def write_config(p: dict[str, Path]) -> None:
+    p["config"].write_text(
         f"""[property]
 gpu-id=0
 net-scale-factor=0.00392156862745098
 model-color-format=0
-
-onnx-file={paths["onnx"]}
-model-engine-file={paths["engine"]}
+onnx-file={p["onnx"]}
+model-engine-file={p["engine"]}
 labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
-
 batch-size=1
 network-mode=2
 num-detected-classes=80
@@ -101,22 +74,14 @@ interval=0
 gie-unique-id=1
 process-mode=1
 network-type=0
-
 parse-bbox-func-name=NvDsInferParseYolo
 custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
 output-blob-names=output
-
 maintain-aspect-ratio=1
 symmetric-padding=1
-
 cluster-mode=2
 
 [class-attrs-all]
-pre-cluster-threshold=0.25
-nms-iou-threshold=0.45
-topk=300
-
-[class-attrs-0]
 pre-cluster-threshold=0.25
 nms-iou-threshold=0.45
 topk=300
@@ -124,937 +89,310 @@ topk=300
     )
 
 
-def cache_is_valid(paths: dict[str, Path], model_w: int, model_h: int) -> bool:
-    if not paths["onnx"].exists() or not paths["meta"].exists():
-        return False
+def ensure_model(model: str, stream: Path, long_side: int, src_w: int, src_h: int) -> tuple[int, int, Path]:
+    stem = model_stem(model)
+    cached = sorted((PROJECT_DIR / "models").glob(f"{stem}_{long_side}_*.onnx"))
 
-    actual_w, actual_h = get_onnx_input_size(paths["onnx"])
-    if actual_w != model_w or actual_h != model_h:
-        return False
-
-    try:
-        meta = json.loads(paths["meta"].read_text())
-    except Exception:
-        return False
-
-    return (
-        meta.get("cache_policy") == CACHE_POLICY
-        and int(meta.get("model_width", -1)) == model_w
-        and int(meta.get("model_height", -1)) == model_h
-    )
-
-
-def delete_stale_cache(model_stem: str, long_side: int) -> None:
-    for onnx_path in sorted((PROJECT_DIR / "models").glob(f"{model_stem}_{long_side}_*.onnx")):
-        stem = onnx_path.stem
-        for stale in [
-            onnx_path,
-            PROJECT_DIR / "models" / f"{stem}.meta.json",
-            PROJECT_DIR / "models" / f"{stem}.onnx_b1_gpu0_fp16.engine",
-            PROJECT_DIR / "configs" / f"config_infer_primary_{stem}.txt",
-        ]:
-            stale.unlink(missing_ok=True)
-
-
-def ensure_model_and_config(
-    model: str,
-    stream: Path,
-    long_side: int,
-    source_w: int,
-    source_h: int,
-) -> tuple[int, int, Path]:
-    model_stem = model_stem_from_name(model)
-
-    for onnx_path in sorted((PROJECT_DIR / "models").glob(f"{model_stem}_{long_side}_*.onnx")):
-        actual_w, actual_h = get_onnx_input_size(onnx_path)
-        paths = cached_paths(model_stem, long_side, actual_w, actual_h)
-
-        if onnx_path == paths["onnx"] and cache_is_valid(paths, actual_w, actual_h):
-            write_infer_config(paths)
-            return actual_w, actual_h, paths["infer_config"]
-
-    delete_stale_cache(model_stem, long_side)
-
-    if not SETUP_SCRIPT.exists():
-        raise FileNotFoundError(f"Missing export/setup script: {SETUP_SCRIPT}")
-
-    print(f"No valid cached {model_stem} model for long_side={long_side}.")
-    print("Exporting ONNX with setup script...")
+    if cached:
+        w, h = onnx_size(cached[0])
+        p = paths(stem, long_side, w, h)
+        write_config(p)
+        return w, h, p["config"]
 
     subprocess.run(
         [str(SETUP_SCRIPT), model, str(long_side), str(stream.relative_to(PROJECT_DIR))],
-        cwd=str(PROJECT_DIR),
+        cwd=PROJECT_DIR,
         check=True,
     )
 
-    base_onnx = PROJECT_DIR / "models" / f"{model_stem}.onnx"
-    if not base_onnx.exists():
-        raise FileNotFoundError(f"Setup did not create {base_onnx}")
+    base = PROJECT_DIR / "models" / f"{stem}.onnx"
+    w, h = onnx_size(base)
+    p = paths(stem, long_side, w, h)
 
-    actual_w, actual_h = get_onnx_input_size(base_onnx)
-    paths = cached_paths(model_stem, long_side, actual_w, actual_h)
-
-    shutil.copy2(base_onnx, paths["onnx"])
-
-    paths["meta"].write_text(
+    shutil.copy2(base, p["onnx"])
+    p["meta"].write_text(
         json.dumps(
             {
-                "model": model_stem,
-                "model_arg": model,
-                "requested_long_side": long_side,
-                "source_stream": str(stream.relative_to(PROJECT_DIR)),
-                "source_width": source_w,
-                "source_height": source_h,
-                "model_width": actual_w,
-                "model_height": actual_h,
-                "onnx": str(paths["onnx"].relative_to(PROJECT_DIR)),
-                "engine": str(paths["engine"].relative_to(PROJECT_DIR)),
-                "labels": "models/coco_labels.txt",
+                "model": stem,
+                "source_width": src_w,
+                "source_height": src_h,
+                "model_width": w,
+                "model_height": h,
                 "cache_policy": CACHE_POLICY,
-                "note": "DeepStream-Yolo parser path. Non-default custom input sizes are allowed but may have unreliable bbox metadata; default-size YOLO exports are preferred.",
             },
             indent=2,
         )
         + "\n"
     )
-
-    write_infer_config(paths)
-
-    print(f"Actual ONNX input: {actual_w}x{actual_h}")
-    print(f"Cached ONNX:       {paths['onnx']}")
-    print(f"Infer config:      {paths['infer_config']}")
-    print(f"Engine path:       {paths['engine']}")
-    print("Engine will be generated by nvinfer on first run if missing.")
-
-    return actual_w, actual_h, paths["infer_config"]
+    write_config(p)
+    return w, h, p["config"]
 
 
-def clamp(value, low, high):
-    return max(low, min(high, value))
+def add_line_box(batch_meta, frame_meta, left, top, width, height, label) -> None:
+    x1, y1 = round(left), round(top)
+    x2, y2 = round(left + width), round(top + height)
 
+    frame_h = int(getattr(frame_meta, "source_frame_height", 0) or 1080)
+    font_size = max(1, round(frame_h * 0.005))
 
-def box_tuple(rect):
-    return float(rect.left), float(rect.top), float(rect.width), float(rect.height)
+    meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+    meta.num_lines = 4
+    meta.num_labels = 1
 
+    line_width = 3
 
-def box_is_usable(left, top, width, height, frame_w, frame_h):
-    if width < 2 or height < 2:
-        return False
-    if left >= frame_w - 1 or top >= frame_h - 1:
-        return False
-    if left + width <= 1 or top + height <= 1:
-        return False
-    return True
+    lines = (
+        (x1, y1, x2, y1),
+        (x2, y1, x2, y2),
+        (x2, y2, x1, y2),
+        (x1, y2, x1, y1),
+    )
 
-
-def clamp_rect(rect, frame_w, frame_h):
-    left = clamp(float(rect.left), 0.0, frame_w - 1.0)
-    top = clamp(float(rect.top), 0.0, frame_h - 1.0)
-    right = clamp(float(rect.left + rect.width), 0.0, frame_w - 1.0)
-    bottom = clamp(float(rect.top + rect.height), 0.0, frame_h - 1.0)
-
-    if right <= left:
-        right = min(frame_w - 1.0, left + 2.0)
-    if bottom <= top:
-        bottom = min(frame_h - 1.0, top + 2.0)
-
-    rect.left = float(left)
-    rect.top = float(top)
-    rect.width = float(max(0.0, right - left))
-    rect.height = float(max(0.0, bottom - top))
-
-
-def transform_model_rect_to_frame_values(left, top, width, height, frame_w, frame_h, model_w, model_h):
-    scale = min(model_w / frame_w, model_h / frame_h)
-    resized_w = frame_w * scale
-    resized_h = frame_h * scale
-    pad_x = (model_w - resized_w) / 2.0
-    pad_y = (model_h - resized_h) / 2.0
-
-    out_left = (left - pad_x) / scale
-    out_top = (top - pad_y) / scale
-    out_width = width / scale
-    out_height = height / scale
-
-    out_right = out_left + out_width
-    out_bottom = out_top + out_height
-
-    out_left = clamp(out_left, 0.0, frame_w - 1.0)
-    out_top = clamp(out_top, 0.0, frame_h - 1.0)
-    out_right = clamp(out_right, 0.0, frame_w - 1.0)
-    out_bottom = clamp(out_bottom, 0.0, frame_h - 1.0)
-
-    return out_left, out_top, max(0.0, out_right - out_left), max(0.0, out_bottom - out_top)
-
-
-def apply_rect(rect, values):
-    rect.left = float(values[0])
-    rect.top = float(values[1])
-    rect.width = float(values[2])
-    rect.height = float(values[3])
-
-
-
-def add_display_line_box(batch_meta, frame_meta, left, top, width, height, line_width=3):
-    """Draw an axis-aligned rectangle using four NvOSD line segments.
-
-    This bypasses nvdsosd's object rectangle renderer. Useful when object
-    rect_params metadata is correct but rendered bbox pixels are intermittently
-    slanted/skewed.
-    """
-    x1 = int(round(left))
-    y1 = int(round(top))
-    x2 = int(round(left + width))
-    y2 = int(round(top + height))
-
-    display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-    display_meta.num_lines = 4
-
-    lines = [
-        (x1, y1, x2, y1),  # top
-        (x2, y1, x2, y2),  # right
-        (x2, y2, x1, y2),  # bottom
-        (x1, y2, x1, y1),  # left
-    ]
-
-    for i, (lx1, ly1, lx2, ly2) in enumerate(lines):
-        line = display_meta.line_params[i]
-        line.x1 = lx1
-        line.y1 = ly1
-        line.x2 = lx2
-        line.y2 = ly2
+    for line, coords in zip(meta.line_params, lines):
+        line.x1, line.y1, line.x2, line.y2 = coords
         line.line_width = line_width
         line.line_color.set(0.0, 1.0, 0.0, 1.0)
 
-    pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+    text = meta.text_params[0]
+    text.display_text = label
+    # Align text flush with the left edge of the box and directly above
+    # the top border, accounting for the line width.
+    line_width = 3
+    text.x_offset = max(0, x1 - line_width)
+
+    # Put the text above the box so the bottom of the label is flush with
+    # the top edge of the top line.
+    text.y_offset = max(0, y1 - round(3.5 * font_size) - line_width)
+    text.font_params.font_name = "Serif"
+    text.font_params.font_size = font_size
+    text.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+    text.set_bg_clr = 1
+    text.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+
+    pyds.nvds_add_display_meta_to_frame(frame_meta, meta)
 
 
-def bbox_correction_probe(
-    model_w,
-    model_h,
-    bbox_mode,
-    anchor_box_to_label,
-    debug_bboxes,
-    debug_frames,
-    line_boxes,
-):
-    def _probe(_pad, info, _user_data):
-        gst_buffer = info.get_buffer()
-        if not gst_buffer:
-            return Gst.PadProbeReturn.OK
+def bbox_probe(_pad, info, _data):
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
+    frame_list = batch_meta.frame_meta_list
 
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-        if not batch_meta:
-            return Gst.PadProbeReturn.OK
+    while frame_list:
+        frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+        obj_list = frame_meta.obj_meta_list
 
-        l_frame = batch_meta.frame_meta_list
+        while obj_list:
+            obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+            rect = obj.rect_params
+            rect.border_width = 0
 
-        while l_frame is not None:
-            try:
-                frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-            except StopIteration:
-                break
-
-            frame_w = int(getattr(frame_meta, "source_frame_width", 0) or 0)
-            frame_h = int(getattr(frame_meta, "source_frame_height", 0) or 0)
-
-            if frame_w <= 0 or frame_h <= 0:
-                frame_w = int(getattr(frame_meta, "pipeline_width", 0) or model_w)
-                frame_h = int(getattr(frame_meta, "pipeline_height", 0) or model_h)
-
-            frame_debug = debug_bboxes and frame_meta.frame_num < debug_frames
-            l_obj = frame_meta.obj_meta_list
-
-            while l_obj is not None:
-                next_obj = l_obj.next
-
-                try:
-                    obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-                except StopIteration:
-                    break
-
-                if int(obj_meta.class_id) != PERSON_CLASS_ID:
-                    obj_meta.rect_params.border_width = 0
-                    obj_meta.text_params.display_text = ""
-                    l_obj = next_obj
-                    continue
-
-                rect = obj_meta.rect_params
-                orig = box_tuple(rect)
-
-                right = orig[0] + orig[2]
-                bottom = orig[1] + orig[3]
-
-                looks_like_model_space = (
-                    frame_w > model_w
-                    and frame_h > model_h
-                    and right <= model_w * 1.05
-                    and bottom <= model_h * 1.05
+            if obj.class_id == PERSON_CLASS_ID:
+                add_line_box(
+                    batch_meta,
+                    frame_meta,
+                    rect.left,
+                    rect.top,
+                    rect.width,
+                    rect.height,
+                    f"person {obj.confidence:.2f}",
                 )
 
-                corrected = transform_model_rect_to_frame_values(
-                    orig[0],
-                    orig[1],
-                    orig[2],
-                    orig[3],
-                    frame_w,
-                    frame_h,
-                    model_w,
-                    model_h,
-                )
+            obj.text_params.display_text = ""
 
-                label_x = float(getattr(obj_meta.text_params, "x_offset", 0) or 0)
-                label_y = float(getattr(obj_meta.text_params, "y_offset", 0) or 0)
+            obj_list = obj_list.next
 
-                def dist_to_label(box):
-                    x, y, _w, _h = box
-                    return abs(x - label_x) + abs(y - label_y)
+        frame_list = frame_list.next
 
-                correction_used = "none"
-
-                if bbox_mode == "letterbox" or (bbox_mode == "auto" and looks_like_model_space):
-                    if box_is_usable(*corrected, frame_w, frame_h):
-                        apply_rect(rect, corrected)
-                        correction_used = "letterbox"
-                    else:
-                        apply_rect(rect, orig)
-                        correction_used = "fallback-original"
-
-                elif bbox_mode == "auto2":
-                    orig_ok = box_is_usable(*orig, frame_w, frame_h)
-                    corrected_ok = box_is_usable(*corrected, frame_w, frame_h)
-
-                    if corrected_ok and not orig_ok:
-                        apply_rect(rect, corrected)
-                        correction_used = "auto2-letterbox-only-valid"
-                    elif orig_ok and not corrected_ok:
-                        apply_rect(rect, orig)
-                        correction_used = "auto2-original-only-valid"
-                    elif orig_ok and corrected_ok:
-                        if dist_to_label(corrected) < dist_to_label(orig):
-                            apply_rect(rect, corrected)
-                            correction_used = "auto2-letterbox-nearer-label"
-                        else:
-                            apply_rect(rect, orig)
-                            correction_used = "auto2-original-nearer-label"
-                    else:
-                        apply_rect(rect, orig)
-                        correction_used = "auto2-fallback-original"
-
-                elif bbox_mode == "off":
-                    apply_rect(rect, orig)
-                    correction_used = "off"
-
-                elif bbox_mode == "auto":
-                    apply_rect(rect, orig)
-                    correction_used = "auto-original"
-
-                clamp_rect(rect, frame_w, frame_h)
-
-                if anchor_box_to_label and label_x > 0 and label_y > 0:
-                    rect.left = float(clamp(label_x, 0.0, frame_w - 1.0))
-                    rect.top = float(clamp(label_y, 0.0, frame_h - 1.0))
-                    rect.width = float(clamp(rect.width, 2.0, frame_w - rect.left))
-                    rect.height = float(clamp(rect.height, 2.0, frame_h - rect.top))
-
-                # Force integer pixel coordinates before nvdsosd.
-                # Some OSD/display paths behave poorly with fractional rect values.
-                left_i = int(round(float(rect.left)))
-                top_i = int(round(float(rect.top)))
-                right_i = int(round(float(rect.left + rect.width)))
-                bottom_i = int(round(float(rect.top + rect.height)))
-
-                left_i = max(0, min(left_i, frame_w - 1))
-                top_i = max(0, min(top_i, frame_h - 1))
-                right_i = max(left_i + 2, min(right_i, frame_w - 1))
-                bottom_i = max(top_i + 2, min(bottom_i, frame_h - 1))
-
-                rect.left = float(left_i)
-                rect.top = float(top_i)
-                rect.width = float(right_i - left_i)
-                rect.height = float(bottom_i - top_i)
-
-                if line_boxes:
-                    # Do not let nvdsosd draw the object rectangle. The metadata is
-                    # correct, but the object-bbox renderer has shown intermittent
-                    # slanted pixels in this container/display path.
-                    rect.border_width = 0
-                    rect.has_bg_color = 0
-
-                    # Draw a replacement axis-aligned bbox as four OSD line segments.
-                    add_display_line_box(
-                        batch_meta=batch_meta,
-                        frame_meta=frame_meta,
-                        left=rect.left,
-                        top=rect.top,
-                        width=rect.width,
-                        height=rect.height,
-                        line_width=3,
-                    )
-                else:
-                    # Debug/fallback mode: use nvdsosd's object rectangle renderer.
-                    rect.border_width = 3
-                    rect.has_bg_color = 0
-                    rect.border_color.set(0.0, 1.0, 0.0, 1.0)
-
-                confidence = float(obj_meta.confidence)
-                obj_meta.text_params.display_text = f"person {confidence:.2f}"
-
-                # Force label and box to stay attached.
-                obj_meta.text_params.x_offset = int(rect.left)
-                obj_meta.text_params.y_offset = max(0, int(rect.top) - 10)
-
-                final = box_tuple(rect)
-
-                if frame_debug:
-                    print(
-                        "BBOX_DEBUG "
-                        f"frame={frame_meta.frame_num} "
-                        f"conf={confidence:.3f} "
-                        f"frame_size={frame_w}x{frame_h} "
-                        f"model_size={model_w}x{model_h} "
-                        f"mode={bbox_mode} "
-                        f"anchor_label={anchor_box_to_label} "
-                        f"looks_model={looks_like_model_space} "
-                        f"correction={correction_used} "
-                        f"label=({label_x:.1f},{label_y:.1f}) "
-                        f"orig=({orig[0]:.1f},{orig[1]:.1f},{orig[2]:.1f},{orig[3]:.1f}) "
-                        f"letterbox=({corrected[0]:.1f},{corrected[1]:.1f},{corrected[2]:.1f},{corrected[3]:.1f}) "
-                        f"final=({final[0]:.1f},{final[1]:.1f},{final[2]:.1f},{final[3]:.1f})",
-                        flush=True,
-                    )
-
-                l_obj = next_obj
-
-            l_frame = l_frame.next
-
-        return Gst.PadProbeReturn.OK
-
-    return _probe
+    return Gst.PadProbeReturn.OK
 
 
-def osd_meta_probe(label):
-    def _probe(_pad, info, _user_data):
-        gst_buffer = info.get_buffer()
-        if not gst_buffer:
-            return Gst.PadProbeReturn.OK
+class TimeLog:
+    def __init__(self, fps_interval: float = 1.0, timing_interval: float = 10.0):
+        self.fps_interval = fps_interval
+        self.timing_interval = timing_interval
+        self.last_fps_time = time.perf_counter()
+        self.last_timing_time = self.last_fps_time
+        self.frames = 0
+        self.last_frames = 0
+        self.times = {}
 
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-        if not batch_meta:
-            return Gst.PadProbeReturn.OK
-
-        l_frame = batch_meta.frame_meta_list
-        while l_frame is not None:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-
-            if frame_meta.frame_num < 50:
-                l_obj = frame_meta.obj_meta_list
-                while l_obj is not None:
-                    obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-                    if int(obj_meta.class_id) == PERSON_CLASS_ID:
-                        r = obj_meta.rect_params
-                        print(
-                            f"OSD_META_{label} "
-                            f"frame={frame_meta.frame_num} "
-                            f"left={float(r.left):.1f} top={float(r.top):.1f} "
-                            f"width={float(r.width):.1f} height={float(r.height):.1f} "
-                            f"border={int(r.border_width)} "
-                            f"text=({int(obj_meta.text_params.x_offset)},"
-                            f"{int(obj_meta.text_params.y_offset)})",
-                            flush=True,
-                        )
-                    l_obj = l_obj.next
-
-            l_frame = l_frame.next
-
-        return Gst.PadProbeReturn.OK
-
-    return _probe
-
-
-
-def fps_probe(interval_sec=5.0):
-    state = {
-        "last_time": time.monotonic(),
-        "last_frames": 0,
-        "frames": 0,
-    }
-
-    def _probe(_pad, info, _user_data):
-        gst_buffer = info.get_buffer()
-        if not gst_buffer:
-            return Gst.PadProbeReturn.OK
-
-        state["frames"] += 1
-        now = time.monotonic()
-        elapsed = now - state["last_time"]
-
-        if elapsed >= interval_sec:
-            delta_frames = state["frames"] - state["last_frames"]
-            fps = delta_frames / elapsed if elapsed > 0 else 0.0
-            print(f"FPS: {fps:.2f} over {elapsed:.1f}s", flush=True)
-
-            state["last_time"] = now
-            state["last_frames"] = state["frames"]
-
-        return Gst.PadProbeReturn.OK
-
-    return _probe
-
-
-
-class PerfMonitor:
-    def __init__(self, timing_interval_sec=10.0, fps_interval_sec=1.0):
-        # These are all after nvstreammux, so NvDsFrameMeta.frame_num exists.
-        self.stages = ["muxed", "infer_done", "converted", "osd_done", "sink"]
-        self.stage_pairs = list(zip(self.stages[:-1], self.stages[1:]))
-
-        self.timing_interval_sec = float(timing_interval_sec)
-        self.fps_interval_sec = float(fps_interval_sec)
-
-        self.frame_times = {}
-        self.samples = {f"{a}->{b}": [] for a, b in self.stage_pairs}
-        self.samples["total_mux_to_sink"] = []
-
-        now = time.perf_counter()
-        self.last_fps_time = now
-        self.last_timing_time = now
-        self.frame_count = 0
-        self.last_fps_count = 0
-
-    @staticmethod
-    def _summary_ms(values):
-        if not values:
-            return "n=0"
-
-        vals = sorted(v * 1000.0 for v in values)
-        n = len(vals)
-
-        def pct(q):
-            if n == 1:
-                return vals[0]
-            idx = int(round((q / 100.0) * (n - 1)))
-            idx = max(0, min(idx, n - 1))
-            return vals[idx]
-
-        avg = sum(vals) / n
-        return (
-            f"n={n} "
-            f"avg={avg:.2f}ms "
-            f"p50={pct(50):.2f}ms "
-            f"p95={pct(95):.2f}ms "
-            f"max={vals[-1]:.2f}ms"
-        )
-
-    @staticmethod
-    def _frame_keys_from_buffer(gst_buffer):
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-        if not batch_meta:
-            return []
-
-        keys = []
-        l_frame = batch_meta.frame_meta_list
-
-        while l_frame is not None:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-            keys.append(int(frame_meta.frame_num))
-            l_frame = l_frame.next
-
-        return keys
-
-    def _record_completed_frame(self, key):
-        data = self.frame_times.get(key)
-        if not data:
-            return
-
-        if not all(stage in data for stage in self.stages):
-            return
-
-        for a, b in self.stage_pairs:
-            dt = data[b] - data[a]
-            if dt >= 0:
-                self.samples[f"{a}->{b}"].append(dt)
-
-        total = data["sink"] - data["muxed"]
-        if total >= 0:
-            self.samples["total_mux_to_sink"].append(total)
-
-        self.frame_times.pop(key, None)
-
-        if len(self.frame_times) > 1000:
-            for old_key in list(self.frame_times.keys())[:200]:
-                self.frame_times.pop(old_key, None)
-
-    def _maybe_print_fps(self):
+    def fps_probe(self, _pad, info, _data):
+        self.frames += 1
         now = time.perf_counter()
         elapsed = now - self.last_fps_time
 
-        if elapsed < self.fps_interval_sec:
-            return
+        if elapsed >= self.fps_interval:
+            fps = (self.frames - self.last_frames) / elapsed
+            print(f"FPS {fps:.2f}", flush=True)
+            self.last_fps_time = now
+            self.last_frames = self.frames
 
-        delta_frames = self.frame_count - self.last_fps_count
-        fps = delta_frames / elapsed if elapsed > 0 else 0.0
-        print(f"PERF_FPS fps={fps:.2f} interval={elapsed:.2f}s frames={delta_frames}", flush=True)
+        return Gst.PadProbeReturn.OK
 
-        self.last_fps_time = now
-        self.last_fps_count = self.frame_count
-
-    def _maybe_print_timing(self):
-        now = time.perf_counter()
-        elapsed = now - self.last_timing_time
-
-        if elapsed < self.timing_interval_sec:
-            return
-
-        print(f"PERF_TIMING interval={elapsed:.2f}s", flush=True)
-
-        for name in [
-            "muxed->infer_done",
-            "infer_done->converted",
-            "converted->osd_done",
-            "osd_done->sink",
-            "total_mux_to_sink",
-        ]:
-            print(f"  {name}: {self._summary_ms(self.samples[name])}", flush=True)
-
-        self.samples = {f"{a}->{b}": [] for a, b in self.stage_pairs}
-        self.samples["total_mux_to_sink"] = []
-        self.last_timing_time = now
-
-    def probe(self, stage_name):
-        def _probe(_pad, info, _user_data):
-            gst_buffer = info.get_buffer()
-            if not gst_buffer:
-                return Gst.PadProbeReturn.OK
-
+    def mark(self, stage: str):
+        def _probe(_pad, info, _data):
             now = time.perf_counter()
-            keys = self._frame_keys_from_buffer(gst_buffer)
+            batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
 
-            if not keys:
-                return Gst.PadProbeReturn.OK
+            if batch_meta:
+                frame_list = batch_meta.frame_meta_list
+                while frame_list:
+                    frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+                    self.times.setdefault(int(frame_meta.frame_num), {})[stage] = now
+                    frame_list = frame_list.next
 
-            for key in keys:
-                data = self.frame_times.setdefault(key, {})
-                data[stage_name] = now
-
-                if stage_name == "sink":
-                    self.frame_count += 1
-                    self._record_completed_frame(key)
-
-            if stage_name == "sink":
-                self._maybe_print_fps()
-                self._maybe_print_timing()
+            if stage == "sink":
+                self._print_timing(now)
 
             return Gst.PadProbeReturn.OK
 
         return _probe
 
+    def _print_timing(self, now: float) -> None:
+        if now - self.last_timing_time < self.timing_interval:
+            return
+
+        rows = []
+        for frame_num, t in list(self.times.items()):
+            if all(k in t for k in ("mux", "infer", "convert", "osd", "sink")):
+                rows.append(
+                    (
+                        t["infer"] - t["mux"],
+                        t["convert"] - t["infer"],
+                        t["osd"] - t["convert"],
+                        t["sink"] - t["osd"],
+                        t["sink"] - t["mux"],
+                    )
+                )
+                del self.times[frame_num]
+
+        def avg_ms(i: int) -> float:
+            return 1000.0 * sum(row[i] for row in rows) / len(rows) if rows else 0.0
+
+        print(
+            "TIME "
+            f"n={len(rows)} "
+            f"infer={avg_ms(0):.2f}ms "
+            f"convert={avg_ms(1):.2f}ms "
+            f"osd={avg_ms(2):.2f}ms "
+            f"sink={avg_ms(3):.2f}ms "
+            f"total={avg_ms(4):.2f}ms",
+            flush=True,
+        )
+
+        self.last_timing_time = now
 
 
-def make_element(factory, name):
-    elem = Gst.ElementFactory.make(factory, name)
-    if elem is None:
-        raise RuntimeError(f"Could not create element: {factory} ({name})")
-    return elem
+def element(factory: str, name: str):
+    e = Gst.ElementFactory.make(factory, name)
+    if e is None:
+        raise RuntimeError(f"Missing GStreamer element: {factory}")
+    return e
 
 
-def on_demux_pad_added(_demux, pad, parser):
-    caps = pad.get_current_caps() or pad.query_caps(None)
-    caps_str = caps.to_string()
-
-    if "video/x-h265" not in caps_str:
-        return
-
-    sink_pad = parser.get_static_pad("sink")
-    if sink_pad.is_linked():
-        return
-
-    result = pad.link(sink_pad)
-    if result != Gst.PadLinkReturn.OK:
-        raise RuntimeError(f"Failed to link demux to h265parse: {result}")
+def on_pad_added(_demux, pad, parser):
+    if "video/x-h265" in (pad.get_current_caps() or pad.query_caps(None)).to_string():
+        pad.link(parser.get_static_pad("sink"))
 
 
-def on_bus_message(_bus, message, loop):
-    if message.type == Gst.MessageType.EOS:
-        print("EOS")
+def on_message(_bus, msg, loop):
+    if msg.type == Gst.MessageType.ERROR:
+        err, dbg = msg.parse_error()
+        print(f"ERROR: {err}\nDEBUG: {dbg}", file=sys.stderr)
         loop.quit()
-
-    elif message.type == Gst.MessageType.ERROR:
-        err, debug = message.parse_error()
-        print(f"ERROR: {err}", file=sys.stderr)
-        print(f"DEBUG: {debug}", file=sys.stderr)
+    elif msg.type == Gst.MessageType.EOS:
         loop.quit()
-
     return True
 
 
 def main():
-    argp = argparse.ArgumentParser(description="DeepStream-Yolo parser app")
-    argp.add_argument("--model", default="yolo12x.pt", help="YOLO .pt model name/path")
-    argp.add_argument("--long-side", type=int, default=640, help="Model long side")
-    argp.add_argument("--stream", default=str(DEFAULT_STREAM), help="Input video/stream path")
-    argp.add_argument(
-        "--bbox-mode",
-        choices=["auto", "auto2", "letterbox", "off"],
-        default="letterbox",
-        help="BBox correction mode. Default: letterbox",
-    )
-    argp.add_argument(
-        "--anchor-box-to-label",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Force bbox top-left to follow label position. Default: disabled",
-    )
-    argp.add_argument(
-        "--debug-bboxes",
-        action="store_true",
-        help="Print bbox coordinate diagnostics for early frames",
-    )
-    argp.add_argument(
-        "--debug-frames",
-        type=int,
-        default=10,
-        help="Number of initial frames to print bbox diagnostics for",
-    )
-    argp.add_argument(
-        "--debug-osd-meta",
-        action="store_true",
-        help="Print object metadata immediately before and after nvdsosd",
-    )
-    argp.add_argument(
-        "--line-boxes",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Draw boxes as NvDsDisplayMeta line segments instead of rect_params. Default: enabled",
-    )
-    argp.add_argument(
-        "--debug-perf",
-        action="store_true",
-        help="Print FPS every 1s and detailed stage timing every 10s",
-    )
-    argp.add_argument(
-        "--fps-interval",
-        type=float,
-        default=1.0,
-        help="FPS print interval when --debug-perf is enabled. Default: 1.0",
-    )
-    argp.add_argument(
-        "--timing-interval",
-        type=float,
-        default=10.0,
-        help="Detailed timing print interval when --debug-perf is enabled. Default: 10.0",
-    )
-    argp.add_argument(
-        "--osd-process-mode",
-        choices=["gpu", "cpu"],
-        default="gpu",
-        help="nvdsosd process mode. Default: gpu",
-    )
-    args = argp.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="yolo12x.pt")
+    ap.add_argument("--long-side", type=int, default=640)
+    ap.add_argument("--stream", default=str(DEFAULT_STREAM))
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
 
     Gst.init(None)
 
-    stream_path = Path(args.stream)
-    if not stream_path.is_absolute():
-        stream_path = PROJECT_DIR / stream_path
+    stream = Path(args.stream)
+    stream = stream if stream.is_absolute() else PROJECT_DIR / stream
 
-    if not stream_path.exists():
-        raise FileNotFoundError(f"Missing input video: {stream_path}")
+    src_w, src_h = discover_size(stream)
+    model_w, model_h, config = ensure_model(args.model, stream, args.long_side, src_w, src_h)
 
-    source_w, source_h = discover_video_size(stream_path)
+    print(f"video={src_w}x{src_h} model={model_w}x{model_h} config={config}")
 
-    model_w, model_h, infer_config = ensure_model_and_config(
-        model=args.model,
-        stream=stream_path,
-        long_side=args.long_side,
-        source_w=source_w,
-        source_h=source_h,
-    )
+    pipeline = Gst.Pipeline.new("yolo-parser")
 
-    print(f"Model:        {args.model}")
-    print(f"Input video:  {source_w}x{source_h}")
-    print(f"Model input:  {model_w}x{model_h}")
-    print(f"Display:      {source_w}x{source_h}")
-    print(f"Infer config: {infer_config}")
-    print(f"BBox mode:    {args.bbox_mode}")
-    print(f"Anchor label: {args.anchor_box_to_label}")
-    print(f"OSD mode:     {args.osd_process_mode}")
-    print(f"Line boxes:   {args.line_boxes}")
-    print(f"FPS interval: {args.fps_interval}s")
-    print(f"Debug perf:   {args.debug_perf}")
-    print(f"Timing intvl: {args.timing_interval}s")
+    source = element("filesrc", "source")
+    demux = element("tsdemux", "demux")
+    parser = element("h265parse", "parser")
+    decoder = element("nvv4l2decoder", "decoder")
+    queue = element("queue", "queue")
+    streammux = element("nvstreammux", "streammux")
+    pgie = element("nvinfer", "pgie")
+    convert = element("nvvideoconvert", "convert")
+    caps = element("capsfilter", "caps")
+    osd = element("nvdsosd", "osd")
+    sink = element("nveglglessink", "sink")
 
-    pipeline = Gst.Pipeline.new("deepstream-yolo-parser-pipeline")
-
-    source = make_element("filesrc", "file-source")
-    demux = make_element("tsdemux", "ts-demux")
-    parser = make_element("h265parse", "h265-parser")
-    decoder = make_element("nvv4l2decoder", "nvv4l2-decoder")
-    queue = make_element("queue", "decode-queue")
-    streammux = make_element("nvstreammux", "stream-muxer")
-    pgie = make_element("nvinfer", "primary-inference")
-    nvvidconv = make_element("nvvideoconvert", "nv-video-converter")
-    capsfilter = make_element("capsfilter", "display-capsfilter")
-    nvosd = make_element("nvdsosd", "nv-onscreendisplay")
-    sink = make_element("nveglglessink", "display-sink")
-
-    source.set_property("location", str(stream_path))
-
+    source.set_property("location", str(stream))
     streammux.set_property("batch-size", 1)
-    streammux.set_property("width", source_w)
-    streammux.set_property("height", source_h)
+    streammux.set_property("width", src_w)
+    streammux.set_property("height", src_h)
     streammux.set_property("batched-push-timeout", 40000)
-    streammux.set_property("live-source", 0)
-
-    pgie.set_property("config-file-path", str(infer_config))
-
-    capsfilter.set_property(
+    pgie.set_property("config-file-path", str(config))
+    caps.set_property(
         "caps",
         Gst.Caps.from_string(
-            f"video/x-raw(memory:NVMM), format=RGBA, width={source_w}, height={source_h}"
+            f"video/x-raw(memory:NVMM), format=RGBA, width={src_w}, height={src_h}"
         ),
     )
-
-    try:
-        nvosd.set_property("process-mode", 1 if args.osd_process_mode == "gpu" else 0)
-    except TypeError:
-        pass
-
-    try:
-        nvosd.set_property("display-bbox", 1)
-        nvosd.set_property("display-text", 1)
-    except TypeError:
-        pass
-
-    try:
-        sink.set_property("force-aspect-ratio", False)
-    except TypeError:
-        pass
-
+    osd.set_property("process-mode", 1)
+    osd.set_property("display-bbox", 1)
+    osd.set_property("display-text", 1)
     sink.set_property("sync", False)
     sink.set_property("qos", False)
 
-    for elem in [
-        source,
-        demux,
-        parser,
-        decoder,
-        queue,
-        streammux,
-        pgie,
-        nvvidconv,
-        capsfilter,
-        nvosd,
-        sink,
-    ]:
-        pipeline.add(elem)
+    for e in (source, demux, parser, decoder, queue, streammux, pgie, convert, caps, osd, sink):
+        pipeline.add(e)
 
-    if not source.link(demux):
-        raise RuntimeError("Failed to link filesrc -> tsdemux")
+    source.link(demux)
+    demux.connect("pad-added", on_pad_added, parser)
+    parser.link(decoder)
+    decoder.link(queue)
+    queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
+    streammux.link(pgie)
+    pgie.link(convert)
+    convert.link(caps)
+    caps.link(osd)
+    osd.link(sink)
 
-    demux.connect("pad-added", on_demux_pad_added, parser)
+    pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, bbox_probe, None)
 
-    if not parser.link(decoder):
-        raise RuntimeError("Failed to link h265parse -> nvv4l2decoder")
-
-    if not decoder.link(queue):
-        raise RuntimeError("Failed to link nvv4l2decoder -> queue")
-
-    mux_sink_pad = streammux.request_pad_simple("sink_0")
-    if mux_sink_pad is None:
-        mux_sink_pad = streammux.get_request_pad("sink_0")
-    if mux_sink_pad is None:
-        raise RuntimeError("Could not get nvstreammux sink_0 pad")
-
-    queue_src_pad = queue.get_static_pad("src")
-    if queue_src_pad.link(mux_sink_pad) != Gst.PadLinkReturn.OK:
-        raise RuntimeError("Failed to link queue -> nvstreammux")
-
-    if not streammux.link(pgie):
-        raise RuntimeError("Failed to link nvstreammux -> nvinfer")
-
-    if not pgie.link(nvvidconv):
-        raise RuntimeError("Failed to link nvinfer -> nvvideoconvert")
-
-    if not nvvidconv.link(capsfilter):
-        raise RuntimeError("Failed to link nvvideoconvert -> capsfilter")
-
-    if not capsfilter.link(nvosd):
-        raise RuntimeError("Failed to link capsfilter -> nvdsosd")
-
-    if not nvosd.link(sink):
-        raise RuntimeError("Failed to link nvdsosd -> sink")
-
-    pgie_src_pad = pgie.get_static_pad("src")
-    if pgie_src_pad is None:
-        raise RuntimeError("Could not get nvinfer src pad")
-
-    pgie_src_pad.add_probe(
-        Gst.PadProbeType.BUFFER,
-        bbox_correction_probe(
-            model_w=model_w,
-            model_h=model_h,
-            bbox_mode=args.bbox_mode,
-            anchor_box_to_label=args.anchor_box_to_label,
-            debug_bboxes=args.debug_bboxes,
-            debug_frames=args.debug_frames,
-            line_boxes=args.line_boxes,
-        ),
-        None,
-    )
-
-    if args.debug_osd_meta:
-        osd_sink_pad = nvosd.get_static_pad("sink")
-        osd_src_pad = nvosd.get_static_pad("src")
-
-        if osd_sink_pad is not None:
-            osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, osd_meta_probe("IN"), None)
-
-        if osd_src_pad is not None:
-            osd_src_pad.add_probe(Gst.PadProbeType.BUFFER, osd_meta_probe("OUT"), None)
-
-    if args.debug_perf:
-        perf = PerfMonitor(
-            timing_interval_sec=args.timing_interval,
-            fps_interval_sec=args.fps_interval,
-        )
-
-        perf_points = [
-            (streammux.get_static_pad("src"), "muxed"),
-            (pgie.get_static_pad("src"), "infer_done"),
-            (capsfilter.get_static_pad("src"), "converted"),
-            (nvosd.get_static_pad("src"), "osd_done"),
+    if args.debug:
+        timer = TimeLog()
+        sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, timer.fps_probe, None)
+        for pad, stage in (
+            (streammux.get_static_pad("src"), "mux"),
+            (pgie.get_static_pad("src"), "infer"),
+            (caps.get_static_pad("src"), "convert"),
+            (osd.get_static_pad("src"), "osd"),
             (sink.get_static_pad("sink"), "sink"),
-        ]
-
-        for pad, stage_name in perf_points:
-            if pad is not None:
-                pad.add_probe(Gst.PadProbeType.BUFFER, perf.probe(stage_name), None)
+        ):
+            pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
     loop = GLib.MainLoop()
-
     bus = pipeline.get_bus()
     bus.add_signal_watch()
-    bus.connect("message", on_bus_message, loop)
+    bus.connect("message", on_message, loop)
 
-    print("Starting pipeline...")
     pipeline.set_state(Gst.State.PLAYING)
 
     try:
-        Gst.debug_bin_to_dot_file_with_ts(
-            pipeline,
-            Gst.DebugGraphDetails.ALL,
-            "deepstream-yolo-parser-pipeline",
-        )
-    except Exception:
-        pass
-
-    try:
         loop.run()
-    except KeyboardInterrupt:
-        print("Interrupted")
-
-    pipeline.set_state(Gst.State.NULL)
+    finally:
+        pipeline.set_state(Gst.State.NULL)
 
 
 if __name__ == "__main__":

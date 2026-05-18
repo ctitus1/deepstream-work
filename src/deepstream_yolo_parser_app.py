@@ -128,7 +128,21 @@ def ensure_model(model: str, stream: Path, long_side: int, src_w: int, src_h: in
     return w, h, p["config"]
 
 
-def add_line_box(batch_meta, frame_meta, left, top, width, height, label) -> None:
+def conf_color(conf: float, min_conf: float = 0.25, max_conf: float = 1.0):
+    t = (conf - min_conf) / max(max_conf - min_conf, 1e-6)
+    t = max(0.0, min(1.0, t))
+
+    if t < 0.5:
+        # red -> yellow
+        u = t * 2.0
+        return 1.0, u, 0.0, 1.0
+
+    # yellow -> green
+    u = (t - 0.5) * 2.0
+    return 1.0 - u, 1.0, 0.0, 1.0
+
+
+def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color) -> None:
     x1, y1 = round(left), round(top)
     x2, y2 = round(left + width), round(top + height)
 
@@ -151,7 +165,7 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label) -> Non
     for line, coords in zip(meta.line_params, lines):
         line.x1, line.y1, line.x2, line.y2 = coords
         line.line_width = line_width
-        line.line_color.set(0.0, 1.0, 0.0, 1.0)
+        line.line_color.set(*color)
 
     text = meta.text_params[0]
     text.display_text = label
@@ -165,7 +179,7 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label) -> Non
     text.y_offset = max(0, y1 - round(3.5 * font_size) - line_width)
     text.font_params.font_name = "Serif"
     text.font_params.font_size = font_size
-    text.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+    text.font_params.font_color.set(*color)
     text.set_bg_clr = 1
     text.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
@@ -194,6 +208,7 @@ def bbox_probe(_pad, info, _data):
                     rect.width,
                     rect.height,
                     f"person {obj.confidence:.2f}",
+                    conf_color(float(obj.confidence)),
                 )
 
             obj.text_params.display_text = ""

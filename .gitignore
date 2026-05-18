@@ -65,3 +65,33 @@ models/*.engine
 
 # DeepStream-Yolo exporter temporary label output
 /labels.txt
+
+# Temporary Ultralytics download/test artifacts
+/bus.jpg
+/yolo*.pt
+
+# Large model artifacts
+models/*.pt
+models/*.engine
+models/*.onnx_b*_gpu*_fp*.engine
+
+# Build/source dependencies cloned by scripts
+external/
+
+# Runtime outputs
+outputs/
+
+# Temporary Ultralytics download/test artifacts
+/bus.jpg
+/yolo*.pt
+
+# Large model artifacts
+models/*.pt
+models/*.engine
+models/*.onnx_b*_gpu*_fp*.engine
+
+# Build/source dependencies cloned by scripts
+external/
+
+# Runtime outputs
+outputs/

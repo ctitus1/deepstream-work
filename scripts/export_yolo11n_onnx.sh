@@ -5,18 +5,10 @@ cd "$(dirname "$0")/.."
 
 source .venv-yolo/bin/activate
 
-mkdir -p models
+python external/DeepStream-Yolo/utils/export_yolo11.py \
+  -w /home/user/deepstream-work/models/yolo11n.pt \
+  -s 640 \
+  --opset 18 \
+  --simplify
 
-yolo export \
-  model=yolo11n.pt \
-  format=onnx \
-  opset=17 \
-  simplify=True \
-  imgsz=640 \
-  dynamic=False
-
-mv -f yolo11n.pt models/
-mv -f yolo11n.onnx models/
-
-echo "Created:"
-ls -lh models/yolo11n.pt models/yolo11n.onnx
+rm -f models/*.engine

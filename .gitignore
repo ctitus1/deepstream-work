@@ -62,3 +62,6 @@ lib/*.o
 # TensorRT generated engines
 models/*.engine
 *.engine
+
+# DeepStream-Yolo exporter temporary label output
+/labels.txt

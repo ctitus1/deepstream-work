@@ -1,0 +1,35 @@
+services:
+  deepstream-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: user
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+    image: deepstream-work:9.0
+    container_name: deepstream-dev
+    hostname: docker
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: ${DISPLAY}
+      CUDA_CACHE_DISABLE: "0"
+      NVIDIA_DRIVER_CAPABILITIES: all
+      QT_X11_NO_MITSHM: "1"
+      TERM: xterm-256color
+    volumes:
+      - .:/home/user/deepstream-work
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    working_dir: /home/user/deepstream-work
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

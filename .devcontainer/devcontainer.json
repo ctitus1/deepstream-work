@@ -1,0 +1,26 @@
+{
+  "name": "DeepStream 9.0 Dev",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "deepstream-dev",
+  "workspaceFolder": "/home/user/deepstream-work",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "user",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-python.python",
+        "ms-azuretools.vscode-docker",
+        "redhat.vscode-yaml",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "files.exclude": {
+          "**/__pycache__": true,
+          "**/.pytest_cache": true
+        }
+      }
+    }
+  }
+}

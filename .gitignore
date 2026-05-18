@@ -1,0 +1,31 @@
+# Runtime outputs
+outputs/
+data/
+streams/
+*.mp4
+*.mkv
+*.avi
+*.h264
+*.h265
+*.log
+*.tlog
+
+# Models can be huge; track deliberately with Git LFS if needed
+models/*
+!models/.gitkeep
+
+# Python/cache/build artifacts
+__pycache__/
+.pytest_cache/
+*.pyc
+build/
+dist/
+.cache/
+
+# VS Code local-only files
+.vscode/*.log
+
+# DeepStream generated files
+*.engine
+*.etlt_b*
+*.onnx_b*

@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "DeepStream: version",
+      "type": "shell",
+      "command": "deepstream-app --version-all",
+      "problemMatcher": []
+    },
+    {
+      "label": "DeepStream: test EGL sink",
+      "type": "shell",
+      "command": "gst-launch-1.0 -v videotestsrc num-buffers=300 ! video/x-raw,format=RGBA,width=1280,height=720 ! nveglglessink sync=false",
+      "problemMatcher": []
+    },
+    {
+      "label": "DeepStream: run 30-stream sample",
+      "type": "shell",
+      "command": "cd /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app && deepstream-app -c source30_1080p_dec_infer-resnet_tiled_display.txt",
+      "problemMatcher": []
+    }
+  ]
+}

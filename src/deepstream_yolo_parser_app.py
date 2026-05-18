@@ -417,11 +417,11 @@ def bbox_correction_probe(
 
                 clamp_rect(rect, frame_w, frame_h)
 
-                if anchor_box_to_label and label_x > 0 and label_y > 0:
-                    rect.left = float(clamp(label_x, 0.0, frame_w - 1.0))
-                    rect.top = float(clamp(label_y, 0.0, frame_h - 1.0))
-                    rect.width = float(clamp(rect.width, 2.0, frame_w - rect.left))
-                    rect.height = float(clamp(rect.height, 2.0, frame_h - rect.top))
+                # Do not use pre-existing text_params offsets to move the box.
+                # Those offsets may be stale/uninitialized metadata. The rectangle
+                # is the source of truth; the label is attached to it below.
+                if anchor_box_to_label:
+                    pass
 
                 # NvOSD rectangles are axis-aligned. This script only writes
                 # left/top/width/height, so it never intentionally creates rotation.
@@ -516,8 +516,8 @@ def main():
     argp.add_argument(
         "--anchor-box-to-label",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Force bbox top-left to follow label position. Default: enabled",
+        default=False,
+        help="Force bbox top-left to follow label position. Default: disabled",
     )
     argp.add_argument(
         "--debug-bboxes",
@@ -581,6 +581,19 @@ def main():
     streammux.set_property("live-source", 0)
 
     pgie.set_property("config-file-path", str(infer_config))
+
+    # CPU OSD avoids GPU/overlay rendering artifacts when bbox coords are valid
+    # but displayed boxes look visually skewed/slanted.
+    try:
+        nvosd.set_property("process-mode", 0)
+    except TypeError:
+        pass
+
+    try:
+        nvosd.set_property("display-bbox", 1)
+        nvosd.set_property("display-text", 1)
+    except TypeError:
+        pass
 
     sink.set_property("sync", False)
     sink.set_property("qos", False)

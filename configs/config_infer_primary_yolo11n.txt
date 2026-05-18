@@ -1,0 +1,35 @@
+[property]
+gpu-id=0
+
+# YOLO11n ONNX exported from Ultralytics
+onnx-file=/home/user/deepstream-work/models/yolo11n.onnx
+model-engine-file=/home/user/deepstream-work/models/yolo11n_b1_fp16.engine
+labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
+
+# Runtime
+batch-size=1
+network-mode=2
+process-mode=1
+network-type=0
+gie-unique-id=1
+interval=0
+num-detected-classes=80
+
+# Input/output
+model-color-format=0
+net-scale-factor=0.00392156862745098
+maintain-aspect-ratio=1
+symmetric-padding=1
+output-blob-names=output0
+
+# YOLO parser
+custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
+parse-bbox-func-name=NvDsInferParseYolo
+
+# NMS
+cluster-mode=2
+
+[class-attrs-all]
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
+topk=300

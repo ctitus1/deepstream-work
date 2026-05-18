@@ -29,3 +29,36 @@ dist/
 *.engine
 *.etlt_b*
 *.onnx_b*
+
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# YOLO / DeepStream generated artifacts
+*.engine
+*.plan
+*.cache
+
+# Large model/video/runtime artifacts
+models/*.pt
+models/*.engine
+streams/
+outputs/
+
+# External cloned/build dependencies
+external/
+
+# Built native libraries
+lib/*.so
+lib/*.o
+
+# TensorRT generated engines
+models/*.engine
+*.engine

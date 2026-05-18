@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     sudo \
     gstreamer1.0-tools \
+    python3-venv \
+    python3-full \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user matching host UID/GID.
-# If the base image already has UID/GID 1000, reuse/rename safely.
 RUN set -eux; \
     if getent group "${USER_GID}" >/dev/null; then \
         EXISTING_GROUP="$(getent group "${USER_GID}" | cut -d: -f1)"; \

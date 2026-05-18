@@ -67,7 +67,8 @@ long_edge = int("$MODEL_SIZE")
 stride = int("$STRIDE")
 
 def round_stride(x):
-    return max(stride, int(round(x / stride)) * stride)
+    x = int(x)
+    return max(stride, ((x + stride - 1) // stride) * stride)
 
 if src_w >= src_h:
     w = round_stride(long_edge)

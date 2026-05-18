@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import gi
@@ -293,6 +294,41 @@ def apply_rect(rect, values):
     rect.height = float(values[3])
 
 
+
+def add_display_line_box(batch_meta, frame_meta, left, top, width, height, line_width=3):
+    """Draw an axis-aligned rectangle using four NvOSD line segments.
+
+    This bypasses nvdsosd's object rectangle renderer. Useful when object
+    rect_params metadata is correct but rendered bbox pixels are intermittently
+    slanted/skewed.
+    """
+    x1 = int(round(left))
+    y1 = int(round(top))
+    x2 = int(round(left + width))
+    y2 = int(round(top + height))
+
+    display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+    display_meta.num_lines = 4
+
+    lines = [
+        (x1, y1, x2, y1),  # top
+        (x2, y1, x2, y2),  # right
+        (x2, y2, x1, y2),  # bottom
+        (x1, y2, x1, y1),  # left
+    ]
+
+    for i, (lx1, ly1, lx2, ly2) in enumerate(lines):
+        line = display_meta.line_params[i]
+        line.x1 = lx1
+        line.y1 = ly1
+        line.x2 = lx2
+        line.y2 = ly2
+        line.line_width = line_width
+        line.line_color.set(0.0, 1.0, 0.0, 1.0)
+
+    pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+
+
 def bbox_correction_probe(
     model_w,
     model_h,
@@ -300,6 +336,7 @@ def bbox_correction_probe(
     anchor_box_to_label,
     debug_bboxes,
     debug_frames,
+    line_boxes,
 ):
     def _probe(_pad, info, _user_data):
         gst_buffer = info.get_buffer()
@@ -337,11 +374,8 @@ def bbox_correction_probe(
                     break
 
                 if int(obj_meta.class_id) != PERSON_CLASS_ID:
-                    try:
-                        pyds.nvds_remove_obj_meta_from_frame(frame_meta, obj_meta)
-                    except Exception:
-                        obj_meta.rect_params.border_width = 0
-                        obj_meta.text_params.display_text = ""
+                    obj_meta.rect_params.border_width = 0
+                    obj_meta.text_params.display_text = ""
                     l_obj = next_obj
                     continue
 
@@ -417,17 +451,51 @@ def bbox_correction_probe(
 
                 clamp_rect(rect, frame_w, frame_h)
 
-                # Do not use pre-existing text_params offsets to move the box.
-                # Those offsets may be stale/uninitialized metadata. The rectangle
-                # is the source of truth; the label is attached to it below.
-                if anchor_box_to_label:
-                    pass
+                if anchor_box_to_label and label_x > 0 and label_y > 0:
+                    rect.left = float(clamp(label_x, 0.0, frame_w - 1.0))
+                    rect.top = float(clamp(label_y, 0.0, frame_h - 1.0))
+                    rect.width = float(clamp(rect.width, 2.0, frame_w - rect.left))
+                    rect.height = float(clamp(rect.height, 2.0, frame_h - rect.top))
 
-                # NvOSD rectangles are axis-aligned. This script only writes
-                # left/top/width/height, so it never intentionally creates rotation.
-                rect.border_width = 3
-                rect.has_bg_color = 0
-                rect.border_color.set(0.0, 1.0, 0.0, 1.0)
+                # Force integer pixel coordinates before nvdsosd.
+                # Some OSD/display paths behave poorly with fractional rect values.
+                left_i = int(round(float(rect.left)))
+                top_i = int(round(float(rect.top)))
+                right_i = int(round(float(rect.left + rect.width)))
+                bottom_i = int(round(float(rect.top + rect.height)))
+
+                left_i = max(0, min(left_i, frame_w - 1))
+                top_i = max(0, min(top_i, frame_h - 1))
+                right_i = max(left_i + 2, min(right_i, frame_w - 1))
+                bottom_i = max(top_i + 2, min(bottom_i, frame_h - 1))
+
+                rect.left = float(left_i)
+                rect.top = float(top_i)
+                rect.width = float(right_i - left_i)
+                rect.height = float(bottom_i - top_i)
+
+                if line_boxes:
+                    # Do not let nvdsosd draw the object rectangle. The metadata is
+                    # correct, but the object-bbox renderer has shown intermittent
+                    # slanted pixels in this container/display path.
+                    rect.border_width = 0
+                    rect.has_bg_color = 0
+
+                    # Draw a replacement axis-aligned bbox as four OSD line segments.
+                    add_display_line_box(
+                        batch_meta=batch_meta,
+                        frame_meta=frame_meta,
+                        left=rect.left,
+                        top=rect.top,
+                        width=rect.width,
+                        height=rect.height,
+                        line_width=3,
+                    )
+                else:
+                    # Debug/fallback mode: use nvdsosd's object rectangle renderer.
+                    rect.border_width = 3
+                    rect.has_bg_color = 0
+                    rect.border_color.set(0.0, 1.0, 0.0, 1.0)
 
                 confidence = float(obj_meta.confidence)
                 obj_meta.text_params.display_text = f"person {confidence:.2f}"
@@ -463,6 +531,224 @@ def bbox_correction_probe(
         return Gst.PadProbeReturn.OK
 
     return _probe
+
+
+def osd_meta_probe(label):
+    def _probe(_pad, info, _user_data):
+        gst_buffer = info.get_buffer()
+        if not gst_buffer:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        l_frame = batch_meta.frame_meta_list
+        while l_frame is not None:
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+
+            if frame_meta.frame_num < 50:
+                l_obj = frame_meta.obj_meta_list
+                while l_obj is not None:
+                    obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+                    if int(obj_meta.class_id) == PERSON_CLASS_ID:
+                        r = obj_meta.rect_params
+                        print(
+                            f"OSD_META_{label} "
+                            f"frame={frame_meta.frame_num} "
+                            f"left={float(r.left):.1f} top={float(r.top):.1f} "
+                            f"width={float(r.width):.1f} height={float(r.height):.1f} "
+                            f"border={int(r.border_width)} "
+                            f"text=({int(obj_meta.text_params.x_offset)},"
+                            f"{int(obj_meta.text_params.y_offset)})",
+                            flush=True,
+                        )
+                    l_obj = l_obj.next
+
+            l_frame = l_frame.next
+
+        return Gst.PadProbeReturn.OK
+
+    return _probe
+
+
+
+def fps_probe(interval_sec=5.0):
+    state = {
+        "last_time": time.monotonic(),
+        "last_frames": 0,
+        "frames": 0,
+    }
+
+    def _probe(_pad, info, _user_data):
+        gst_buffer = info.get_buffer()
+        if not gst_buffer:
+            return Gst.PadProbeReturn.OK
+
+        state["frames"] += 1
+        now = time.monotonic()
+        elapsed = now - state["last_time"]
+
+        if elapsed >= interval_sec:
+            delta_frames = state["frames"] - state["last_frames"]
+            fps = delta_frames / elapsed if elapsed > 0 else 0.0
+            print(f"FPS: {fps:.2f} over {elapsed:.1f}s", flush=True)
+
+            state["last_time"] = now
+            state["last_frames"] = state["frames"]
+
+        return Gst.PadProbeReturn.OK
+
+    return _probe
+
+
+
+class PerfMonitor:
+    def __init__(self, timing_interval_sec=10.0, fps_interval_sec=1.0):
+        # These are all after nvstreammux, so NvDsFrameMeta.frame_num exists.
+        self.stages = ["muxed", "infer_done", "converted", "osd_done", "sink"]
+        self.stage_pairs = list(zip(self.stages[:-1], self.stages[1:]))
+
+        self.timing_interval_sec = float(timing_interval_sec)
+        self.fps_interval_sec = float(fps_interval_sec)
+
+        self.frame_times = {}
+        self.samples = {f"{a}->{b}": [] for a, b in self.stage_pairs}
+        self.samples["total_mux_to_sink"] = []
+
+        now = time.perf_counter()
+        self.last_fps_time = now
+        self.last_timing_time = now
+        self.frame_count = 0
+        self.last_fps_count = 0
+
+    @staticmethod
+    def _summary_ms(values):
+        if not values:
+            return "n=0"
+
+        vals = sorted(v * 1000.0 for v in values)
+        n = len(vals)
+
+        def pct(q):
+            if n == 1:
+                return vals[0]
+            idx = int(round((q / 100.0) * (n - 1)))
+            idx = max(0, min(idx, n - 1))
+            return vals[idx]
+
+        avg = sum(vals) / n
+        return (
+            f"n={n} "
+            f"avg={avg:.2f}ms "
+            f"p50={pct(50):.2f}ms "
+            f"p95={pct(95):.2f}ms "
+            f"max={vals[-1]:.2f}ms"
+        )
+
+    @staticmethod
+    def _frame_keys_from_buffer(gst_buffer):
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+        if not batch_meta:
+            return []
+
+        keys = []
+        l_frame = batch_meta.frame_meta_list
+
+        while l_frame is not None:
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+            keys.append(int(frame_meta.frame_num))
+            l_frame = l_frame.next
+
+        return keys
+
+    def _record_completed_frame(self, key):
+        data = self.frame_times.get(key)
+        if not data:
+            return
+
+        if not all(stage in data for stage in self.stages):
+            return
+
+        for a, b in self.stage_pairs:
+            dt = data[b] - data[a]
+            if dt >= 0:
+                self.samples[f"{a}->{b}"].append(dt)
+
+        total = data["sink"] - data["muxed"]
+        if total >= 0:
+            self.samples["total_mux_to_sink"].append(total)
+
+        self.frame_times.pop(key, None)
+
+        if len(self.frame_times) > 1000:
+            for old_key in list(self.frame_times.keys())[:200]:
+                self.frame_times.pop(old_key, None)
+
+    def _maybe_print_fps(self):
+        now = time.perf_counter()
+        elapsed = now - self.last_fps_time
+
+        if elapsed < self.fps_interval_sec:
+            return
+
+        delta_frames = self.frame_count - self.last_fps_count
+        fps = delta_frames / elapsed if elapsed > 0 else 0.0
+        print(f"PERF_FPS fps={fps:.2f} interval={elapsed:.2f}s frames={delta_frames}", flush=True)
+
+        self.last_fps_time = now
+        self.last_fps_count = self.frame_count
+
+    def _maybe_print_timing(self):
+        now = time.perf_counter()
+        elapsed = now - self.last_timing_time
+
+        if elapsed < self.timing_interval_sec:
+            return
+
+        print(f"PERF_TIMING interval={elapsed:.2f}s", flush=True)
+
+        for name in [
+            "muxed->infer_done",
+            "infer_done->converted",
+            "converted->osd_done",
+            "osd_done->sink",
+            "total_mux_to_sink",
+        ]:
+            print(f"  {name}: {self._summary_ms(self.samples[name])}", flush=True)
+
+        self.samples = {f"{a}->{b}": [] for a, b in self.stage_pairs}
+        self.samples["total_mux_to_sink"] = []
+        self.last_timing_time = now
+
+    def probe(self, stage_name):
+        def _probe(_pad, info, _user_data):
+            gst_buffer = info.get_buffer()
+            if not gst_buffer:
+                return Gst.PadProbeReturn.OK
+
+            now = time.perf_counter()
+            keys = self._frame_keys_from_buffer(gst_buffer)
+
+            if not keys:
+                return Gst.PadProbeReturn.OK
+
+            for key in keys:
+                data = self.frame_times.setdefault(key, {})
+                data[stage_name] = now
+
+                if stage_name == "sink":
+                    self.frame_count += 1
+                    self._record_completed_frame(key)
+
+            if stage_name == "sink":
+                self._maybe_print_fps()
+                self._maybe_print_timing()
+
+            return Gst.PadProbeReturn.OK
+
+        return _probe
+
 
 
 def make_element(factory, name):
@@ -530,6 +816,40 @@ def main():
         default=10,
         help="Number of initial frames to print bbox diagnostics for",
     )
+    argp.add_argument(
+        "--debug-osd-meta",
+        action="store_true",
+        help="Print object metadata immediately before and after nvdsosd",
+    )
+    argp.add_argument(
+        "--line-boxes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Draw boxes as NvDsDisplayMeta line segments instead of rect_params. Default: enabled",
+    )
+    argp.add_argument(
+        "--debug-perf",
+        action="store_true",
+        help="Print FPS every 1s and detailed stage timing every 10s",
+    )
+    argp.add_argument(
+        "--fps-interval",
+        type=float,
+        default=1.0,
+        help="FPS print interval when --debug-perf is enabled. Default: 1.0",
+    )
+    argp.add_argument(
+        "--timing-interval",
+        type=float,
+        default=10.0,
+        help="Detailed timing print interval when --debug-perf is enabled. Default: 10.0",
+    )
+    argp.add_argument(
+        "--osd-process-mode",
+        choices=["gpu", "cpu"],
+        default="gpu",
+        help="nvdsosd process mode. Default: gpu",
+    )
     args = argp.parse_args()
 
     Gst.init(None)
@@ -558,6 +878,11 @@ def main():
     print(f"Infer config: {infer_config}")
     print(f"BBox mode:    {args.bbox_mode}")
     print(f"Anchor label: {args.anchor_box_to_label}")
+    print(f"OSD mode:     {args.osd_process_mode}")
+    print(f"Line boxes:   {args.line_boxes}")
+    print(f"FPS interval: {args.fps_interval}s")
+    print(f"Debug perf:   {args.debug_perf}")
+    print(f"Timing intvl: {args.timing_interval}s")
 
     pipeline = Gst.Pipeline.new("deepstream-yolo-parser-pipeline")
 
@@ -569,6 +894,7 @@ def main():
     streammux = make_element("nvstreammux", "stream-muxer")
     pgie = make_element("nvinfer", "primary-inference")
     nvvidconv = make_element("nvvideoconvert", "nv-video-converter")
+    capsfilter = make_element("capsfilter", "display-capsfilter")
     nvosd = make_element("nvdsosd", "nv-onscreendisplay")
     sink = make_element("nveglglessink", "display-sink")
 
@@ -582,16 +908,26 @@ def main():
 
     pgie.set_property("config-file-path", str(infer_config))
 
-    # CPU OSD avoids GPU/overlay rendering artifacts when bbox coords are valid
-    # but displayed boxes look visually skewed/slanted.
+    capsfilter.set_property(
+        "caps",
+        Gst.Caps.from_string(
+            f"video/x-raw(memory:NVMM), format=RGBA, width={source_w}, height={source_h}"
+        ),
+    )
+
     try:
-        nvosd.set_property("process-mode", 0)
+        nvosd.set_property("process-mode", 1 if args.osd_process_mode == "gpu" else 0)
     except TypeError:
         pass
 
     try:
         nvosd.set_property("display-bbox", 1)
         nvosd.set_property("display-text", 1)
+    except TypeError:
+        pass
+
+    try:
+        sink.set_property("force-aspect-ratio", False)
     except TypeError:
         pass
 
@@ -607,6 +943,7 @@ def main():
         streammux,
         pgie,
         nvvidconv,
+        capsfilter,
         nvosd,
         sink,
     ]:
@@ -639,8 +976,11 @@ def main():
     if not pgie.link(nvvidconv):
         raise RuntimeError("Failed to link nvinfer -> nvvideoconvert")
 
-    if not nvvidconv.link(nvosd):
-        raise RuntimeError("Failed to link nvvideoconvert -> nvdsosd")
+    if not nvvidconv.link(capsfilter):
+        raise RuntimeError("Failed to link nvvideoconvert -> capsfilter")
+
+    if not capsfilter.link(nvosd):
+        raise RuntimeError("Failed to link capsfilter -> nvdsosd")
 
     if not nvosd.link(sink):
         raise RuntimeError("Failed to link nvdsosd -> sink")
@@ -658,9 +998,38 @@ def main():
             anchor_box_to_label=args.anchor_box_to_label,
             debug_bboxes=args.debug_bboxes,
             debug_frames=args.debug_frames,
+            line_boxes=args.line_boxes,
         ),
         None,
     )
+
+    if args.debug_osd_meta:
+        osd_sink_pad = nvosd.get_static_pad("sink")
+        osd_src_pad = nvosd.get_static_pad("src")
+
+        if osd_sink_pad is not None:
+            osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, osd_meta_probe("IN"), None)
+
+        if osd_src_pad is not None:
+            osd_src_pad.add_probe(Gst.PadProbeType.BUFFER, osd_meta_probe("OUT"), None)
+
+    if args.debug_perf:
+        perf = PerfMonitor(
+            timing_interval_sec=args.timing_interval,
+            fps_interval_sec=args.fps_interval,
+        )
+
+        perf_points = [
+            (streammux.get_static_pad("src"), "muxed"),
+            (pgie.get_static_pad("src"), "infer_done"),
+            (capsfilter.get_static_pad("src"), "converted"),
+            (nvosd.get_static_pad("src"), "osd_done"),
+            (sink.get_static_pad("sink"), "sink"),
+        ]
+
+        for pad, stage_name in perf_points:
+            if pad is not None:
+                pad.add_probe(Gst.PadProbeType.BUFFER, perf.probe(stage_name), None)
 
     loop = GLib.MainLoop()
 
@@ -670,6 +1039,15 @@ def main():
 
     print("Starting pipeline...")
     pipeline.set_state(Gst.State.PLAYING)
+
+    try:
+        Gst.debug_bin_to_dot_file_with_ts(
+            pipeline,
+            Gst.DebugGraphDetails.ALL,
+            "deepstream-yolo-parser-pipeline",
+        )
+    except Exception:
+        pass
 
     try:
         loop.run()

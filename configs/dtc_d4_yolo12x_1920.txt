@@ -35,7 +35,7 @@ gpu-id=0
 batch-size=1
 gie-unique-id=1
 nvbuf-memory-type=0
-config-file=config_infer_primary_yolo12x.txt
+config-file=config_infer_primary_yolo12x_1920.txt
 
 [osd]
 enable=1

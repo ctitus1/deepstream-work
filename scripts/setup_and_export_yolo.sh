@@ -2,22 +2,87 @@
 set -euo pipefail
 
 MODEL="${1:-}"
-SIZE="${2:-640}"
+
+# Single model size parameter.
+# The script detects the input stream aspect ratio and converts this one dimension
+# into a stride-safe WIDTH x HEIGHT for YOLO/DeepStream.
+#
+# Examples:
+#   ./scripts/setup_and_export_yolo.sh yolo11n.pt 640
+#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640
+#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 1920
+#
+# For a 1920x1080 stream:
+#   640  -> 640x352
+#   1920 -> 1920x1088
+MODEL_SIZE="${2:-1920}"
+
+# Stream used to derive aspect ratio.
+# Override as third arg if needed:
+#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.ts
+STREAM="${3:-streams/dtc-d4.ts}"
+
+STRIDE=32
 
 if [ -z "$MODEL" ]; then
     echo "Usage:"
-    echo "  $0 <model.pt|model-name> [size]"
+    echo "  $0 <model.pt|model-name> [model_size] [stream]"
     echo
     echo "Examples:"
     echo "  $0 yolo11n.pt 640"
-    echo "  $0 yolo11s.pt 640"
-    echo "  $0 /path/to/custom.pt 640"
+    echo "  $0 yolo12x.pt 640 streams/dtc-d4.ts"
+    echo "  $0 yolo12x.pt 1920 streams/dtc-d4.ts"
     exit 1
 fi
 
 cd "$(dirname "$0")/.."
 
-mkdir -p models external
+mkdir -p models external configs lib outputs
+
+detect_dims() {
+    local stream="$1"
+
+    if command -v gst-discoverer-1.0 >/dev/null 2>&1 && [ -f "$stream" ]; then
+        local out
+        out="$(gst-discoverer-1.0 "$stream" 2>/dev/null || true)"
+        local w h
+        w="$(printf '%s\n' "$out" | awk '/Width:/ {print $2; exit}')"
+        h="$(printf '%s\n' "$out" | awk '/Height:/ {print $2; exit}')"
+        if [ -n "$w" ] && [ -n "$h" ]; then
+            echo "$w $h"
+            return
+        fi
+    fi
+
+    # Best 1080p default.
+    echo "1920 1080"
+}
+
+read SRC_W SRC_H < <(detect_dims "$STREAM")
+
+read INFER_W INFER_H < <(python3 - <<PY
+src_w = int("$SRC_W")
+src_h = int("$SRC_H")
+long_edge = int("$MODEL_SIZE")
+stride = int("$STRIDE")
+
+def round_stride(x):
+    return max(stride, int(round(x / stride)) * stride)
+
+if src_w >= src_h:
+    w = round_stride(long_edge)
+    h = round_stride(long_edge * src_h / src_w)
+else:
+    h = round_stride(long_edge)
+    w = round_stride(long_edge * src_w / src_h)
+
+print(w, h)
+PY
+)
+
+echo "Source stream: $STREAM"
+echo "Source size:   ${SRC_W}x${SRC_H}"
+echo "YOLO size:     ${INFER_W}x${INFER_H}"
 
 if [ ! -d .venv-yolo ]; then
     echo "Creating YOLO export virtual environment..."
@@ -26,7 +91,7 @@ fi
 
 source .venv-yolo/bin/activate
 
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade 'pip' 'setuptools<82' wheel
 
 python -m pip install \
     ultralytics \
@@ -46,16 +111,15 @@ fi
 MODEL_BASENAME="$(basename "$MODEL")"
 MODEL_STEM="${MODEL_BASENAME%.pt}"
 
-# If user passed a local path, copy it into models/.
-# If user passed yolo11n.pt etc. and it does not exist, let Ultralytics download it first.
 if [ -f "$MODEL" ]; then
     cp -f "$MODEL" "models/$MODEL_BASENAME"
 elif [ -f "models/$MODEL_BASENAME" ]; then
     :
 else
     echo "Downloading model with Ultralytics: $MODEL"
-    yolo predict model="$MODEL" source='https://ultralytics.com/images/bus.jpg' imgsz="$SIZE" save=False >/dev/null
-    FOUND="$(find . -maxdepth 3 -name "$MODEL_BASENAME" | head -n1 || true)"
+    yolo predict model="$MODEL" source='https://ultralytics.com/images/bus.jpg' imgsz="$INFER_W" save=False >/dev/null
+
+    FOUND="$(find . -maxdepth 4 -name "$MODEL_BASENAME" | head -n1 || true)"
     if [ -z "$FOUND" ]; then
         FOUND="$(find "$HOME" -name "$MODEL_BASENAME" 2>/dev/null | head -n1 || true)"
     fi
@@ -68,27 +132,27 @@ fi
 
 echo "Exporting for DeepStream-Yolo:"
 echo "  model: models/$MODEL_BASENAME"
-echo "  size:  $SIZE"
+echo "  size:  ${INFER_H}x${INFER_W}"
 
 case "$MODEL_STEM" in
     yolo11*)
         python external/DeepStream-Yolo/utils/export_yolo11.py \
             -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
-            -s "$SIZE" \
+            -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
         ;;
     yolov12*|yolo12*)
         python external/DeepStream-Yolo/utils/export_yolov12.py \
             -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
-            -s "$SIZE" \
+            -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
         ;;
     yolov8*|yolo8*)
         python external/DeepStream-Yolo/utils/export_yoloV8.py \
             -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
-            -s "$SIZE" \
+            -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
         ;;
@@ -99,11 +163,10 @@ case "$MODEL_STEM" in
         ;;
 esac
 
-# Export scripts write ONNX beside the .pt file.
 ONNX="models/${MODEL_STEM}.onnx"
 
 if [ ! -f "$ONNX" ]; then
-    FOUND_ONNX="$(find models . -maxdepth 3 -name "${MODEL_STEM}.onnx" | head -n1 || true)"
+    FOUND_ONNX="$(find models . -maxdepth 4 -name "${MODEL_STEM}.onnx" | head -n1 || true)"
     if [ -n "$FOUND_ONNX" ]; then
         cp -f "$FOUND_ONNX" "$ONNX"
     fi
@@ -197,6 +260,8 @@ hair drier
 toothbrush
 LABELS
 
+rm -f labels.txt
+
 echo
 echo "ONNX check:"
 python - <<PY
@@ -219,15 +284,118 @@ PY
 rm -f "models/${MODEL_STEM}"*.engine "models/${MODEL_STEM}.onnx"*.engine
 
 ENGINE="${ONNX}_b1_gpu0_fp16.engine"
+INFER_CONFIG="configs/config_infer_primary_${MODEL_STEM}.txt"
+APP_CONFIG="configs/dtc_d4_${MODEL_STEM}.txt"
+
+cat > "$INFER_CONFIG" <<EOF_INFER
+[property]
+gpu-id=0
+net-scale-factor=0.00392156862745098
+model-color-format=0
+onnx-file=/home/user/deepstream-work/${ONNX}
+model-engine-file=/home/user/deepstream-work/${ENGINE}
+labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
+batch-size=1
+network-mode=2
+num-detected-classes=80
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=0
+
+# DeepStream-Yolo parser.
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
+output-blob-names=output
+
+# Robust bbox geometry:
+# streammux size == ONNX input size, so no letterbox/pad transform is needed.
+maintain-aspect-ratio=0
+symmetric-padding=0
+
+cluster-mode=2
+
+[class-attrs-all]
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
+topk=300
+EOF_INFER
+
+cat > "$APP_CONFIG" <<EOF_APP
+[application]
+enable-perf-measurement=1
+perf-measurement-interval-sec=5
+
+[tiled-display]
+enable=0
+rows=1
+columns=1
+width=${INFER_W}
+height=${INFER_H}
+gpu-id=0
+nvbuf-memory-type=0
+
+[source0]
+enable=1
+type=3
+uri=file:///home/user/deepstream-work/${STREAM}
+num-sources=1
+gpu-id=0
+cudadec-memtype=0
+
+[streammux]
+gpu-id=0
+batch-size=1
+batched-push-timeout=40000
+width=${INFER_W}
+height=${INFER_H}
+enable-padding=0
+nvbuf-memory-type=0
+live-source=0
+
+[primary-gie]
+enable=1
+gpu-id=0
+batch-size=1
+gie-unique-id=1
+nvbuf-memory-type=0
+config-file=$(basename "$INFER_CONFIG")
+
+[osd]
+enable=1
+gpu-id=0
+border-width=3
+text-size=15
+text-color=1;1;1;1
+text-bg-color=0.3;0.3;0.3;1
+font=Serif
+show-clock=0
+nvbuf-memory-type=0
+
+[sink0]
+enable=1
+type=2
+sync=0
+gpu-id=0
+nvbuf-memory-type=0
+
+[sink1]
+enable=0
+type=1
+sync=0
+
+[tests]
+file-loop=0
+EOF_APP
 
 echo
 echo "Done."
-echo "PT:     models/$MODEL_BASENAME"
-echo "ONNX:   $ONNX"
-echo "Engine: $ENGINE"
-echo "Labels: models/coco_labels.txt"
+echo "PT:           models/$MODEL_BASENAME"
+echo "ONNX:         $ONNX"
+echo "Engine:       $ENGINE"
+echo "Infer config: $INFER_CONFIG"
+echo "App config:   $APP_CONFIG"
+echo "Labels:       models/coco_labels.txt"
 echo
-echo "For nvinfer, use:"
-echo "  onnx-file=/home/user/deepstream-work/$ONNX"
-echo "  model-engine-file=/home/user/deepstream-work/$ENGINE"
-echo "  output-blob-names=output"
+echo "Run:"
+echo "  deepstream-app -c $APP_CONFIG"

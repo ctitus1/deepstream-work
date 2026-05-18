@@ -2,8 +2,8 @@
 gpu-id=0
 net-scale-factor=0.00392156862745098
 model-color-format=0
-onnx-file=/home/user/deepstream-work/models/yolo11n.onnx
-model-engine-file=/home/user/deepstream-work/models/yolo11n.onnx_b1_gpu0_fp16.engine
+onnx-file=/home/user/deepstream-work/models/yolo12x_1920.onnx
+model-engine-file=/home/user/deepstream-work/models/yolo12x_1920.onnx_b1_gpu0_fp16.engine
 labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
 batch-size=1
 network-mode=2
@@ -12,17 +12,11 @@ interval=0
 gie-unique-id=1
 process-mode=1
 network-type=0
-
-# DeepStream-Yolo parser.
 parse-bbox-func-name=NvDsInferParseYolo
 custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
 output-blob-names=output
-
-# Robust bbox geometry:
-# streammux size == ONNX input size, so no letterbox/pad transform is needed.
 maintain-aspect-ratio=0
 symmetric-padding=0
-
 cluster-mode=2
 
 [class-attrs-all]

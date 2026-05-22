@@ -1,49 +1,39 @@
 #!/usr/bin/env python3
 
 import os
-from typing import Dict
-
 import gi
 import rtsp_config as conf
+from typing import Dict, Any
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstRtspServer", "1.0")
-from gi.repository import GLib, Gst, GstRtspServer
+from gi.repository import Gst, GLib, GstRtspServer
 
 Gst.init(None)
 
 
-def make_factory(launch: str) -> GstRtspServer.RTSPMediaFactory:
+def make_factory(launch):
     factory = GstRtspServer.RTSPMediaFactory()
     factory.set_shared(True)
     factory.set_launch(launch)
-
-    # RTCP sender reports from gst-rtsp-server map RTP time to the server's
-    # system clock. Since the host clock is NTP-synced and the container shares
-    # that kernel clock, clients can recover network/NTP time from RTCP.
-    factory.set_enable_rtcp(True)
-
     return factory
 
 
-def cleanup_sockets() -> None:
-    for path in getattr(conf, "SOCKETS", {}).values():
+def cleanup_sockets():
+    for name, path in conf.SOCKETS.items():
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
 
 
-def main() -> None:
+def main():
     cleanup_sockets()
 
-    producers: Dict[str, Gst.Element] = {}
-
-    for name, pipe in getattr(conf, "PRODUCERS", {}).items():
+    for name, pipe in conf.PRODUCERS.items():
         print(f"{name} producer starting...")
         producer = Gst.parse_launch(pipe)
         producer.set_state(Gst.State.PLAYING)
-        producers[name] = producer
         print(f"{name} producer started!")
 
     server = GstRtspServer.RTSPServer()
@@ -60,12 +50,10 @@ def main() -> None:
     server.attach(None)
 
     loop = GLib.MainLoop()
-
     try:
         loop.run()
     finally:
-        for producer in producers.values():
-            producer.set_state(Gst.State.NULL)
+        producer.set_state(Gst.State.NULL)
         cleanup_sockets()
 
 

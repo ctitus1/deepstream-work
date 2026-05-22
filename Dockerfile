@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/deepstream:9.0-samples-multiarch
+FROM nvcr.io/nvidia/deepstream:8.0-samples-multiarch
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NVIDIA_DRIVER_CAPABILITIES=all

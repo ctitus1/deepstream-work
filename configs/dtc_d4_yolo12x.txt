@@ -14,7 +14,7 @@ nvbuf-memory-type=0
 [source0]
 enable=1
 type=3
-uri=file:///home/user/deepstream-work/streams/dtc-d4.ts
+uri=file:///home/user/deepstream-work/streams/lorton-d4-rgb.mp4
 num-sources=1
 gpu-id=0
 cudadec-memtype=0

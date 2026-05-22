@@ -26,6 +26,8 @@ services:
     working_dir: /home/user/deepstream-work
     devices:
       - /dev/dri:/dev/dri
+      # - /dev/video0:/dev/video0
+      # - /dev/video1:/dev/video1
     deploy:
       resources:
         reservations:

@@ -80,6 +80,13 @@ RUN set -eux; \
     mkdir -p "/home/${USERNAME}"; \
     chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}"
 
+# RTSP server Python GI bindings and GStreamer RTSP plugins.
+# Kept late to avoid rebuilding earlier DeepStream/pyds layers during app dev.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gir1.2-gst-rtsp-server-1.0 \
+    gstreamer1.0-rtsp \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY .bashrc.container /home/${USERNAME}/.bashrc
 RUN chown ${USER_UID}:${USER_GID} /home/${USERNAME}/.bashrc
 

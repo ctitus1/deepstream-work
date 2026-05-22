@@ -19,11 +19,11 @@ import pyds
 
 
 PROJECT_DIR = Path("/home/user/deepstream-work")
-DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d4.ts"
+DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d4.mp4"
 SETUP_SCRIPT = PROJECT_DIR / "scripts/setup_and_export_yolo.sh"
 
 PERSON_CLASS_ID = 0
-CACHE_POLICY = "parser_line_osd_timing_v1"
+CACHE_POLICY = "parser_line_osd_conf_v1"
 
 
 def discover_size(path: Path) -> tuple[int, int]:
@@ -60,7 +60,7 @@ def paths(stem: str, long_side: int, w: int, h: int) -> dict[str, Path]:
     }
 
 
-def write_config(p: dict[str, Path]) -> None:
+def write_config(p: dict[str, Path], conf: float) -> None:
     p["config"].write_text(
         f"""[property]
 gpu-id=0
@@ -84,21 +84,28 @@ symmetric-padding=1
 cluster-mode=2
 
 [class-attrs-all]
-pre-cluster-threshold=0.2
+pre-cluster-threshold={conf}
 nms-iou-threshold=0.45
 topk=300
 """
     )
 
 
-def ensure_model(model: str, stream: Path, long_side: int, src_w: int, src_h: int) -> tuple[int, int, Path]:
+def ensure_model(
+    model: str,
+    stream: Path,
+    long_side: int,
+    src_w: int,
+    src_h: int,
+    conf: float,
+) -> tuple[int, int, Path]:
     stem = model_stem(model)
     cached = sorted((PROJECT_DIR / "models").glob(f"{stem}_{long_side}_*.onnx"))
 
     if cached:
         w, h = onnx_size(cached[0])
         p = paths(stem, long_side, w, h)
-        write_config(p)
+        write_config(p, conf)
         return w, h, p["config"]
 
     subprocess.run(
@@ -126,25 +133,23 @@ def ensure_model(model: str, stream: Path, long_side: int, src_w: int, src_h: in
         )
         + "\n"
     )
-    write_config(p)
+    write_config(p, conf)
     return w, h, p["config"]
 
 
-def conf_color(conf: float):
-    # Piecewise linear interpolation:
-    #   0.2 -> red
-    #   0.5 -> yellow
-    #   0.8+ -> green
-    if conf <= 0.2:
+def conf_color(confidence: float, lower_conf: float):
+    mid_conf = (lower_conf + 0.8) / 2.0
+
+    if confidence <= lower_conf:
         return 1.0, 0.0, 0.0, 1.0
 
-    if conf < 0.5:
-        u = (conf - 0.2) / 0.3
-        return 1.0, u, 0.0, 1.0
+    if confidence < mid_conf:
+        t = (confidence - lower_conf) / max(mid_conf - lower_conf, 1e-6)
+        return 1.0, t, 0.0, 1.0
 
-    if conf < 0.8:
-        u = (conf - 0.5) / 0.3
-        return 1.0 - u, 1.0, 0.0, 1.0
+    if confidence < 0.8:
+        t = (confidence - mid_conf) / max(0.8 - mid_conf, 1e-6)
+        return 1.0 - t, 1.0, 0.0, 1.0
 
     return 0.0, 1.0, 0.0, 1.0
 
@@ -154,36 +159,30 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     x2, y2 = round(left + width), round(top + height)
 
     frame_h = int(getattr(frame_meta, "source_frame_height", 0) or 1080)
-    font_size = max(1, round(frame_h * 0.005))
+    font_size = max(1, round(frame_h * 0.001))
+    line_width = 3
 
     meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
     meta.num_lines = 4
     meta.num_labels = 1
 
-    line_width = 3
-
-    lines = (
-        (x1, y1, x2, y1),
-        (x2, y1, x2, y2),
-        (x2, y2, x1, y2),
-        (x1, y2, x1, y1),
-    )
-
-    for line, coords in zip(meta.line_params, lines):
+    for line, coords in zip(
+        meta.line_params,
+        (
+            (x1, y1, x2, y1),
+            (x2, y1, x2, y2),
+            (x2, y2, x1, y2),
+            (x1, y2, x1, y1),
+        ),
+    ):
         line.x1, line.y1, line.x2, line.y2 = coords
         line.line_width = line_width
         line.line_color.set(*color)
 
     text = meta.text_params[0]
     text.display_text = label
-    # Align text flush with the left edge of the box and directly above
-    # the top border, accounting for the line width.
-    line_width = 3
-    text.x_offset = max(0, x1 - line_width)
-
-    # Put the text above the box so the bottom of the label is flush with
-    # the top edge of the top line.
-    text.y_offset = max(0, y1 - round(3.5 * font_size) - line_width)
+    text.x_offset = max(0, x1 - line_width // 2)
+    text.y_offset = max(0, y1 - 2 * font_size - 100)
     text.font_params.font_name = "Serif"
     text.font_params.font_size = font_size
     text.font_params.font_color.set(*color)
@@ -193,38 +192,40 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     pyds.nvds_add_display_meta_to_frame(frame_meta, meta)
 
 
-def bbox_probe(_pad, info, _data):
-    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
-    frame_list = batch_meta.frame_meta_list
+def bbox_probe(conf: float):
+    def _probe(_pad, info, _data):
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
+        frame_list = batch_meta.frame_meta_list
 
-    while frame_list:
-        frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
-        obj_list = frame_meta.obj_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            obj_list = frame_meta.obj_meta_list
 
-        while obj_list:
-            obj = pyds.NvDsObjectMeta.cast(obj_list.data)
-            rect = obj.rect_params
-            rect.border_width = 0
+            while obj_list:
+                obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+                rect = obj.rect_params
+                rect.border_width = 0
+                obj.text_params.display_text = ""
 
-            if obj.class_id == PERSON_CLASS_ID:
-                add_line_box(
-                    batch_meta,
-                    frame_meta,
-                    rect.left,
-                    rect.top,
-                    rect.width,
-                    rect.height,
-                    f"person {obj.confidence:.2f}",
-                    conf_color(float(obj.confidence)),
-                )
+                if obj.class_id == PERSON_CLASS_ID:
+                    add_line_box(
+                        batch_meta,
+                        frame_meta,
+                        rect.left,
+                        rect.top,
+                        rect.width,
+                        rect.height,
+                        f"person {obj.confidence:.2f}",
+                        conf_color(float(obj.confidence), conf),
+                    )
 
-            obj.text_params.display_text = ""
+                obj_list = obj_list.next
 
-            obj_list = obj_list.next
+            frame_list = frame_list.next
 
-        frame_list = frame_list.next
+        return Gst.PadProbeReturn.OK
 
-    return Gst.PadProbeReturn.OK
+    return _probe
 
 
 class TimeLog:
@@ -237,7 +238,7 @@ class TimeLog:
         self.last_frames = 0
         self.times = {}
 
-    def fps_probe(self, _pad, info, _data):
+    def fps_probe(self, _pad, _info, _data):
         self.frames += 1
         now = time.perf_counter()
         elapsed = now - self.last_fps_time
@@ -304,7 +305,6 @@ class TimeLog:
         self.last_timing_time = now
 
 
-
 class RateLimiter:
     def __init__(self, base_fps: float = 30.0, rate: float = 1.0):
         self.base_fps = base_fps
@@ -320,12 +320,8 @@ class RateLimiter:
         print(f"rate={self.rate:.2f}x max_fps={self.max_fps:.1f}", flush=True)
 
     def probe(self, _pad, _info, _data):
-        max_fps = self.max_fps
-        if max_fps <= 0:
-            return Gst.PadProbeReturn.OK
-
         now = time.perf_counter()
-        period = 1.0 / max_fps
+        period = 1.0 / self.max_fps
 
         if self.last_time:
             wait = period - (now - self.last_time)
@@ -337,11 +333,11 @@ class RateLimiter:
 
 
 class KeyboardControls:
-    def __init__(self, pipeline, loop, limiter: RateLimiter, start_paused=False):
+    def __init__(self, pipeline, loop, limiter: RateLimiter):
         self.pipeline = pipeline
         self.loop = loop
         self.limiter = limiter
-        self.paused = start_paused
+        self.paused = False
         self.old_term = termios.tcgetattr(sys.stdin)
 
     def start(self):
@@ -368,13 +364,13 @@ class KeyboardControls:
             self.toggle_pause()
         elif key == "r":
             self.limiter.set_rate(1.0)
-        elif key == "\x1b[C":      # right
+        elif key == "\x1b[C":
             self.limiter.set_rate(self.limiter.rate + 0.5)
-        elif key == "\x1b[D":      # left
+        elif key == "\x1b[D":
             self.limiter.set_rate(self.limiter.rate - 0.5)
-        elif key == "\x1b[A":      # up
+        elif key == "\x1b[A":
             self.limiter.set_rate(self.limiter.rate + 0.05)
-        elif key == "\x1b[B":      # down
+        elif key == "\x1b[B":
             self.limiter.set_rate(self.limiter.rate - 0.05)
 
         return True
@@ -385,32 +381,20 @@ class KeyboardControls:
         print("paused" if self.paused else "playing", flush=True)
 
 
-
-
-def pause_on_first_buffer_probe(controls):
-    state = {"done": False}
-
-    def _probe(_pad, _info, _data):
-        if not state["done"]:
-            state["done"] = True
-            controls.paused = True
-            controls.pipeline.set_state(Gst.State.PAUSED)
-            print("paused", flush=True)
-        return Gst.PadProbeReturn.OK
-
-    return _probe
-
-
 def element(factory: str, name: str):
-    e = Gst.ElementFactory.make(factory, name)
-    if e is None:
+    elem = Gst.ElementFactory.make(factory, name)
+    if elem is None:
         raise RuntimeError(f"Missing GStreamer element: {factory}")
-    return e
+    return elem
 
 
-def on_pad_added(_demux, pad, parser):
-    if "video/x-h265" in (pad.get_current_caps() or pad.query_caps(None)).to_string():
-        pad.link(parser.get_static_pad("sink"))
+def on_pad_added(_demux, pad, parsers):
+    caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
+
+    if "video/x-h265" in caps:
+        pad.link(parsers["h265"].get_static_pad("sink"))
+    elif "video/x-h264" in caps:
+        pad.link(parsers["h264"].get_static_pad("sink"))
 
 
 def on_message(_bus, msg, loop):
@@ -428,9 +412,9 @@ def main():
     ap.add_argument("--model", default="yolo12x.pt")
     ap.add_argument("--long-side", type=int, default=640)
     ap.add_argument("--stream", default=str(DEFAULT_STREAM))
+    ap.add_argument("--conf", type=float, default=0.2)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--base-fps", type=float, default=30.0)
-    ap.add_argument("--start-paused", action="store_true")
     args = ap.parse_args()
 
     Gst.init(None)
@@ -439,15 +423,23 @@ def main():
     stream = stream if stream.is_absolute() else PROJECT_DIR / stream
 
     src_w, src_h = discover_size(stream)
-    model_w, model_h, config = ensure_model(args.model, stream, args.long_side, src_w, src_h)
+    model_w, model_h, config = ensure_model(
+        args.model,
+        stream,
+        args.long_side,
+        src_w,
+        src_h,
+        args.conf,
+    )
 
-    print(f"video={src_w}x{src_h} model={model_w}x{model_h} config={config}")
+    print(f"video={src_w}x{src_h} model={model_w}x{model_h} conf={args.conf} config={config}")
 
     pipeline = Gst.Pipeline.new("yolo-parser")
 
     source = element("filesrc", "source")
-    demux = element("tsdemux", "demux")
-    parser = element("h265parse", "parser")
+    demux = element("qtdemux", "demux")
+    h265_parser = element("h265parse", "h265-parser")
+    h264_parser = element("h264parse", "h264-parser")
     decoder = element("nvv4l2decoder", "decoder")
     queue = element("queue", "queue")
     streammux = element("nvstreammux", "streammux")
@@ -475,12 +467,26 @@ def main():
     sink.set_property("sync", False)
     sink.set_property("qos", False)
 
-    for e in (source, demux, parser, decoder, queue, streammux, pgie, convert, caps, osd, sink):
-        pipeline.add(e)
+    for elem in (
+        source,
+        demux,
+        h265_parser,
+        h264_parser,
+        decoder,
+        queue,
+        streammux,
+        pgie,
+        convert,
+        caps,
+        osd,
+        sink,
+    ):
+        pipeline.add(elem)
 
     source.link(demux)
-    demux.connect("pad-added", on_pad_added, parser)
-    parser.link(decoder)
+    demux.connect("pad-added", on_pad_added, {"h265": h265_parser, "h264": h264_parser})
+    h265_parser.link(decoder)
+    h264_parser.link(decoder)
     decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
     streammux.link(pgie)
@@ -489,7 +495,14 @@ def main():
     caps.link(osd)
     osd.link(sink)
 
-    pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, bbox_probe, None)
+    pgie.get_static_pad("src").add_probe(
+        Gst.PadProbeType.BUFFER,
+        bbox_probe(args.conf),
+        None,
+    )
+
+    limiter = RateLimiter(base_fps=args.base_fps)
+    sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
 
     if args.debug:
         timer = TimeLog()
@@ -504,17 +517,9 @@ def main():
             pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
     loop = GLib.MainLoop()
-    limiter = RateLimiter(base_fps=args.base_fps)
-    sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
-    controls = KeyboardControls(pipeline, loop, limiter, args.start_paused)
+    controls = KeyboardControls(pipeline, loop, limiter)
     controls.start()
 
-    if args.start_paused:
-        sink.get_static_pad("sink").add_probe(
-            Gst.PadProbeType.BUFFER,
-            pause_on_first_buffer_probe(controls),
-            None,
-        )
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", on_message, loop)

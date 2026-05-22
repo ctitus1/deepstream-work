@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     cmake \
+    ffmpeg \
     gdb \
     git \
     graphviz \
@@ -23,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     sudo \
     vim \
+    v4l-utils \
+    wget \
     x11-apps \
-    \
     python3-dev \
     python3-full \
     python3-gi \
@@ -32,22 +34,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     pybind11-dev \
-    \
     gir1.2-gst-plugins-base-1.0 \
     gir1.2-gstreamer-1.0 \
+    gir1.2-gst-rtsp-server-1.0 \
     gstreamer1.0-libav \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-ugly \
+    gstreamer1.0-rtsp \
     gstreamer1.0-tools \
     libgirepository1.0-dev \
     libglib2.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer1.0-dev \
+    libflac12 \
+    libdvdread8 \
+    libdvdnav4 \
+    libjbig0 \
+    libmpg123-0 \
+    libmp3lame0 \
+    mjpegtools \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
-# Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
 # Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
 RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/deepstream_python_apps \
     && cd /opt/deepstream_python_apps \
@@ -59,6 +69,15 @@ RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.
     && make -j"$(nproc)" \
     && PY_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
     && cp pyds*.so "$PY_SITE/"
+
+# Prevent CUDA compat libcuda from shadowing the host-mounted NVIDIA driver libcuda.
+RUN set -eux; \
+    for d in /usr/local/cuda*/compat; do \
+        [ -d "$d" ] || continue; \
+        mkdir -p "$d.disabled"; \
+        mv "$d"/libcuda.so* "$d.disabled"/ 2>/dev/null || true; \
+    done; \
+    ldconfig
 
 RUN set -eux; \
     if getent group "${USER_GID}" >/dev/null; then \
@@ -80,11 +99,13 @@ RUN set -eux; \
     mkdir -p "/home/${USERNAME}"; \
     chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}"
 
-# RTSP server Python GI bindings and GStreamer RTSP plugins.
-# Kept late to avoid rebuilding earlier DeepStream/pyds layers during app dev.
+# Late dev layer: packages/tools needed by your RTSP timestamp testing and YOLO export script.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gir1.2-gst-rtsp-server-1.0 \
     gstreamer1.0-rtsp \
+    python3-venv \
+    python3-pip \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .bashrc.container /home/${USERNAME}/.bashrc

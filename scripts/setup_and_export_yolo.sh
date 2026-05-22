@@ -98,6 +98,7 @@ python -m pip install \
     ultralytics \
     onnx \
     onnxsim \
+    onnxslim \
     onnxruntime \
     onnxscript \
     open_clip_torch \

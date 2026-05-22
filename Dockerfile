@@ -113,6 +113,11 @@ RUN chown ${USER_UID}:${USER_GID} /home/${USERNAME}/.bashrc
 
 WORKDIR /home/user/deepstream-work
 
+# Late dev layer: gst-discoverer-1.0 for stream/file probing.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gstreamer1.0-plugins-base-apps \
+    && rm -rf /var/lib/apt/lists/*
+
 USER ${USERNAME}
 
 CMD ["/bin/bash"]

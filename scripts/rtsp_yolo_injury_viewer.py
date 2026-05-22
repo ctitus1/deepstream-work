@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -60,6 +61,21 @@ def seconds(ns: int) -> str:
     if ns == Gst.CLOCK_TIME_NONE or ns < 0:
         return "NONE"
     return f"{ns / 1e9:.3f}s"
+
+
+def safe_tag(text: str, max_len: int = 24) -> str:
+    out = "".join(c if c.isalnum() or c in "._-" else "_" for c in text)
+    out = "_".join(x for x in out.split("_") if x)
+    return (out or "stream")[:max_len]
+
+
+def uri_tag(uri: str) -> str:
+    parsed = urlparse(uri)
+    if parsed.scheme:
+        name = Path(parsed.path).name or parsed.netloc or parsed.scheme
+    else:
+        name = Path(uri).name
+    return safe_tag(name, 24)
 
 
 def get_stream_time(buffer: Gst.Buffer):
@@ -130,6 +146,128 @@ class GstDisplay:
             self.appsrc.emit("end-of-stream")
         if self.pipeline is not None:
             self.pipeline.set_state(Gst.State.NULL)
+
+
+class VideoRecorder:
+    def __init__(self, enabled: bool, output_dir: Path, uri: str, yolo_conf: float, display_width: int, fps: float):
+        self.enabled = enabled
+        self.output_dir = output_dir
+        self.uri = uri
+        self.yolo_conf = yolo_conf
+        self.display_width = display_width
+        self.fps = fps
+
+        self.pipeline = None
+        self.appsrc = None
+        self.path = None
+        self.width = None
+        self.height = None
+
+        self.t0_ns = None
+        self.last_pts = None
+        self.stopping = False
+
+    def _make_path(self, start_sys_ns: int):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        ts = dt.datetime.fromtimestamp(start_sys_ns / 1e9, tz=dt.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+        src = uri_tag(self.uri)
+        w = "orig" if self.display_width <= 0 else f"w{self.display_width}"
+        yc = f"yc{int(round(self.yolo_conf * 100)):02d}"
+        return self.output_dir / f"assess_{ts}_{src}_{yc}_{w}.mp4"
+
+    def _start(self, width: int, height: int, start_sys_ns: int):
+        self.width = width
+        self.height = height
+        self.path = self._make_path(start_sys_ns)
+
+        if Gst.ElementFactory.find("nvv4l2h264enc"):
+            enc = (
+                "videoconvert ! video/x-raw,format=RGBA ! "
+                "nvvideoconvert ! video/x-raw(memory:NVMM),format=NV12 ! "
+                "nvv4l2h264enc bitrate=8000000 iframeinterval=30 idrinterval=30 insert-sps-pps=true ! "
+                "h264parse ! mp4mux faststart=true"
+            )
+        elif Gst.ElementFactory.find("nvh264enc"):
+            enc = (
+                "videoconvert ! video/x-raw,format=NV12 ! "
+                "nvh264enc bitrate=8000 gop-size=30 zerolatency=true ! "
+                "h264parse ! mp4mux faststart=true"
+            )
+        elif Gst.ElementFactory.find("openh264enc"):
+            enc = (
+                "videoconvert ! video/x-raw,format=I420 ! "
+                "openh264enc bitrate=8000000 ! "
+                "h264parse ! mp4mux faststart=true"
+            )
+        else:
+            raise RuntimeError("No H.264 encoder found: need nvv4l2h264enc, nvh264enc, or openh264enc")
+
+        self.pipeline = Gst.parse_launch(
+            'appsrc name=src is-live=true block=true format=time do-timestamp=false '
+            f'caps=video/x-raw,format=BGR,width={width},height={height},framerate=30/1 ! '
+            'queue max-size-buffers=30 max-size-bytes=0 max-size-time=0 ! '
+            f'{enc} ! '
+            f'filesink location="{self.path}"'
+        )
+        self.appsrc = self.pipeline.get_by_name("src")
+        self.pipeline.set_state(Gst.State.PLAYING)
+        print(f"save video={self.path}", flush=True)
+
+    def write(self, frame_bgr, sys_ns: int):
+        if not self.enabled or self.stopping:
+            return
+
+        h, w = frame_bgr.shape[:2]
+        if self.pipeline is None:
+            self._start(w, h, sys_ns)
+            self.t0_ns = sys_ns
+
+        if w != self.width or h != self.height:
+            return
+
+        pts = max(0, sys_ns - self.t0_ns)
+        if self.last_pts is not None and pts <= self.last_pts:
+            pts = self.last_pts + 1
+        self.last_pts = pts
+
+        data = frame_bgr.tobytes()
+        buf = Gst.Buffer.new_allocate(None, len(data), None)
+        buf.fill(0, data)
+        buf.pts = pts
+        buf.dts = pts
+        buf.duration = Gst.CLOCK_TIME_NONE
+
+        self.appsrc.emit("push-buffer", buf)
+
+    def stop(self):
+        self.stopping = True
+
+        if self.pipeline is None:
+            return
+
+        if self.appsrc is not None:
+            self.appsrc.emit("end-of-stream")
+
+        bus = self.pipeline.get_bus()
+        msg = bus.timed_pop_filtered(
+            5 * Gst.SECOND,
+            Gst.MessageType.EOS | Gst.MessageType.ERROR,
+        )
+
+        if msg and msg.type == Gst.MessageType.ERROR:
+            err, dbg = msg.parse_error()
+            print(f"record error={err}", flush=True)
+            print(f"record debug={dbg}", flush=True)
+
+        self.pipeline.set_state(Gst.State.NULL)
+
+        if self.path and self.path.exists():
+            print(f"saved video={self.path} bytes={self.path.stat().st_size}", flush=True)
+        else:
+            print(f"saved video={self.path} missing", flush=True)
+
+        self.pipeline = None
+        self.appsrc = None
 
 class InjuryClassifier:
     def __init__(self, model_path: Path, device: str):
@@ -252,13 +390,23 @@ def draw_label(img, x1, y1, lines, color):
         y += line_h
 
 
-def make_probe(classifier: InjuryClassifier, args, display: GstDisplay):
+def make_probe(classifier: InjuryClassifier, args, display: GstDisplay, recorder: VideoRecorder):
+    fps_state = {"last_ns": None, "fps": 0.0}
+    record_state = {"first_ns": None, "frames": 0, "recording": False}
+
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
         if buffer is None:
             return Gst.PadProbeReturn.OK
 
         sys_ns = time.time_ns()
+
+        if fps_state["last_ns"] is not None:
+            dt_s = max(1e-9, (sys_ns - fps_state["last_ns"]) / 1e9)
+            inst_fps = 1.0 / dt_s
+            fps_state["fps"] = inst_fps if fps_state["fps"] <= 0 else (0.9 * fps_state["fps"] + 0.1 * inst_fps)
+        fps_state["last_ns"] = sys_ns
+
         frame_ns = get_stream_time(buffer)
         frame_s = ns_to_hhmmss(frame_ns) if frame_ns is not None else "NONE"
         sys_s = ns_to_hhmmss(sys_ns)
@@ -306,7 +454,7 @@ def make_probe(classifier: InjuryClassifier, args, display: GstDisplay):
                 lines = label_text(box_id, "person", conf, injury)
                 draw_label(frame_bgr, x1, y1, lines, color)
 
-            header = f"frame={frame_s} sys={sys_s} age={age_s} pts={seconds(buffer.pts)} n={len(crops)}"
+            header = f"frame={frame_s} sys={sys_s} age={age_s} pts={seconds(buffer.pts)} n={len(crops)} fps={fps_state['fps']:.1f}"
             cv2.rectangle(frame_bgr, (0, 0), (frame_bgr.shape[1], 34), (0, 0, 0), -1)
             cv2.putText(frame_bgr, header, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -317,6 +465,27 @@ def make_probe(classifier: InjuryClassifier, args, display: GstDisplay):
                 out = frame_bgr
 
             display.push(out)
+
+            if args.save_video:
+                if record_state["first_ns"] is None:
+                    record_state["first_ns"] = sys_ns
+                    print(
+                        f"record warmup={args.record_delay_sec:.1f}s/{args.record_delay_frames} frames",
+                        flush=True,
+                    )
+
+                record_state["frames"] += 1
+                warmup_s = (sys_ns - record_state["first_ns"]) / 1e9
+                ready = (
+                    warmup_s >= args.record_delay_sec
+                    and record_state["frames"] >= args.record_delay_frames
+                )
+
+                if ready:
+                    if not record_state["recording"]:
+                        record_state["recording"] = True
+                        print("record start", flush=True)
+                    recorder.write(out, sys_ns)
 
             frame_list = frame_list.next
 
@@ -346,6 +515,11 @@ def main():
     parser.add_argument("--conf-red", type=float, default=0.20)
     parser.add_argument("--conf-green", type=float, default=0.80)
     parser.add_argument("--display-width", type=int, default=0)
+    parser.add_argument("--save-video", action="store_true")
+    parser.add_argument("--output-dir", default="outputs")
+    parser.add_argument("--save-fps", type=float, default=30.0)  # compatibility; MP4 PTS uses output sys time
+    parser.add_argument("--record-delay-sec", type=float, default=3.0)
+    parser.add_argument("--record-delay-frames", type=int, default=10)
     args = parser.parse_args()
 
     Gst.init(None)
@@ -415,10 +589,18 @@ def main():
     clip_queue.link(sink)
 
     display = GstDisplay("assess")
+    recorder = VideoRecorder(
+        enabled=args.save_video,
+        output_dir=PROJECT_DIR / args.output_dir,
+        uri=args.uri,
+        yolo_conf=args.yolo_conf_min,
+        display_width=args.display_width,
+        fps=args.save_fps,
+    )
 
     clip_queue.get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER,
-        make_probe(classifier, args, display),
+        make_probe(classifier, args, display, recorder),
         None,
     )
 
@@ -434,6 +616,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        pipeline.set_state(Gst.State.PAUSED)
+        recorder.stop()
         pipeline.set_state(Gst.State.NULL)
         display.stop()
 

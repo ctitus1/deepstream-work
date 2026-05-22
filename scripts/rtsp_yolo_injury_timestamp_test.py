@@ -8,15 +8,13 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
-import torch
 import numpy as np
+import torch
 import torch.nn as nn
 from PIL import Image
 from torchvision import transforms
 
-import clip
 from clip.model import build_model
-
 import pyds
 
 
@@ -30,8 +28,8 @@ def ntp_ns_to_unix_ns(ntp_ns: int) -> int:
     return ntp_ns - NTP_TO_UNIX_SECONDS * NS_PER_SEC
 
 
-def ns_to_utc(ns: int) -> str:
-    return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.timezone.utc).isoformat(timespec="milliseconds")
+def ns_to_hhmmss(ns: int) -> str:
+    return dt.datetime.fromtimestamp(ns / 1e9, tz=dt.timezone.utc).strftime("%H:%M:%S.%f")[:-3] + "Z"
 
 
 def seconds(ns: int) -> str:
@@ -58,6 +56,70 @@ def find_yolo_config() -> Path:
     return matches[0]
 
 
+class DetectTimingCache:
+    def __init__(self, yolo_conf_min: float, max_items: int = 512):
+        self.yolo_conf_min = yolo_conf_min
+        self.max_items = max_items
+        self.by_pts = {}
+
+    def _collect_targets(self, buffer: Gst.Buffer):
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+        if not batch_meta:
+            return []
+
+        targets = []
+        frame_list = batch_meta.frame_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            obj_list = frame_meta.obj_meta_list
+            while obj_list:
+                obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+                conf = float(obj.confidence)
+                if obj.class_id == PERSON_CLASS_ID and conf >= self.yolo_conf_min:
+                    r = obj.rect_params
+                    box = (
+                        int(r.left),
+                        int(r.top),
+                        int(r.left + r.width),
+                        int(r.top + r.height),
+                    )
+                    targets.append((box, conf))
+                obj_list = obj_list.next
+            frame_list = frame_list.next
+        return targets
+
+    def remember_probe(self, _pad, info, _data):
+        buffer = info.get_buffer()
+        if not buffer or buffer.pts == Gst.CLOCK_TIME_NONE:
+            return Gst.PadProbeReturn.OK
+
+        pts = int(buffer.pts)
+        stream_ns = get_stream_time(buffer)
+        detect_ns = time.time_ns()
+        targets = self._collect_targets(buffer)
+
+        self.by_pts[pts] = {
+            "stream_ns": stream_ns,
+            "detect_ns": detect_ns,
+            "targets": len(targets),
+            "boxes": targets,
+        }
+        while len(self.by_pts) > self.max_items:
+            self.by_pts.pop(next(iter(self.by_pts)))
+
+        print(
+            fmt_timing("DETECT", detect_ns, stream_ns, detect_ns, None, buffer.pts, len(targets)),
+            flush=True,
+        )
+
+        return Gst.PadProbeReturn.OK
+
+    def get(self, buffer: Gst.Buffer):
+        if buffer.pts != Gst.CLOCK_TIME_NONE:
+            return self.by_pts.get(int(buffer.pts), {})
+        return {}
+
+
 class InjuryClassifier:
     def __init__(self, model_path: Path, device: str):
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
@@ -70,8 +132,8 @@ class InjuryClassifier:
 
         self.model = build_model(clip_state).to(device).eval()
 
-        self.heads = nn.ModuleDict()
         head_names = sorted({k.split(".")[1] for k in ckpt if k.startswith("heads.")})
+        self.heads = nn.ModuleDict()
 
         for name in head_names:
             w = ckpt[f"heads.{name}.weight"]
@@ -100,9 +162,7 @@ class InjuryClassifier:
             return []
 
         x = torch.stack([self.preprocess(crop) for crop in crops]).to(self.device)
-
-        feats = self.model.encode_image(x)
-        feats = feats.float()
+        feats = self.model.encode_image(x).float()
 
         results = []
         for i in range(len(crops)):
@@ -135,42 +195,62 @@ def clamp_box(rect, frame_w: int, frame_h: int):
     y1 = max(0, min(frame_h - 1, int(rect.top)))
     x2 = max(0, min(frame_w, int(rect.left + rect.width)))
     y2 = max(0, min(frame_h, int(rect.top + rect.height)))
-
     if x2 <= x1 or y2 <= y1:
         return None
-
     return x1, y1, x2, y2
 
 
-def make_output_probe(classifier: InjuryClassifier, print_empty: bool):
+def fmt_timing(status: str, sys_ns: int, frame_ns, detect_ns, assess_ns, pts, n_targets: int):
+    frame_s = ns_to_hhmmss(frame_ns) if frame_ns is not None else "NONE"
+    detect_s = ns_to_hhmmss(detect_ns) if detect_ns is not None else "NONE"
+    assess_s = ns_to_hhmmss(assess_ns) if assess_ns is not None else "NONE"
+    sys_s = ns_to_hhmmss(sys_ns)
+    age_s = f"{(sys_ns - frame_ns) / 1e9:.3f}s" if frame_ns is not None else "NONE"
+
+    return (
+        f"{status:<12}"
+        f"frame={frame_s:<13} "
+        f"detect={detect_s:<13} "
+        f"assess={assess_s:<13} "
+        f"sys={sys_s:<13} "
+        f"pts={seconds(pts):>8} "
+        f"age={age_s:>8} "
+        f"n={n_targets:>2}"
+    )
+
+
+def make_output_probe(classifier: InjuryClassifier, timing: DetectTimingCache, yolo_conf_min: float):
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
         if buffer is None:
             return Gst.PadProbeReturn.OK
 
         recv_ns = time.time_ns()
-        stream_ns = get_stream_time(buffer)
+        cached = timing.get(buffer)
+        stream_ns = cached.get("stream_ns", get_stream_time(buffer))
+        detect_ns = cached.get("detect_ns")
+        detected_targets = int(cached.get("targets", 0))
 
         batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
         if not batch_meta:
+            print(fmt_timing("DROP no_meta", recv_ns, stream_ns, detect_ns, None, buffer.pts, 0), flush=True)
             return Gst.PadProbeReturn.OK
 
-        frame_list = batch_meta.frame_meta_list
+        crops = []
+        boxes = []
+        confs = []
 
+        frame_list = batch_meta.frame_meta_list
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             frame_rgba = pyds.get_nvds_buf_surface(hash(buffer), frame_meta.batch_id)
             frame_h, frame_w = frame_rgba.shape[:2]
 
-            crops = []
-            boxes = []
-            confs = []
-
             obj_list = frame_meta.obj_meta_list
             while obj_list:
                 obj = pyds.NvDsObjectMeta.cast(obj_list.data)
 
-                if obj.class_id == PERSON_CLASS_ID:
+                if obj.class_id == PERSON_CLASS_ID and float(obj.confidence) >= yolo_conf_min:
                     box = clamp_box(obj.rect_params, frame_w, frame_h)
                     if box is not None:
                         x1, y1, x2, y2 = box
@@ -180,35 +260,19 @@ def make_output_probe(classifier: InjuryClassifier, print_empty: bool):
                         confs.append(float(obj.confidence))
 
                 obj_list = obj_list.next
-
-            if crops or print_empty:
-                if stream_ns is not None:
-                    latency_ms = (recv_ns - stream_ns) / 1e6
-                    ts = (
-                        f"local={ns_to_utc(recv_ns)} "
-                        f"stream={ns_to_utc(stream_ns)} "
-                        f"latency={latency_ms:.1f}ms"
-                    )
-                else:
-                    ts = f"local={ns_to_utc(recv_ns)} stream=NONE latency=NONE"
-
-                injury_results = classifier.classify(crops)
-
-                parts = []
-                for box, det_conf, injury in zip(boxes, confs, injury_results):
-                    injury_str = ",".join(
-                        f"{name}=class{cls}:{prob:.2f}"
-                        for name, (cls, prob) in injury.items()
-                    )
-                    parts.append(f"box={box} yolo={det_conf:.2f} {injury_str}")
-
-                print(
-                    f"{ts} pts={seconds(buffer.pts)} persons={len(crops)} "
-                    + " | ".join(parts),
-                    flush=True,
-                )
-
             frame_list = frame_list.next
+
+        if not crops:
+            print(fmt_timing("ASSESS_SKIP no_targets", recv_ns, stream_ns, detect_ns, None, buffer.pts, 0), flush=True)
+            return Gst.PadProbeReturn.OK
+
+        _injury_results = classifier.classify(crops)
+        assess_end_ns = time.time_ns()
+
+        print(
+            fmt_timing("ASSESS", assess_end_ns, stream_ns, detect_ns, assess_end_ns, buffer.pts, len(crops)),
+            flush=True,
+        )
 
         return Gst.PadProbeReturn.OK
 
@@ -232,7 +296,7 @@ def main():
     parser.add_argument("--latency", type=int, default=0)
     parser.add_argument("--yolo-config", default=None)
     parser.add_argument("--injury-model", default="models/injury.pt")
-    parser.add_argument("--print-empty", action="store_true")
+    parser.add_argument("--yolo-conf-min", type=float, default=0.25)
     args = parser.parse_args()
 
     Gst.init(None)
@@ -251,11 +315,12 @@ def main():
     depay = make_element("rtph264depay", "depay")
     parse = make_element("h264parse", "parse")
     dec = make_element("nvv4l2decoder", "decoder")
-    queue = make_element("queue", "queue")
+    queue = make_element("queue", "pre-mux-queue")
     mux = make_element("nvstreammux", "mux")
     infer = make_element("nvinfer", "infer")
     convert = make_element("nvvideoconvert", "convert")
     caps = make_element("capsfilter", "caps")
+    clip_queue = make_element("queue", "clip-queue")
     sink = make_element("fakesink", "sink")
 
     src.set_property("location", args.uri)
@@ -265,10 +330,11 @@ def main():
     src.set_property("ntp-sync", True)
     src.set_property("add-reference-timestamp-meta", True)
 
-    queue.set_property("leaky", 2)
-    queue.set_property("max-size-buffers", 1)
-    queue.set_property("max-size-bytes", 0)
-    queue.set_property("max-size-time", 0)
+    for q in (queue, clip_queue):
+        q.set_property("leaky", 2)
+        q.set_property("max-size-buffers", 1)
+        q.set_property("max-size-bytes", 0)
+        q.set_property("max-size-time", 0)
 
     mux.set_property("batch-size", 1)
     mux.set_property("width", 3840)
@@ -277,17 +343,14 @@ def main():
     mux.set_property("batched-push-timeout", 0)
 
     infer.set_property("config-file-path", str(yolo_config))
-    convert.set_property("nvbuf-memory-type", 3)  # CUDA unified memory for pyds.get_nvds_buf_surface
 
-    caps.set_property(
-        "caps",
-        Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"),
-    )
+    convert.set_property("nvbuf-memory-type", 3)  # CUDA unified memory for pyds.get_nvds_buf_surface on dGPU
+    caps.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"))
 
     sink.set_property("sync", False)
     sink.set_property("qos", False)
 
-    for elem in (src, depay, parse, dec, queue, mux, infer, convert, caps, sink):
+    for elem in (src, depay, parse, dec, queue, mux, infer, convert, caps, clip_queue, sink):
         pipeline.add(elem)
 
     src.connect("pad-added", on_rtsp_pad_added, depay)
@@ -299,11 +362,20 @@ def main():
     mux.link(infer)
     infer.link(convert)
     convert.link(caps)
-    caps.link(sink)
+    caps.link(clip_queue)
+    clip_queue.link(sink)
 
-    caps.get_static_pad("src").add_probe(
+    timing = DetectTimingCache(args.yolo_conf_min)
+
+    infer.get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER,
-        make_output_probe(classifier, args.print_empty),
+        timing.remember_probe,
+        None,
+    )
+
+    clip_queue.get_static_pad("src").add_probe(
+        Gst.PadProbeType.BUFFER,
+        make_output_probe(classifier, timing, args.yolo_conf_min),
         None,
     )
 

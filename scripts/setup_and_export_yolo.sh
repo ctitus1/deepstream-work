@@ -100,6 +100,10 @@ python -m pip install \
     onnxsim \
     onnxslim \
     onnxruntime \
+    git+https://github.com/openai/CLIP.git \
+    tqdm \
+    regex \
+    ftfy \
     onnxscript \
     open_clip_torch \
     timm \

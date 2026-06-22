@@ -90,16 +90,21 @@ from deepstream_yolo.paths import DEFAULT_STREAM, resolve_project_path
 
 PERSON_CLASS_ID = 0
 ASSESSMENT_GIE_ID = 2
-ASSESSMENT_ALIASES = {
-    "severe_hemorrhage": "hem",
-    "respiratory_distress": "resp",
-    "trauma_head": "head",
-    "trauma_torso": "torso",
-    "trauma_upper_ext": "upper",
-    "trauma_lower_ext": "lower",
-    "alertness_ocular": "ocular",
-    "person_type": "type",
+ASSESSMENT_LABELS = {
+    "severe_hemorrhage": {0: "hem-", 1: "hem+", 2: "hem?"},
+    "respiratory_distress": {0: "resp-", 1: "resp+", 2: "resp?"},
+    "trauma_head": {0: "head-", 1: "head+", 3: "head?"},
+    "trauma_torso": {0: "torso-", 1: "torso+", 3: "torso?"},
+    "trauma_upper_ext": {0: "upper-", 1: "upper+", 2: "upper_amp", 4: "upper?"},
+    "trauma_lower_ext": {0: "lower-", 1: "lower+", 2: "lower_amp", 4: "lower?"},
+    "alertness_ocular": {0: "eyes_open", 1: "eyes_closed", 2: "eyes_nt", 3: "eyes?"},
+    "person_type": {0: "manikin", 1: "human", 2: "type?"},
 }
+ASSESSMENT_DISPLAY_ROWS = (
+    ("person_type", "severe_hemorrhage", "respiratory_distress"),
+    ("trauma_head", "trauma_torso"),
+    ("trauma_upper_ext", "trauma_lower_ext", "alertness_ocular"),
+)
 
 
 def stop_gst_scan_warning_filter() -> None:
@@ -152,7 +157,8 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     text = meta.text_params[0]
     text.display_text = label
     text.x_offset = max(0, x1 - line_width // 2)
-    text.y_offset = max(0, y1 - 2 * font_size - 100)
+    text_height = max(18, 2 * font_size + 8)
+    text.y_offset = max(0, y1 - text_height)
     text.font_params.font_name = "Serif"
     text.font_params.font_size = font_size
     text.font_params.font_color.set(*color)
@@ -266,26 +272,41 @@ def parse_assessment_tensor_meta(tensor_meta) -> dict[str, dict]:
     return predictions
 
 
-def compact_assessment(predictions: dict[str, dict], *, include_zero: bool = False) -> str:
-    parts = []
-    for head_name in INJURY_HEADS:
-        pred = predictions.get(head_name)
-        if not pred:
-            continue
-        class_id = int(pred["class_id"])
-        confidence = float(pred["confidence"])
-        if include_zero or class_id != 0:
-            alias = ASSESSMENT_ALIASES.get(head_name, head_name)
-            parts.append(f"{alias}:{class_id}@{confidence:.2f}")
+def injury_label(name: str, predictions: dict[str, dict]) -> str:
+    pred = predictions.get(name)
+    if not pred:
+        return ""
 
-    if parts:
-        return " ".join(parts)
-    return "class0"
+    class_id = int(pred["class_id"])
+    return ASSESSMENT_LABELS.get(name, {}).get(class_id, f"{name}=class{class_id}")
 
 
-def set_assessment_text(obj, label: str) -> None:
+def label_text(box_id: int, yolo_label: str, predictions: dict[str, dict]) -> list[str]:
+    lines = [f"{yolo_label} {box_id} injuries:"]
+
+    for row in ASSESSMENT_DISPLAY_ROWS:
+        labels = [injury_label(name, predictions) for name in row]
+        labels = [label for label in labels if label]
+        if labels:
+            lines.append("  ".join(labels))
+
+    return lines
+
+
+def label_log_text(lines: list[str]) -> str:
+    return " | ".join(lines)
+
+
+def normalized_object_id(obj) -> int:
+    object_id = getattr(obj, "object_id", -1)
+    if object_id == 0xFFFFFFFFFFFFFFFF:
+        return -1
+    return int(object_id)
+
+
+def set_assessment_text(obj, lines: list[str]) -> None:
     rect = obj.rect_params
-    obj.text_params.display_text = f"injury {label}"
+    obj.text_params.display_text = "\n".join(lines)
     obj.text_params.x_offset = max(0, round(rect.left))
     obj.text_params.y_offset = max(0, round(rect.top + rect.height + 8))
     obj.text_params.font_params.font_name = "Serif"
@@ -300,7 +321,7 @@ class AssessmentReporter:
         self.interval = max(0.0, interval)
         self.last_log_time = 0.0
 
-    def maybe_log(self, frame_num: int, obj, predictions: dict[str, dict]) -> None:
+    def maybe_log(self, frame_num: int, obj, lines: list[str]) -> None:
         if self.interval == 0:
             return
 
@@ -310,15 +331,13 @@ class AssessmentReporter:
 
         self.last_log_time = now
         rect = obj.rect_params
-        object_id = getattr(obj, "object_id", -1)
-        if object_id == 0xFFFFFFFFFFFFFFFF:
-            object_id = -1
+        object_id = normalized_object_id(obj)
         print(
             "ASSESS "
             f"frame={frame_num} "
             f"object={object_id} "
             f"bbox={rect.left:.0f},{rect.top:.0f},{rect.width:.0f},{rect.height:.0f} "
-            f"{compact_assessment(predictions, include_zero=True)}",
+            f"{label_log_text(lines)}",
             flush=True,
         )
 
@@ -333,10 +352,14 @@ def assessment_probe(reporter: AssessmentReporter):
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             obj_list = frame_meta.obj_meta_list
+            person_index = 0
 
             while obj_list:
                 obj = pyds.NvDsObjectMeta.cast(obj_list.data)
                 user_meta_list = obj.obj_user_meta_list
+                box_id = person_index
+                if obj.class_id == PERSON_CLASS_ID:
+                    person_index += 1
 
                 while user_meta_list:
                     user_meta = pyds.NvDsUserMeta.cast(user_meta_list.data)
@@ -345,9 +368,13 @@ def assessment_probe(reporter: AssessmentReporter):
                         if int(tensor_meta.unique_id) == ASSESSMENT_GIE_ID:
                             predictions = parse_assessment_tensor_meta(tensor_meta)
                             if predictions:
-                                label = compact_assessment(predictions)
-                                set_assessment_text(obj, label)
-                                reporter.maybe_log(int(frame_meta.frame_num), obj, predictions)
+                                lines = label_text(
+                                    box_id,
+                                    "person",
+                                    predictions,
+                                )
+                                set_assessment_text(obj, lines)
+                                reporter.maybe_log(int(frame_meta.frame_num), obj, lines)
 
                     user_meta_list = user_meta_list.next
 

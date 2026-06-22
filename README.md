@@ -90,6 +90,24 @@ warnings while debugging:
 python3 src/deepstream_yolo_parser_app.py --show-gst-scan-warnings
 ```
 
+## Code layout
+
+`src/deepstream_yolo_parser_app.py` is the executable entry point. It parses CLI
+arguments, resolves model artifacts, builds the pipeline, attaches probes, and
+starts the GLib loop. Most behavior lives in focused modules under
+`src/deepstream_yolo/`:
+
+- `pipeline.py`: GStreamer element creation, properties, linking, and bus
+  message handling.
+- `detection_overlay.py`: person bbox drawing and confidence coloring.
+- `assessment_runtime.py`: injury tensor parsing, injury labels, assessment OSD
+  text, and assessment log output.
+- `controls.py`: keyboard controls and frame-rate limiting.
+- `timing.py`: optional debug FPS and stage timing probes.
+- `gst_warnings.py`: startup-only GStreamer plugin-scan warning suppression.
+- `model_cache.py`, `configs.py`, `injury.py`, and `paths.py`: artifact
+  discovery, generated config writing, injury model export, and project paths.
+
 ## Export environment
 
 To install or refresh only the YOLO export dependencies:

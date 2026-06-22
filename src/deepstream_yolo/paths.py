@@ -13,7 +13,9 @@ LABELS_PATH = MODELS_DIR / "coco_labels.txt"
 CUSTOM_LIB_PATH = LIB_DIR / "libnvdsinfer_custom_impl_Yolo.so"
 YOLO_PYTHON = PROJECT_DIR / ".venv-yolo" / "bin" / "python3"
 
-DEFAULT_STREAM = PROJECT_DIR / "streams" / "dtc-d4-trimmed.mp4"
+DEFAULT_MEDIA = PROJECT_DIR / "streams" / "dtc-d4-trimmed.mp4"
+DEFAULT_RTSP_URL = "rtsp://127.0.0.1:8555/dtc-d4-trimmed"
+DEFAULT_STREAM = DEFAULT_RTSP_URL
 SETUP_SCRIPT = SCRIPTS_DIR / "setup_and_export_yolo.sh"
 INJURY_SETUP_SCRIPT = SCRIPTS_DIR / "setup_injury_model.sh"
 

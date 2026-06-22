@@ -8,6 +8,8 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+from .stream_source import StreamSource
+
 
 @dataclass
 class PipelineParts:
@@ -35,13 +37,34 @@ def configure_latest_queue(queue) -> None:
     queue.set_property("leaky", 2)
 
 
-def on_pad_added(_demux, pad, parsers):
+def set_property_if_present(elem, name: str, value) -> None:
+    if elem.find_property(name):
+        elem.set_property(name, value)
+
+
+def link_dynamic_pad(pad, sink) -> None:
+    if sink.is_linked():
+        return
+    pad.link(sink)
+
+
+def on_file_pad_added(_demux, pad, parsers):
     caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
 
     if "video/x-h265" in caps:
-        pad.link(parsers["h265"].get_static_pad("sink"))
+        link_dynamic_pad(pad, parsers["h265"].get_static_pad("sink"))
     elif "video/x-h264" in caps:
-        pad.link(parsers["h264"].get_static_pad("sink"))
+        link_dynamic_pad(pad, parsers["h264"].get_static_pad("sink"))
+
+
+def on_rtsp_pad_added(_source, pad, depayloaders):
+    caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
+    caps_lower = caps.lower()
+
+    if "encoding-name=(string)h265" in caps_lower or "encoding-name=h265" in caps_lower:
+        link_dynamic_pad(pad, depayloaders["h265"].get_static_pad("sink"))
+    elif "encoding-name=(string)h264" in caps_lower or "encoding-name=h264" in caps_lower:
+        link_dynamic_pad(pad, depayloaders["h264"].get_static_pad("sink"))
 
 
 def on_message(_bus, msg, loop):
@@ -54,11 +77,25 @@ def on_message(_bus, msg, loop):
     return True
 
 
-def build_pipeline(stream, src_w: int, src_h: int, config, assessment_config=None) -> PipelineParts:
+def build_pipeline(
+    stream: StreamSource,
+    src_w: int,
+    src_h: int,
+    config,
+    assessment_config=None,
+) -> PipelineParts:
     pipeline = Gst.Pipeline.new("yolo-parser")
 
-    source = element("filesrc", "source")
-    demux = element("qtdemux", "demux")
+    if stream.is_rtsp:
+        source = element("rtspsrc", "source")
+        h265_depay = element("rtph265depay", "h265-depay")
+        h264_depay = element("rtph264depay", "h264-depay")
+        source_elements = [source, h265_depay, h264_depay]
+    else:
+        source = element("filesrc", "source")
+        demux = element("qtdemux", "demux")
+        source_elements = [source, demux]
+
     h265_parser = element("h265parse", "h265-parser")
     h264_parser = element("h264parse", "h264-parser")
     decoder = element("nvv4l2decoder", "decoder")
@@ -72,13 +109,22 @@ def build_pipeline(stream, src_w: int, src_h: int, config, assessment_config=Non
     osd = element("nvdsosd", "osd")
     sink = element("nveglglessink", "sink")
 
-    source.set_property("location", str(stream))
+    if stream.is_rtsp:
+        source.set_property("location", stream.uri)
+        set_property_if_present(source, "latency", 200)
+        set_property_if_present(source, "drop-on-latency", True)
+        set_property_if_present(source, "ntp-sync", True)
+        set_property_if_present(source, "add-reference-timestamp-meta", True)
+    else:
+        if stream.path is None:
+            raise ValueError(f"Unsupported stream URI for this pipeline: {stream.uri}")
+        source.set_property("location", str(stream.path))
+
     streammux.set_property("batch-size", 1)
     streammux.set_property("width", src_w)
     streammux.set_property("height", src_h)
     streammux.set_property("batched-push-timeout", 40000)
-    if streammux.find_property("attach-sys-ts"):
-        streammux.set_property("attach-sys-ts", False)
+    set_property_if_present(streammux, "attach-sys-ts", False)
     pgie.set_property("config-file-path", str(config))
     if sgie:
         sgie.set_property("config-file-path", str(assessment_config))
@@ -99,16 +145,7 @@ def build_pipeline(stream, src_w: int, src_h: int, config, assessment_config=Non
     if assessment_queue:
         configure_latest_queue(assessment_queue)
 
-    elements = [
-        source,
-        demux,
-        h265_parser,
-        h264_parser,
-        decoder,
-        queue,
-        streammux,
-        pgie,
-    ]
+    elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux, pgie]
     if assessment_queue and sgie:
         elements.extend((assessment_queue, sgie))
     elements.extend((convert, caps, osd, sink))
@@ -116,8 +153,18 @@ def build_pipeline(stream, src_w: int, src_h: int, config, assessment_config=Non
     for elem in elements:
         pipeline.add(elem)
 
-    source.link(demux)
-    demux.connect("pad-added", on_pad_added, {"h265": h265_parser, "h264": h264_parser})
+    if stream.is_rtsp:
+        source.connect("pad-added", on_rtsp_pad_added, {"h265": h265_depay, "h264": h264_depay})
+        h265_depay.link(h265_parser)
+        h264_depay.link(h264_parser)
+    else:
+        source.link(demux)
+        demux.connect(
+            "pad-added",
+            on_file_pad_added,
+            {"h265": h265_parser, "h264": h264_parser},
+        )
+
     h265_parser.link(decoder)
     h264_parser.link(decoder)
     decoder.link(queue)

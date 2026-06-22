@@ -19,8 +19,9 @@ from deepstream_yolo.assessment_runtime import AssessmentReporter, assessment_pr
 from deepstream_yolo.controls import KeyboardControls, RateLimiter
 from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
-from deepstream_yolo.paths import DEFAULT_STREAM, resolve_project_path
+from deepstream_yolo.paths import DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
+from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 from deepstream_yolo.timing import TimeLog
 
 
@@ -41,6 +42,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_runtime_info(
+    stream: StreamSource,
     src_w: int,
     src_h: int,
     model_w: int,
@@ -51,7 +53,13 @@ def print_runtime_info(
     assessment_config,
     assessment_batch_size: int,
 ) -> None:
-    print(f"video={src_w}x{src_h} model={model_w}x{model_h} conf={conf} config={config}")
+    print(
+        f"stream={stream.display} "
+        f"video={src_w}x{src_h} "
+        f"model={model_w}x{model_h} "
+        f"conf={conf} "
+        f"config={config}"
+    )
     if assessment_config:
         print(
             "assessment="
@@ -103,11 +111,11 @@ def attach_debug_probes(parts) -> None:
 
 def main():
     args = parse_args()
-    stream = resolve_project_path(args.stream)
+    stream = resolve_stream_source(args.stream)
 
     try:
         Gst.init(None)
-        src_w, src_h = discover_size(stream)
+        src_w, src_h = discover_size(stream.uri)
     finally:
         stop_gst_scan_warning_filter(GST_SCAN_WARNING_FILTER)
 
@@ -129,6 +137,7 @@ def main():
         )
 
     print_runtime_info(
+        stream,
         src_w,
         src_h,
         model_w,

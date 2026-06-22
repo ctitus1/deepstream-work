@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from gi.repository import Gst, GstPbutils
 from .configs import generated_config_path, write_assessment_config, write_infer_config
 from .injury import assessment_stem, default_engine_path, default_meta_path, default_onnx_path
 from .paths import INJURY_SETUP_SCRIPT, MODELS_DIR, PROJECT_DIR, SETUP_SCRIPT, YOLO_PYTHON
+from .stream_source import StreamSource
 
 
 CACHE_POLICY = "parser_line_osd_conf_v2"
@@ -34,8 +36,8 @@ class AssessmentArtifacts:
     config: Path
 
 
-def discover_size(path: Path) -> tuple[int, int]:
-    info = GstPbutils.Discoverer.new(5 * Gst.SECOND).discover_uri(path.resolve().as_uri())
+def discover_size(stream_uri: str) -> tuple[int, int]:
+    info = GstPbutils.Discoverer.new(10 * Gst.SECOND).discover_uri(stream_uri)
     stream = info.get_video_streams()[0]
     return int(stream.get_width()), int(stream.get_height())
 
@@ -104,16 +106,19 @@ def size_from_meta(meta: dict) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
-def stream_for_setup(stream: Path) -> str:
+def stream_for_setup(stream: StreamSource) -> str:
+    if stream.path is None:
+        return stream.raw
+
     try:
-        return str(stream.relative_to(PROJECT_DIR))
+        return str(stream.path.relative_to(PROJECT_DIR))
     except ValueError:
-        return str(stream)
+        return str(stream.path)
 
 
 def ensure_model(
     model: str,
-    stream: Path,
+    stream: StreamSource,
     long_side: int,
     src_w: int,
     src_h: int,
@@ -130,9 +135,14 @@ def ensure_model(
         write_infer_config(artifacts.config, artifacts.onnx, artifacts.engine, conf)
         return width, height, artifacts.config
 
+    env = os.environ.copy()
+    env["SOURCE_WIDTH"] = str(src_w)
+    env["SOURCE_HEIGHT"] = str(src_h)
+
     subprocess.run(
         [str(SETUP_SCRIPT), model, str(long_side), stream_for_setup(stream)],
         cwd=PROJECT_DIR,
+        env=env,
         check=True,
     )
 

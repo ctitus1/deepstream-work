@@ -100,15 +100,28 @@ detect_dims() {
     local stream_path
     stream_path="$(absolute_path "$stream")"
 
-    if command -v gst-discoverer-1.0 >/dev/null 2>&1 && [ -f "$stream_path" ]; then
-        local out
-        out="$(gst-discoverer-1.0 "$stream_path" 2>/dev/null || true)"
-        local w h
-        w="$(printf '%s\n' "$out" | awk '/Width:/ {print $2; exit}')"
-        h="$(printf '%s\n' "$out" | awk '/Height:/ {print $2; exit}')"
-        if [ -n "$w" ] && [ -n "$h" ]; then
-            echo "$w $h"
-            return
+    if [ -n "${SOURCE_WIDTH:-}" ] && [ -n "${SOURCE_HEIGHT:-}" ]; then
+        echo "$SOURCE_WIDTH $SOURCE_HEIGHT"
+        return
+    fi
+
+    if command -v gst-discoverer-1.0 >/dev/null 2>&1; then
+        local discover_target=""
+        case "$stream" in
+            *://*) discover_target="$stream" ;;
+            *) [ -f "$stream_path" ] && discover_target="$stream_path" ;;
+        esac
+
+        if [ -n "$discover_target" ]; then
+            local out
+            out="$(gst-discoverer-1.0 "$discover_target" 2>/dev/null || true)"
+            local w h
+            w="$(printf '%s\n' "$out" | awk '/Width:/ {print $2; exit}')"
+            h="$(printf '%s\n' "$out" | awk '/Height:/ {print $2; exit}')"
+            if [ -n "$w" ] && [ -n "$h" ]; then
+                echo "$w $h"
+                return
+            fi
         fi
     fi
 

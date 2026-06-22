@@ -88,6 +88,11 @@ RUN chown ${USER_UID}:${USER_GID} /home/${USERNAME}/.bashrc
 
 WORKDIR ${WORKSPACE_DIR}
 
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gir1.2-gst-rtsp-server-1.0 \
+    && rm -rf /var/lib/apt/lists/*
+
 USER ${USERNAME}
 
 CMD ["/bin/bash"]

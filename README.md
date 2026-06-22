@@ -1,9 +1,9 @@
 # DeepStream YOLO Parser
 
-Development container and scripts for running YOLO models through NVIDIA
-DeepStream with the DeepStream-Yolo parser.
+Development container and scripts for running YOLO detections, optional injury
+assessment, and RTSP video input through NVIDIA DeepStream.
 
-## Typical workflow
+## Setup
 
 Build and enter the development container from the host:
 
@@ -12,61 +12,73 @@ scripts/build.sh
 scripts/run.sh
 ```
 
-If `docker-compose.yml` changes, exit any existing container and start a fresh
-one with `scripts/run.sh` so the updated mount path, hostname, and hosts entries
-are applied.
-
-Inside the container, build the custom YOLO parser library if needed. The script
-normalizes CUDA versions like `13.1.0` to the package suffix used by apt, such as
-`13-1`.
+Inside the container, build the custom YOLO parser library:
 
 ```bash
 scripts/build_yolo_parser.sh
 ```
 
-Export a model and generate local DeepStream configs. This creates or repairs
-`.venv-yolo/` automatically and calls `.venv-yolo/bin/python3` directly, so you
-do not need to activate the virtual environment.
+Export the YOLO model and generate DeepStream configs:
 
 ```bash
 scripts/setup_and_export_yolo.sh yolo12x-custom.pt 640 streams/dtc-d4-trimmed.mp4
 ```
 
-Generated DeepStream configs are written to `configs/generated/`.
+Generated configs are written to `configs/generated/`. The export scripts manage
+`.venv-yolo/` automatically and do not require activating a virtual environment.
 
-Run the Python parser app:
+## Run With RTSP
+
+Start a local RTSP stream from one container shell:
+
+```bash
+scripts/start_rtsp_stream.sh streams/dtc-d4-trimmed.mp4
+```
+
+By default this serves:
+
+```text
+rtsp://127.0.0.1:8555/dtc-d4-trimmed
+```
+
+Run the parser app from another container shell:
 
 ```bash
 python3 src/deepstream_yolo_parser_app.py --model yolo12x-custom.pt --long-side 640
 ```
 
-The app reuses matching cached ONNX artifacts when available and regenerates a
-local inference config under `configs/generated/`.
-
-## Injury assessment
-
-`models/injury.pt` is a CLIP ViT-L/14@336 image encoder with custom injury
-classification heads. Inspect the checkpoint:
+The parser defaults to the RTSP URL above. To use a different RTSP stream:
 
 ```bash
-PYTHONPATH=src python3 -m deepstream_yolo.injury inspect --model models/injury.pt
+python3 src/deepstream_yolo_parser_app.py \
+  --model yolo12x-custom.pt \
+  --long-side 640 \
+  --stream rtsp://127.0.0.1:8560/test
 ```
 
-Export it to ONNX and generate the secondary DeepStream config:
+For quick local-file debugging, pass a file path:
+
+```bash
+python3 src/deepstream_yolo_parser_app.py \
+  --model yolo12x-custom.pt \
+  --long-side 640 \
+  --stream streams/dtc-d4-trimmed.mp4
+```
+
+The RTSP pipeline preserves reference timestamp metadata when GStreamer exposes
+it. Local MP4 streams served by `scripts/start_rtsp_stream.sh` get network time
+from the RTSP server clock; original camera wall-clock time is only available if
+the upstream source provides it.
+
+## Injury Assessment
+
+Export the injury model:
 
 ```bash
 scripts/setup_injury_model.sh models/injury.pt 8
 ```
 
-The injury exporter uses the active `python3` when it already has `torch`,
-`clip`, and `onnx`; otherwise it refreshes and uses `.venv-yolo/`.
-
-This writes `models/injury_clip_vit_l14_336.onnx`, a matching metadata file,
-and `configs/generated/config_infer_secondary_injury_clip_vit_l14_336_b8.txt`.
-DeepStream builds the TensorRT fp16 engine from that ONNX on first use, the same
-way the YOLO path uses generated ONNX plus `nvinfer`.
-
-Run YOLO detections and injury assessment together:
+Run YOLO detections with injury assessment:
 
 ```bash
 python3 src/deepstream_yolo_parser_app.py \
@@ -75,84 +87,34 @@ python3 src/deepstream_yolo_parser_app.py \
   --enable-assessment
 ```
 
-The pipeline uses leaky one-buffer queues before detection and before injury
-assessment, so if inference falls behind it keeps the newest frame/bbox work and
-drops stale buffers. For now assessment runs as soon as person detections arrive;
-the secondary inference/probe boundary is the intended place to add ROS-triggered
-detection or assessment gates later.
-
-Assessment logs are enabled by default once `--enable-assessment` is set. Each
-line includes the DeepStream frame number, the best available frame timestamp,
-the timestamp source, the per-frame detection object id, bbox, and compact injury
-labels:
+Assessment logs look like:
 
 ```text
-ASSESS frame=915 timestamp=43.985s timestamp_source=buf_pts object=1 bbox=567,548,333,132 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
+ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref object=1 bbox=562,639,335,131 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
 ```
 
-For local video files the timestamp usually comes from `buf_pts` and is shown as
-seconds into the stream. For live/network sources the app prefers preserved
-network/reference timestamps and formats them as UTC. The `object=` value is the
-same per-frame detection id shown in the assessment label, so `object=1`
-corresponds to `person 1 injuries:`. `--assessment-log-interval` samples which
-frames are logged; when a frame is selected, every assessed object in that frame
-gets its own line.
+`object=` matches the `person #` assessment label. `--assessment-log-interval`
+controls which frames are logged; when a frame is selected, every assessed object
+in that frame gets a line.
 
-By default, the app suppresses startup-only `gst-plugin-scanner` warnings about
-optional GStreamer plugins with missing codec/runtime libraries. Runtime
-DeepStream warnings and errors are still shown. To see the suppressed startup
-warnings while debugging:
+## Useful Options
 
 ```bash
+python3 src/deepstream_yolo_parser_app.py --help
 python3 src/deepstream_yolo_parser_app.py --show-gst-scan-warnings
+RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
 ```
 
-## Code layout
+## Local Artifacts
 
-`src/deepstream_yolo_parser_app.py` is the executable entry point. It parses CLI
-arguments, resolves model artifacts, builds the pipeline, attaches probes, and
-starts the GLib loop. Most behavior lives in focused modules under
-`src/deepstream_yolo/`:
+Large runtime artifacts are intentionally ignored by Git, including `.venv-yolo/`,
+`external/`, `lib/*.so`, `models/*`, `configs/generated/`, `outputs/`, and
+`__pycache__/`.
 
-- `pipeline.py`: GStreamer element creation, properties, linking, and bus
-  message handling.
-- `detection_overlay.py`: person bbox drawing and confidence coloring.
-- `assessment_runtime.py`: injury tensor parsing, injury labels, assessment OSD
-  text, and assessment log output.
-- `controls.py`: keyboard controls and frame-rate limiting.
-- `timing.py`: optional debug FPS and stage timing probes.
-- `gst_warnings.py`: startup-only GStreamer plugin-scan warning suppression.
-- `model_cache.py`, `configs.py`, `injury.py`, and `paths.py`: artifact
-  discovery, generated config writing, injury model export, and project paths.
+`streams/` is ignored because videos are user-provided input media. Cleanup
+scripts do not remove it.
 
-## Export environment
-
-To install or refresh only the YOLO export dependencies:
-
-```bash
-scripts/setup_yolo_export_env.sh
-```
-
-The export scripts intentionally avoid relying on a bare `python` command inside
-the container. They use `.venv-yolo/bin/python3` and `.venv-yolo/bin/yolo`
-explicitly.
-
-## Generated artifacts
-
-Large runtime artifacts are intentionally ignored by Git:
-
-- `.venv-yolo/`
-- `external/`
-- `lib/*.so`
-- `models/*`
-- `configs/generated/`
-- `outputs/`
-- `__pycache__/`
-
-`streams/` is also ignored, but it is treated as user-provided local media, not
-generated output. Put input videos there; cleanup scripts do not remove it.
-
-Preview cleanup targets:
+Preview cleanup:
 
 ```bash
 scripts/clean_artifacts.sh
@@ -164,14 +126,5 @@ Remove generated artifacts:
 scripts/clean_artifacts.sh --force
 ```
 
-Model artifacts are preserved unless `--include-models` is provided. There is
-intentionally no cleanup flag for `streams/`.
-
-## Troubleshooting
-
-If `sudo` reports `unable to resolve host docker`, exit the current container and
-start a fresh one with `scripts/run.sh` so Docker Compose applies the `extra_hosts`
-entry.
-
-If the export environment is broken, rerun `scripts/setup_yolo_export_env.sh`.
-The script recreates `.venv-yolo/` only when its Python interpreter is missing.
+Use `--include-models` only when you also want to remove generated/downloaded
+model artifacts.

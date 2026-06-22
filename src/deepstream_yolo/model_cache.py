@@ -10,8 +10,9 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
 from gi.repository import Gst, GstPbutils
 
-from .configs import generated_config_path, write_infer_config
-from .paths import MODELS_DIR, PROJECT_DIR, SETUP_SCRIPT, YOLO_PYTHON
+from .configs import generated_config_path, write_assessment_config, write_infer_config
+from .injury import assessment_stem, default_engine_path, default_meta_path, default_onnx_path
+from .paths import INJURY_SETUP_SCRIPT, MODELS_DIR, PROJECT_DIR, SETUP_SCRIPT, YOLO_PYTHON
 
 
 CACHE_POLICY = "parser_line_osd_conf_v2"
@@ -19,6 +20,14 @@ CACHE_POLICY = "parser_line_osd_conf_v2"
 
 @dataclass(frozen=True)
 class ModelArtifacts:
+    onnx: Path
+    meta: Path
+    engine: Path
+    config: Path
+
+
+@dataclass(frozen=True)
+class AssessmentArtifacts:
     onnx: Path
     meta: Path
     engine: Path
@@ -154,3 +163,31 @@ def ensure_model(
     )
     write_infer_config(artifacts.config, artifacts.onnx, artifacts.engine, conf)
     return width, height, artifacts.config
+
+
+def ensure_assessment_model(model: str, batch_size: int) -> tuple[dict, Path]:
+    model_path = PROJECT_DIR / model if not Path(model).is_absolute() else Path(model)
+    artifacts = AssessmentArtifacts(
+        onnx=default_onnx_path(model_path),
+        meta=default_meta_path(model_path),
+        engine=default_engine_path(model_path, batch_size),
+        config=generated_config_path(
+            f"config_infer_secondary_{assessment_stem(model_path)}_b{batch_size}.txt"
+        ),
+    )
+
+    if not artifacts.onnx.exists() or not artifacts.meta.exists():
+        subprocess.run(
+            [str(INJURY_SETUP_SCRIPT), str(model_path), str(batch_size)],
+            cwd=PROJECT_DIR,
+            check=True,
+        )
+
+    meta = read_meta(artifacts.meta)
+    if not artifacts.onnx.exists():
+        raise FileNotFoundError(f"Missing injury ONNX export: {artifacts.onnx}")
+    if not meta:
+        raise FileNotFoundError(f"Missing or invalid injury model metadata: {artifacts.meta}")
+
+    write_assessment_config(artifacts.config, artifacts.onnx, artifacts.engine, batch_size)
+    return meta, artifacts.config

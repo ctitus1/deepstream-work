@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import ctypes
+import math
 import os
 import sys
+import struct
 import termios
 import threading
 import time
@@ -81,10 +84,22 @@ from gi.repository import GLib, Gst
 
 import pyds
 
-from deepstream_yolo.model_cache import discover_size, ensure_model
+from deepstream_yolo.configs import INJURY_CLASS_COUNTS, INJURY_HEADS
+from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
 from deepstream_yolo.paths import DEFAULT_STREAM, resolve_project_path
 
 PERSON_CLASS_ID = 0
+ASSESSMENT_GIE_ID = 2
+ASSESSMENT_ALIASES = {
+    "severe_hemorrhage": "hem",
+    "respiratory_distress": "resp",
+    "trauma_head": "head",
+    "trauma_torso": "torso",
+    "trauma_upper_ext": "upper",
+    "trauma_lower_ext": "lower",
+    "alertness_ocular": "ocular",
+    "person_type": "type",
+}
 
 
 def stop_gst_scan_warning_filter() -> None:
@@ -145,6 +160,204 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     text.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
     pyds.nvds_add_display_meta_to_frame(frame_meta, meta)
+
+
+def configure_latest_queue(queue) -> None:
+    queue.set_property("max-size-buffers", 1)
+    queue.set_property("max-size-bytes", 0)
+    queue.set_property("max-size-time", 0)
+    queue.set_property("leaky", 2)
+
+
+def dims_num_elements(dims) -> int:
+    count = int(getattr(dims, "numElements", 0) or 0)
+    if count > 0:
+        return count
+
+    count = 1
+    for idx in range(int(dims.numDims)):
+        count *= int(dims.d[idx])
+    return count
+
+
+def ptr_value(buffer) -> int:
+    try:
+        return int(pyds.get_ptr(buffer))
+    except TypeError:
+        return int(buffer)
+
+
+def half_to_float(value: int) -> float:
+    return struct.unpack("<e", struct.pack("<H", int(value)))[0]
+
+
+def tensor_values(layer, tensor_meta, index: int) -> list[float]:
+    try:
+        layer.buffer = tensor_meta.out_buf_ptrs_host[index]
+    except Exception:
+        pass
+
+    count = dims_num_elements(layer.inferDims)
+    if count <= 0:
+        return []
+
+    address = ptr_value(layer.buffer)
+    if not address:
+        return []
+
+    if layer.dataType == pyds.NvDsInferDataType.FLOAT:
+        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_float))
+        return [float(ptr[i]) for i in range(count)]
+    if layer.dataType == pyds.NvDsInferDataType.HALF:
+        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_uint16))
+        return [half_to_float(ptr[i]) for i in range(count)]
+    if layer.dataType == pyds.NvDsInferDataType.INT32:
+        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_int32))
+        return [float(ptr[i]) for i in range(count)]
+    if layer.dataType == pyds.NvDsInferDataType.INT8:
+        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_int8))
+        return [float(ptr[i]) for i in range(count)]
+
+    return []
+
+
+def layer_name(layer, fallback: str) -> str:
+    name = getattr(layer, "layerName", "") or ""
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
+    return str(name) or fallback
+
+
+def softmax(logits: list[float]) -> list[float]:
+    if not logits:
+        return []
+    peak = max(logits)
+    exps = [math.exp(value - peak) for value in logits]
+    total = sum(exps)
+    return [value / total for value in exps]
+
+
+def parse_assessment_tensor_meta(tensor_meta) -> dict[str, dict]:
+    predictions = {}
+
+    for index in range(int(tensor_meta.num_output_layers)):
+        fallback_name = INJURY_HEADS[index] if index < len(INJURY_HEADS) else f"output_{index}"
+        layer = pyds.get_nvds_LayerInfo(tensor_meta, index)
+        head_name = layer_name(layer, fallback_name)
+        if head_name not in INJURY_CLASS_COUNTS:
+            head_name = fallback_name
+        if head_name not in INJURY_CLASS_COUNTS:
+            continue
+
+        logits = tensor_values(layer, tensor_meta, index)
+        expected = INJURY_CLASS_COUNTS[head_name]
+        logits = logits[:expected]
+        probs = softmax(logits)
+        if not probs:
+            continue
+
+        class_id = max(range(len(probs)), key=lambda idx: probs[idx])
+        predictions[head_name] = {
+            "class_id": class_id,
+            "confidence": probs[class_id],
+            "probabilities": probs,
+        }
+
+    return predictions
+
+
+def compact_assessment(predictions: dict[str, dict], *, include_zero: bool = False) -> str:
+    parts = []
+    for head_name in INJURY_HEADS:
+        pred = predictions.get(head_name)
+        if not pred:
+            continue
+        class_id = int(pred["class_id"])
+        confidence = float(pred["confidence"])
+        if include_zero or class_id != 0:
+            alias = ASSESSMENT_ALIASES.get(head_name, head_name)
+            parts.append(f"{alias}:{class_id}@{confidence:.2f}")
+
+    if parts:
+        return " ".join(parts)
+    return "class0"
+
+
+def set_assessment_text(obj, label: str) -> None:
+    rect = obj.rect_params
+    obj.text_params.display_text = f"injury {label}"
+    obj.text_params.x_offset = max(0, round(rect.left))
+    obj.text_params.y_offset = max(0, round(rect.top + rect.height + 8))
+    obj.text_params.font_params.font_name = "Serif"
+    obj.text_params.font_params.font_size = 12
+    obj.text_params.font_params.font_color.set(0.2, 0.9, 1.0, 1.0)
+    obj.text_params.set_bg_clr = 1
+    obj.text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+
+
+class AssessmentReporter:
+    def __init__(self, interval: float):
+        self.interval = max(0.0, interval)
+        self.last_log_time = 0.0
+
+    def maybe_log(self, frame_num: int, obj, predictions: dict[str, dict]) -> None:
+        if self.interval == 0:
+            return
+
+        now = time.perf_counter()
+        if now - self.last_log_time < self.interval:
+            return
+
+        self.last_log_time = now
+        rect = obj.rect_params
+        object_id = getattr(obj, "object_id", -1)
+        if object_id == 0xFFFFFFFFFFFFFFFF:
+            object_id = -1
+        print(
+            "ASSESS "
+            f"frame={frame_num} "
+            f"object={object_id} "
+            f"bbox={rect.left:.0f},{rect.top:.0f},{rect.width:.0f},{rect.height:.0f} "
+            f"{compact_assessment(predictions, include_zero=True)}",
+            flush=True,
+        )
+
+
+def assessment_probe(reporter: AssessmentReporter):
+    def _probe(_pad, info, _data):
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        frame_list = batch_meta.frame_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            obj_list = frame_meta.obj_meta_list
+
+            while obj_list:
+                obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+                user_meta_list = obj.obj_user_meta_list
+
+                while user_meta_list:
+                    user_meta = pyds.NvDsUserMeta.cast(user_meta_list.data)
+                    if user_meta.base_meta.meta_type == pyds.NvDsMetaType.NVDSINFER_TENSOR_OUTPUT_META:
+                        tensor_meta = pyds.NvDsInferTensorMeta.cast(user_meta.user_meta_data)
+                        if int(tensor_meta.unique_id) == ASSESSMENT_GIE_ID:
+                            predictions = parse_assessment_tensor_meta(tensor_meta)
+                            if predictions:
+                                label = compact_assessment(predictions)
+                                set_assessment_text(obj, label)
+                                reporter.maybe_log(int(frame_meta.frame_num), obj, predictions)
+
+                    user_meta_list = user_meta_list.next
+
+                obj_list = obj_list.next
+
+            frame_list = frame_list.next
+
+        return Gst.PadProbeReturn.OK
+
+    return _probe
 
 
 def bbox_probe(conf: float):
@@ -376,6 +589,10 @@ def main():
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--base-fps", type=float, default=30.0)
     ap.add_argument("--show-gst-scan-warnings", action="store_true")
+    ap.add_argument("--enable-assessment", action="store_true")
+    ap.add_argument("--assessment-model", default="models/injury.pt")
+    ap.add_argument("--assessment-batch-size", type=int, default=8)
+    ap.add_argument("--assessment-log-interval", type=float, default=1.0)
     args = ap.parse_args()
 
     stream = resolve_project_path(args.stream)
@@ -395,7 +612,23 @@ def main():
         args.conf,
     )
 
+    assessment_config = None
+    assessment_meta = None
+    if args.enable_assessment:
+        assessment_meta, assessment_config = ensure_assessment_model(
+            args.assessment_model,
+            args.assessment_batch_size,
+        )
+
     print(f"video={src_w}x{src_h} model={model_w}x{model_h} conf={args.conf} config={config}")
+    if assessment_config:
+        print(
+            "assessment="
+            f"{assessment_meta.get('architecture', 'injury model')} "
+            f"batch={args.assessment_batch_size} "
+            f"config={assessment_config}",
+            flush=True,
+        )
 
     pipeline = Gst.Pipeline.new("yolo-parser")
 
@@ -407,6 +640,8 @@ def main():
     queue = element("queue", "queue")
     streammux = element("nvstreammux", "streammux")
     pgie = element("nvinfer", "pgie")
+    assessment_queue = element("queue", "assessment-queue") if assessment_config else None
+    sgie = element("nvinfer", "assessment") if assessment_config else None
     convert = element("nvvideoconvert", "convert")
     caps = element("capsfilter", "caps")
     osd = element("nvdsosd", "osd")
@@ -418,6 +653,10 @@ def main():
     streammux.set_property("height", src_h)
     streammux.set_property("batched-push-timeout", 40000)
     pgie.set_property("config-file-path", str(config))
+    if sgie:
+        sgie.set_property("config-file-path", str(assessment_config))
+        sgie.set_property("process-mode", 2)
+        sgie.set_property("output-tensor-meta", True)
     caps.set_property(
         "caps",
         Gst.Caps.from_string(
@@ -429,8 +668,11 @@ def main():
     osd.set_property("display-text", 1)
     sink.set_property("sync", False)
     sink.set_property("qos", False)
+    configure_latest_queue(queue)
+    if assessment_queue:
+        configure_latest_queue(assessment_queue)
 
-    for elem in (
+    elements = [
         source,
         demux,
         h265_parser,
@@ -439,11 +681,19 @@ def main():
         queue,
         streammux,
         pgie,
-        convert,
-        caps,
-        osd,
-        sink,
-    ):
+    ]
+    if assessment_queue and sgie:
+        elements.extend((assessment_queue, sgie))
+    elements.extend(
+        [
+            convert,
+            caps,
+            osd,
+            sink,
+        ]
+    )
+
+    for elem in elements:
         pipeline.add(elem)
 
     source.link(demux)
@@ -453,7 +703,12 @@ def main():
     decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
     streammux.link(pgie)
-    pgie.link(convert)
+    if assessment_queue and sgie:
+        pgie.link(assessment_queue)
+        assessment_queue.link(sgie)
+        sgie.link(convert)
+    else:
+        pgie.link(convert)
     convert.link(caps)
     caps.link(osd)
     osd.link(sink)
@@ -463,6 +718,13 @@ def main():
         bbox_probe(args.conf),
         None,
     )
+    if sgie:
+        reporter = AssessmentReporter(args.assessment_log_interval)
+        sgie.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER,
+            assessment_probe(reporter),
+            None,
+        )
 
     limiter = RateLimiter(base_fps=args.base_fps)
     sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
@@ -470,13 +732,20 @@ def main():
     if args.debug:
         timer = TimeLog()
         sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, timer.fps_probe, None)
-        for pad, stage in (
+        timing_pads = [
             (streammux.get_static_pad("src"), "mux"),
             (pgie.get_static_pad("src"), "infer"),
+        ]
+        if sgie:
+            timing_pads.append((sgie.get_static_pad("src"), "assessment"))
+        timing_pads.extend(
+            [
             (caps.get_static_pad("src"), "convert"),
             (osd.get_static_pad("src"), "osd"),
             (sink.get_static_pad("sink"), "sink"),
-        ):
+            ]
+        )
+        for pad, stage in timing_pads:
             pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
     loop = GLib.MainLoop()

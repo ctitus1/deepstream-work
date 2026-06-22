@@ -15,6 +15,7 @@ YOLO_PYTHON = PROJECT_DIR / ".venv-yolo" / "bin" / "python3"
 
 DEFAULT_STREAM = PROJECT_DIR / "streams" / "dtc-d4-trimmed.mp4"
 SETUP_SCRIPT = SCRIPTS_DIR / "setup_and_export_yolo.sh"
+INJURY_SETUP_SCRIPT = SCRIPTS_DIR / "setup_injury_model.sh"
 
 
 def resolve_project_path(path: str | Path) -> Path:

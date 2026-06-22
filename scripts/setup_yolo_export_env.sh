@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 VENV_DIR=".venv-yolo"
 
-if [ ! -x "$VENV_DIR/bin/python3" ]; then
+if [ ! -x "$VENV_DIR/bin/python3" ] || ! "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
   rm -rf "$VENV_DIR"
   python3 -m venv "$VENV_DIR"
 fi

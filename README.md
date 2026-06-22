@@ -29,7 +29,7 @@ Export a model and generate local DeepStream configs. This creates or repairs
 do not need to activate the virtual environment.
 
 ```bash
-scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/dtc-d4-trimmed.mp4
+scripts/setup_and_export_yolo.sh yolo12x-custom.pt 640 streams/dtc-d4-trimmed.mp4
 ```
 
 Generated DeepStream configs are written to `configs/generated/`.
@@ -37,11 +37,49 @@ Generated DeepStream configs are written to `configs/generated/`.
 Run the Python parser app:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py --model yolo12x.pt --long-side 640
+python3 src/deepstream_yolo_parser_app.py --model yolo12x-custom.pt --long-side 640
 ```
 
 The app reuses matching cached ONNX artifacts when available and regenerates a
 local inference config under `configs/generated/`.
+
+## Injury assessment
+
+`models/injury.pt` is a CLIP ViT-L/14@336 image encoder with custom injury
+classification heads. Inspect the checkpoint:
+
+```bash
+PYTHONPATH=src python3 -m deepstream_yolo.injury inspect --model models/injury.pt
+```
+
+Export it to ONNX and generate the secondary DeepStream config:
+
+```bash
+scripts/setup_injury_model.sh models/injury.pt 8
+```
+
+The injury exporter uses the active `python3` when it already has `torch`,
+`clip`, and `onnx`; otherwise it refreshes and uses `.venv-yolo/`.
+
+This writes `models/injury_clip_vit_l14_336.onnx`, a matching metadata file,
+and `configs/generated/config_infer_secondary_injury_clip_vit_l14_336_b8.txt`.
+DeepStream builds the TensorRT fp16 engine from that ONNX on first use, the same
+way the YOLO path uses generated ONNX plus `nvinfer`.
+
+Run YOLO detections and injury assessment together:
+
+```bash
+python3 src/deepstream_yolo_parser_app.py \
+  --model yolo12x-custom.pt \
+  --long-side 640 \
+  --enable-assessment
+```
+
+The pipeline uses leaky one-buffer queues before detection and before injury
+assessment, so if inference falls behind it keeps the newest frame/bbox work and
+drops stale buffers. For now assessment runs as soon as person detections arrive;
+the secondary inference/probe boundary is the intended place to add ROS-triggered
+detection or assessment gates later.
 
 By default, the app suppresses startup-only `gst-plugin-scanner` warnings about
 optional GStreamer plugins with missing codec/runtime libraries. Runtime

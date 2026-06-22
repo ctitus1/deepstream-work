@@ -81,6 +81,23 @@ drops stale buffers. For now assessment runs as soon as person detections arrive
 the secondary inference/probe boundary is the intended place to add ROS-triggered
 detection or assessment gates later.
 
+Assessment logs are enabled by default once `--enable-assessment` is set. Each
+line includes the DeepStream frame number, the best available frame timestamp,
+the timestamp source, the per-frame detection object id, bbox, and compact injury
+labels:
+
+```text
+ASSESS frame=915 timestamp=43.985s timestamp_source=buf_pts object=1 bbox=567,548,333,132 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
+```
+
+For local video files the timestamp usually comes from `buf_pts` and is shown as
+seconds into the stream. For live/network sources the app prefers preserved
+network/reference timestamps and formats them as UTC. The `object=` value is the
+same per-frame detection id shown in the assessment label, so `object=1`
+corresponds to `person 1 injuries:`. `--assessment-log-interval` samples which
+frames are logged; when a frame is selected, every assessed object in that frame
+gets its own line.
+
 By default, the app suppresses startup-only `gst-plugin-scanner` warnings about
 optional GStreamer plugins with missing codec/runtime libraries. Runtime
 DeepStream warnings and errors are still shown. To see the suppressed startup

@@ -1,5 +1,4 @@
 # User-provided local media and runtime outputs
-data/
 outputs/
 streams/
 *.mp4

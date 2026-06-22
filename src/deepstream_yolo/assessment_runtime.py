@@ -3,6 +3,7 @@ import datetime as dt
 import math
 import struct
 import time
+from dataclasses import dataclass
 
 import gi
 
@@ -249,20 +250,79 @@ def set_assessment_text(obj, lines: list[str]) -> None:
     obj.text_params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
 
+def clear_assessment_text(obj) -> None:
+    obj.text_params.display_text = ""
+    obj.text_params.set_bg_clr = 0
+
+
+@dataclass(frozen=True)
+class AssessmentLogRow:
+    object_id: int
+    bbox: tuple[float, float, float, float]
+    lines: list[str]
+
+
+class AssessmentTiming:
+    def __init__(self, max_frames: int = 2048):
+        self.max_frames = max_frames
+        self.start_times: dict[int, float] = {}
+
+    def mark_start(self, _pad, info, _data):
+        buffer = info.get_buffer()
+        if not buffer:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        now = time.perf_counter()
+        frame_list = batch_meta.frame_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            self.start_times[int(frame_meta.frame_num)] = now
+            frame_list = frame_list.next
+
+        while len(self.start_times) > self.max_frames:
+            self.start_times.pop(next(iter(self.start_times)))
+
+        return Gst.PadProbeReturn.OK
+
+    def pop_compute_ms(self, frame_num: int, now: float) -> float | None:
+        start_time = self.start_times.pop(frame_num, None)
+        if start_time is None:
+            return None
+        return max(0.0, (now - start_time) * 1000.0)
+
+
 class AssessmentReporter:
     def __init__(self, interval: float):
-        self.interval = max(0.0, interval)
+        self.interval = interval
         self.last_log_time = 0.0
         self.logging_frame = None
+        self.last_assessed_time: float | None = None
 
-    def should_log(self, frame_num: int) -> bool:
-        if self.interval == 0:
+    def assessment_fps(self, now: float) -> float | None:
+        last_time = self.last_assessed_time
+        self.last_assessed_time = now
+        if last_time is None:
+            return None
+
+        elapsed = now - last_time
+        if elapsed <= 0:
+            return None
+        return 1.0 / elapsed
+
+    def should_log(self, frame_num: int, now: float) -> bool:
+        if self.interval < 0:
             return False
+
+        if self.interval == 0:
+            return True
 
         if self.logging_frame == frame_num:
             return True
 
-        now = time.perf_counter()
         if now - self.last_log_time < self.interval:
             return False
 
@@ -270,32 +330,51 @@ class AssessmentReporter:
         self.logging_frame = frame_num
         return True
 
-    def maybe_log(
+    def log_frame(
         self,
         frame_num: int,
-        object_id: int,
-        obj,
         timestamp_source: str,
         timestamp: int | None,
-        lines: list[str],
+        rows: list[AssessmentLogRow],
+        compute_ms: float | None,
     ) -> None:
-        if not self.should_log(frame_num):
+        if not rows:
             return
 
-        rect = obj.rect_params
-        print(
-            "ASSESS "
-            f"frame={frame_num} "
-            f"timestamp={format_timestamp(timestamp_source, timestamp)} "
-            f"timestamp_source={timestamp_source} "
-            f"object={object_id} "
-            f"bbox={rect.left:.0f},{rect.top:.0f},{rect.width:.0f},{rect.height:.0f} "
-            f"{label_log_text(lines)}",
-            flush=True,
-        )
+        now = time.perf_counter()
+        fps = self.assessment_fps(now)
+        if not self.should_log(frame_num, now):
+            return
+
+        fields = [
+            "ASSESS",
+            f"frame={frame_num}",
+            f"timestamp={format_timestamp(timestamp_source, timestamp)}",
+            f"timestamp_source={timestamp_source}",
+        ]
+        if compute_ms is not None:
+            fields.append(f"compute_ms={compute_ms:.2f}")
+        if fps is not None:
+            fields.append(f"fps={fps:.2f}")
+
+        log_lines = [" ".join(fields)]
+        for row in rows:
+            left, top, width, height = row.bbox
+            log_lines.append(
+                "  "
+                f"object={row.object_id} "
+                f"bbox={left:.0f},{top:.0f},{width:.0f},{height:.0f} "
+                f"{label_log_text(row.lines)}"
+            )
+
+        print("\n".join(log_lines), flush=True)
 
 
-def assessment_probe(reporter: AssessmentReporter):
+def assessment_probe(
+    reporter: AssessmentReporter,
+    timing: AssessmentTiming | None = None,
+    show_assessed_only: bool = False,
+):
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
         if not buffer:
@@ -306,14 +385,18 @@ def assessment_probe(reporter: AssessmentReporter):
             return Gst.PadProbeReturn.OK
 
         frame_list = batch_meta.frame_meta_list
+        buffer_has_assessment = False
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             obj_list = frame_meta.obj_meta_list
             person_index = 0
             timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
+            frame_num = int(frame_meta.frame_num)
+            frame_rows = []
 
             while obj_list:
                 obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+                clear_assessment_text(obj)
                 user_meta_list = obj.obj_user_meta_list
                 fallback_id = person_index
                 if obj.class_id == PERSON_CLASS_ID:
@@ -327,26 +410,41 @@ def assessment_probe(reporter: AssessmentReporter):
                         if int(tensor_meta.unique_id) == ASSESSMENT_GIE_ID:
                             predictions = parse_assessment_tensor_meta(tensor_meta)
                             if predictions:
+                                buffer_has_assessment = True
                                 lines = label_text(
                                     box_id,
                                     "person",
                                     predictions,
                                 )
                                 set_assessment_text(obj, lines)
-                                reporter.maybe_log(
-                                    int(frame_meta.frame_num),
-                                    box_id,
-                                    obj,
-                                    timestamp_source,
-                                    timestamp,
-                                    lines,
+                                rect = obj.rect_params
+                                frame_rows.append(
+                                    AssessmentLogRow(
+                                        object_id=box_id,
+                                        bbox=(rect.left, rect.top, rect.width, rect.height),
+                                        lines=lines,
+                                    )
                                 )
 
                     user_meta_list = user_meta_list.next
 
                 obj_list = obj_list.next
 
+            if frame_rows:
+                now = time.perf_counter()
+                compute_ms = timing.pop_compute_ms(frame_num, now) if timing else None
+                reporter.log_frame(
+                    frame_num,
+                    timestamp_source,
+                    timestamp,
+                    frame_rows,
+                    compute_ms,
+                )
+
             frame_list = frame_list.next
+
+        if show_assessed_only and not buffer_has_assessment:
+            return Gst.PadProbeReturn.DROP
 
         return Gst.PadProbeReturn.OK
 

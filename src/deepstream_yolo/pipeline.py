@@ -35,6 +35,7 @@ def configure_latest_queue(queue) -> None:
     queue.set_property("max-size-bytes", 0)
     queue.set_property("max-size-time", 0)
     queue.set_property("leaky", 2)
+    set_property_if_present(queue, "flush-on-eos", True)
 
 
 def set_property_if_present(elem, name: str, value) -> None:
@@ -83,6 +84,7 @@ def build_pipeline(
     src_h: int,
     config,
     assessment_config=None,
+    rtsp_latency_ms: int = 0,
 ) -> PipelineParts:
     pipeline = Gst.Pipeline.new("yolo-parser")
 
@@ -111,7 +113,7 @@ def build_pipeline(
 
     if stream.is_rtsp:
         source.set_property("location", stream.uri)
-        set_property_if_present(source, "latency", 200)
+        set_property_if_present(source, "latency", max(0, int(rtsp_latency_ms)))
         set_property_if_present(source, "drop-on-latency", True)
         set_property_if_present(source, "ntp-sync", True)
         set_property_if_present(source, "add-reference-timestamp-meta", True)
@@ -123,8 +125,15 @@ def build_pipeline(
     streammux.set_property("batch-size", 1)
     streammux.set_property("width", src_w)
     streammux.set_property("height", src_h)
-    streammux.set_property("batched-push-timeout", 40000)
+    streammux.set_property("batched-push-timeout", 0 if stream.is_rtsp else 40000)
     set_property_if_present(streammux, "attach-sys-ts", False)
+    set_property_if_present(streammux, "live-source", bool(stream.is_rtsp))
+    set_property_if_present(streammux, "sync-inputs", False)
+    set_property_if_present(streammux, "cache-buffer", False)
+    set_property_if_present(streammux, "cache-buffer-timeout", 0)
+    set_property_if_present(decoder, "disable-dpb", bool(stream.is_rtsp))
+    set_property_if_present(decoder, "low-latency-mode", bool(stream.is_rtsp))
+    set_property_if_present(decoder, "qos", True)
     pgie.set_property("config-file-path", str(config))
     if sgie:
         sgie.set_property("config-file-path", str(assessment_config))

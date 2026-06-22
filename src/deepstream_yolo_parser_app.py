@@ -15,7 +15,7 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
 from gi.repository import GLib, Gst
 
-from deepstream_yolo.assessment_runtime import AssessmentReporter, assessment_probe
+from deepstream_yolo.assessment_runtime import AssessmentReporter, AssessmentTiming, assessment_probe
 from deepstream_yolo.controls import KeyboardControls, RateLimiter
 from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
@@ -25,20 +25,41 @@ from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 from deepstream_yolo.timing import TimeLog
 
 
+class RuntimeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        stop_gst_scan_warning_filter(GST_SCAN_WARNING_FILTER)
+        super().error(message)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = RuntimeArgumentParser()
     parser.add_argument("--model", default="yolo12x.pt")
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--base-fps", type=float, default=30.0)
+    parser.add_argument(
+        "--rtsp-latency-ms",
+        type=int,
+        default=0,
+        help="RTSP jitterbuffer latency before old network packets are dropped; default 0.",
+    )
     parser.add_argument("--show-gst-scan-warnings", action="store_true")
     parser.add_argument("--enable-assessment", action="store_true")
     parser.add_argument("--assessment-model", default="models/injury.pt")
     parser.add_argument("--assessment-batch-size", type=int, default=8)
-    parser.add_argument("--assessment-log-interval", type=float, default=1.0)
-    return parser.parse_args()
+    parser.add_argument(
+        "--assessment-log-interval",
+        type=float,
+        default=0.0,
+        help="Seconds between sampled assessment-log frames; 0 logs every assessment, negative disables.",
+    )
+    parser.add_argument("--show-assessed-only", action="store_true")
+    args = parser.parse_args()
+    if args.show_assessed_only and not args.enable_assessment:
+        parser.error("--show-assessed-only requires --enable-assessment")
+    return args
 
 
 def print_runtime_info(
@@ -77,10 +98,20 @@ def attach_runtime_probes(parts, args) -> RateLimiter:
         None,
     )
     if parts.sgie:
+        assessment_timing = AssessmentTiming()
+        parts.streammux.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER,
+            assessment_timing.mark_start,
+            None,
+        )
         reporter = AssessmentReporter(args.assessment_log_interval)
         parts.sgie.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER,
-            assessment_probe(reporter),
+            assessment_probe(
+                reporter,
+                timing=assessment_timing,
+                show_assessed_only=args.show_assessed_only,
+            ),
             None,
         )
 
@@ -149,7 +180,14 @@ def main():
         args.assessment_batch_size,
     )
 
-    parts = build_pipeline(stream, src_w, src_h, config, assessment_config)
+    parts = build_pipeline(
+        stream,
+        src_w,
+        src_h,
+        config,
+        assessment_config,
+        rtsp_latency_ms=args.rtsp_latency_ms,
+    )
     limiter = attach_runtime_probes(parts, args)
     if args.debug:
         attach_debug_probes(parts)

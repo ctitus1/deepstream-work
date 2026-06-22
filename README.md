@@ -68,7 +68,10 @@ python3 src/deepstream_yolo_parser_app.py \
 The RTSP pipeline preserves reference timestamp metadata when GStreamer exposes
 it. Local MP4 streams served by `scripts/start_rtsp_stream.sh` get network time
 from the RTSP server clock; original camera wall-clock time is only available if
-the upstream source provides it.
+the upstream source provides it. RTSP jitterbuffer latency defaults to 0 ms: old
+network/decode buffers are dropped instead of queued, and detection runs on the
+newest frames available. Override with `--rtsp-latency-ms` only if a stream needs
+extra buffering.
 
 ## Injury Assessment
 
@@ -90,18 +93,35 @@ python3 src/deepstream_yolo_parser_app.py \
 Assessment logs look like:
 
 ```text
-ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref object=1 bbox=562,639,335,131 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
+ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref compute_ms=11.84 fps=29.91
+  object=0 bbox=1278,358,362,128 person 0 injuries: | manikin  hem-  resp- | head-  torso- | upper+  lower+  eyes_nt
+  object=1 bbox=562,639,335,131 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
 ```
 
-`object=` matches the `person #` assessment label. `--assessment-log-interval`
-controls which frames are logged; when a frame is selected, every assessed object
-in that frame gets a line.
+`object=` matches the `person #` assessment label. By default, every fresh
+assessment for every frame is logged. Set `--assessment-log-interval` to a
+positive number to sample logs, or a negative number to disable assessment logs.
+Assessment overlay text is only shown on frames where fresh assessment tensor
+output is present. `compute_ms` is wall-clock time from mux output to assessment
+output for that frame, and `fps` is the assessed-frame output rate once a prior
+assessed frame exists.
+
+To display only frames with updated assessments:
+
+```bash
+python3 src/deepstream_yolo_parser_app.py \
+  --model yolo12x-custom.pt \
+  --long-side 640 \
+  --enable-assessment \
+  --show-assessed-only
+```
 
 ## Useful Options
 
 ```bash
 python3 src/deepstream_yolo_parser_app.py --help
 python3 src/deepstream_yolo_parser_app.py --show-gst-scan-warnings
+python3 src/deepstream_yolo_parser_app.py --rtsp-latency-ms 0
 RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
 ```
 

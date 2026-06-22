@@ -262,12 +262,31 @@ class AssessmentLogRow:
     lines: list[str]
 
 
+@dataclass(frozen=True)
+class AssessmentComputeTimes:
+    detect_ms: float | None
+    assess_ms: float | None
+
+
+def compute_fps(milliseconds: float | None) -> float | None:
+    if milliseconds is None or milliseconds <= 0:
+        return None
+    return 1000.0 / milliseconds
+
+
 class AssessmentTiming:
     def __init__(self, max_frames: int = 2048):
         self.max_frames = max_frames
         self.start_times: dict[int, float] = {}
+        self.detect_done_times: dict[int, float] = {}
 
     def mark_start(self, _pad, info, _data):
+        return self._mark(info, self.start_times)
+
+    def mark_detect_done(self, _pad, info, _data):
+        return self._mark(info, self.detect_done_times)
+
+    def _mark(self, info, times: dict[int, float]):
         buffer = info.get_buffer()
         if not buffer:
             return Gst.PadProbeReturn.OK
@@ -280,19 +299,30 @@ class AssessmentTiming:
         frame_list = batch_meta.frame_meta_list
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
-            self.start_times[int(frame_meta.frame_num)] = now
+            times[int(frame_meta.frame_num)] = now
             frame_list = frame_list.next
 
-        while len(self.start_times) > self.max_frames:
-            self.start_times.pop(next(iter(self.start_times)))
+        self._trim(times)
 
         return Gst.PadProbeReturn.OK
 
-    def pop_compute_ms(self, frame_num: int, now: float) -> float | None:
+    def _trim(self, times: dict[int, float]) -> None:
+        while len(times) > self.max_frames:
+            times.pop(next(iter(times)))
+
+    def pop_compute_times(self, frame_num: int, now: float) -> AssessmentComputeTimes:
         start_time = self.start_times.pop(frame_num, None)
-        if start_time is None:
-            return None
-        return max(0.0, (now - start_time) * 1000.0)
+        detect_done_time = self.detect_done_times.pop(frame_num, None)
+
+        detect_ms = None
+        if start_time is not None and detect_done_time is not None:
+            detect_ms = max(0.0, (detect_done_time - start_time) * 1000.0)
+
+        assess_ms = None
+        if detect_done_time is not None:
+            assess_ms = max(0.0, (now - detect_done_time) * 1000.0)
+
+        return AssessmentComputeTimes(detect_ms=detect_ms, assess_ms=assess_ms)
 
 
 class AssessmentReporter:
@@ -300,18 +330,6 @@ class AssessmentReporter:
         self.interval = interval
         self.last_log_time = 0.0
         self.logging_frame = None
-        self.last_assessed_time: float | None = None
-
-    def assessment_fps(self, now: float) -> float | None:
-        last_time = self.last_assessed_time
-        self.last_assessed_time = now
-        if last_time is None:
-            return None
-
-        elapsed = now - last_time
-        if elapsed <= 0:
-            return None
-        return 1.0 / elapsed
 
     def should_log(self, frame_num: int, now: float) -> bool:
         if self.interval < 0:
@@ -336,13 +354,12 @@ class AssessmentReporter:
         timestamp_source: str,
         timestamp: int | None,
         rows: list[AssessmentLogRow],
-        compute_ms: float | None,
+        compute_times: AssessmentComputeTimes | None,
     ) -> None:
         if not rows:
             return
 
         now = time.perf_counter()
-        fps = self.assessment_fps(now)
         if not self.should_log(frame_num, now):
             return
 
@@ -352,10 +369,17 @@ class AssessmentReporter:
             f"timestamp={format_timestamp(timestamp_source, timestamp)}",
             f"timestamp_source={timestamp_source}",
         ]
-        if compute_ms is not None:
-            fields.append(f"compute_ms={compute_ms:.2f}")
-        if fps is not None:
-            fields.append(f"fps={fps:.2f}")
+        if compute_times:
+            detect_fps = compute_fps(compute_times.detect_ms)
+            assess_fps = compute_fps(compute_times.assess_ms)
+            if compute_times.detect_ms is not None:
+                fields.append(f"detect_ms={compute_times.detect_ms:.2f}")
+            if detect_fps is not None:
+                fields.append(f"detect_fps={detect_fps:.2f}")
+            if compute_times.assess_ms is not None:
+                fields.append(f"assess_ms={compute_times.assess_ms:.2f}")
+            if assess_fps is not None:
+                fields.append(f"assess_fps={assess_fps:.2f}")
 
         log_lines = [" ".join(fields)]
         for row in rows:
@@ -432,13 +456,13 @@ def assessment_probe(
 
             if frame_rows:
                 now = time.perf_counter()
-                compute_ms = timing.pop_compute_ms(frame_num, now) if timing else None
+                compute_times = timing.pop_compute_times(frame_num, now) if timing else None
                 reporter.log_frame(
                     frame_num,
                     timestamp_source,
                     timestamp,
                     frame_rows,
-                    compute_ms,
+                    compute_times,
                 )
 
             frame_list = frame_list.next

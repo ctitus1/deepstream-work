@@ -38,7 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--base-fps", type=float, default=30.0)
+    parser.add_argument(
+        "--base-fps",
+        type=float,
+        default=30.0,
+        help="Playback-rate baseline for local files; ignored for live RTSP streams.",
+    )
     parser.add_argument(
         "--rtsp-latency-ms",
         type=int,
@@ -91,12 +96,8 @@ def print_runtime_info(
         )
 
 
-def attach_runtime_probes(parts, args) -> RateLimiter:
-    parts.pgie.get_static_pad("src").add_probe(
-        Gst.PadProbeType.BUFFER,
-        bbox_probe(args.conf),
-        None,
-    )
+def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
+    assessment_timing = None
     if parts.sgie:
         assessment_timing = AssessmentTiming()
         parts.streammux.get_static_pad("src").add_probe(
@@ -104,6 +105,18 @@ def attach_runtime_probes(parts, args) -> RateLimiter:
             assessment_timing.mark_start,
             None,
         )
+        parts.pgie.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER,
+            assessment_timing.mark_detect_done,
+            None,
+        )
+
+    parts.pgie.get_static_pad("src").add_probe(
+        Gst.PadProbeType.BUFFER,
+        bbox_probe(args.conf),
+        None,
+    )
+    if parts.sgie and assessment_timing:
         reporter = AssessmentReporter(args.assessment_log_interval)
         parts.sgie.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER,
@@ -115,8 +128,9 @@ def attach_runtime_probes(parts, args) -> RateLimiter:
             None,
         )
 
-    limiter = RateLimiter(base_fps=args.base_fps)
-    parts.sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
+    limiter = RateLimiter(base_fps=args.base_fps, enabled=not stream.is_rtsp)
+    if limiter.enabled:
+        parts.sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
     return limiter
 
 
@@ -188,7 +202,7 @@ def main():
         assessment_config,
         rtsp_latency_ms=args.rtsp_latency_ms,
     )
-    limiter = attach_runtime_probes(parts, args)
+    limiter = attach_runtime_probes(parts, args, stream)
     if args.debug:
         attach_debug_probes(parts)
 

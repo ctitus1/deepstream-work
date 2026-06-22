@@ -8,6 +8,12 @@ from gi.repository import Gst
 import pyds
 
 
+def compute_fps(seconds: float) -> float:
+    if seconds <= 0:
+        return 0.0
+    return 1.0 / seconds
+
+
 class TimeLog:
     def __init__(self, fps_interval: float = 1.0, timing_interval: float = 10.0):
         self.fps_interval = fps_interval
@@ -25,7 +31,7 @@ class TimeLog:
 
         if elapsed >= self.fps_interval:
             fps = (self.frames - self.last_frames) / elapsed
-            print(f"FPS {fps:.2f}", flush=True)
+            print(f"OUTPUT_FPS {fps:.2f}", flush=True)
             self.last_fps_time = now
             self.last_frames = self.frames
 
@@ -56,30 +62,58 @@ class TimeLog:
 
         rows = []
         for frame_num, t in list(self.times.items()):
-            if all(k in t for k in ("mux", "infer", "convert", "osd", "sink")):
+            if all(k in t for k in ("mux", "infer", "assessment", "convert", "osd", "sink")):
                 rows.append(
-                    (
-                        t["infer"] - t["mux"],
-                        t["convert"] - t["infer"],
-                        t["osd"] - t["convert"],
-                        t["sink"] - t["osd"],
-                        t["sink"] - t["mux"],
-                    )
+                    {
+                        "detect": t["infer"] - t["mux"],
+                        "assess": t["assessment"] - t["infer"],
+                        "convert": t["convert"] - t["assessment"],
+                        "osd": t["osd"] - t["convert"],
+                        "sink": t["sink"] - t["osd"],
+                        "total": t["sink"] - t["mux"],
+                    }
+                )
+                del self.times[frame_num]
+            elif all(k in t for k in ("mux", "infer", "convert", "osd", "sink")):
+                rows.append(
+                    {
+                        "detect": t["infer"] - t["mux"],
+                        "convert": t["convert"] - t["infer"],
+                        "osd": t["osd"] - t["convert"],
+                        "sink": t["sink"] - t["osd"],
+                        "total": t["sink"] - t["mux"],
+                    }
                 )
                 del self.times[frame_num]
 
-        def avg_ms(i: int) -> float:
-            return 1000.0 * sum(row[i] for row in rows) / len(rows) if rows else 0.0
+        def avg_seconds(name: str) -> float:
+            values = [row[name] for row in rows if name in row]
+            return sum(values) / len(values) if values else 0.0
 
-        print(
-            "TIME "
-            f"n={len(rows)} "
-            f"infer={avg_ms(0):.2f}ms "
-            f"convert={avg_ms(1):.2f}ms "
-            f"osd={avg_ms(2):.2f}ms "
-            f"sink={avg_ms(3):.2f}ms "
-            f"total={avg_ms(4):.2f}ms",
-            flush=True,
+        detect_seconds = avg_seconds("detect")
+        fields = [
+            "TIME",
+            f"n={len(rows)}",
+            f"detect={detect_seconds * 1000.0:.2f}ms",
+            f"detect_fps={compute_fps(detect_seconds):.2f}",
+        ]
+        if any("assess" in row for row in rows):
+            assess_seconds = avg_seconds("assess")
+            fields.extend(
+                [
+                    f"assess={assess_seconds * 1000.0:.2f}ms",
+                    f"assess_fps={compute_fps(assess_seconds):.2f}",
+                ]
+            )
+        fields.extend(
+            [
+                f"convert={avg_seconds('convert') * 1000.0:.2f}ms",
+                f"osd={avg_seconds('osd') * 1000.0:.2f}ms",
+                f"sink={avg_seconds('sink') * 1000.0:.2f}ms",
+                f"total={avg_seconds('total') * 1000.0:.2f}ms",
+            ]
         )
+
+        print(" ".join(fields), flush=True)
 
         self.last_timing_time = now

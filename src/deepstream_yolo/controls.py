@@ -10,9 +10,10 @@ from gi.repository import GLib, Gst
 
 
 class RateLimiter:
-    def __init__(self, base_fps: float = 30.0, rate: float = 1.0):
+    def __init__(self, base_fps: float = 30.0, rate: float = 1.0, enabled: bool = True):
         self.base_fps = base_fps
         self.rate = rate
+        self.enabled = enabled
         self.last_time = 0.0
 
     @property
@@ -20,10 +21,17 @@ class RateLimiter:
         return self.base_fps * self.rate
 
     def set_rate(self, rate: float) -> None:
+        if not self.enabled:
+            print("rate controls disabled for live RTSP streams", flush=True)
+            return
+
         self.rate = round(max(0.05, min(8.0, rate)), 2)
         print(f"rate={self.rate:.2f}x max_fps={self.max_fps:.1f}", flush=True)
 
     def probe(self, _pad, _info, _data):
+        if not self.enabled:
+            return Gst.PadProbeReturn.OK
+
         now = time.perf_counter()
         period = 1.0 / self.max_fps
 
@@ -48,10 +56,14 @@ class KeyboardControls:
         self.old_term = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
         GLib.io_add_watch(sys.stdin, GLib.IO_IN, self.on_key)
-        print(
-            "keys: right/up speed up | left/down slow down | r reset 1x | space pause/play | q quit",
-            flush=True,
-        )
+        if self.limiter.enabled:
+            print(
+                "keys: right/up speed up | left/down slow down | r reset 1x | "
+                "space pause/play | q quit",
+                flush=True,
+            )
+        else:
+            print("keys: space pause/play | q quit", flush=True)
 
     def stop(self):
         if self.old_term is not None:
@@ -68,15 +80,15 @@ class KeyboardControls:
 
         if key == " ":
             self.toggle_pause()
-        elif key == "r":
+        elif key == "r" and self.limiter.enabled:
             self.limiter.set_rate(1.0)
-        elif key == "\x1b[C":
+        elif key == "\x1b[C" and self.limiter.enabled:
             self.limiter.set_rate(self.limiter.rate + 0.5)
-        elif key == "\x1b[D":
+        elif key == "\x1b[D" and self.limiter.enabled:
             self.limiter.set_rate(self.limiter.rate - 0.5)
-        elif key == "\x1b[A":
+        elif key == "\x1b[A" and self.limiter.enabled:
             self.limiter.set_rate(self.limiter.rate + 0.05)
-        elif key == "\x1b[B":
+        elif key == "\x1b[B" and self.limiter.enabled:
             self.limiter.set_rate(self.limiter.rate - 0.05)
 
         return True

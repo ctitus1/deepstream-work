@@ -20,6 +20,7 @@ class PipelineParts:
     sgie: Gst.Element | None
     caps: Gst.Element
     osd: Gst.Element
+    display_queue: Gst.Element | None
     sink: Gst.Element
 
 
@@ -109,6 +110,7 @@ def build_pipeline(
     convert = element("nvvideoconvert", "convert")
     caps = element("capsfilter", "caps")
     osd = element("nvdsosd", "osd")
+    display_queue = element("queue", "display-queue") if stream.is_rtsp else None
     sink = element("nveglglessink", "sink")
 
     if stream.is_rtsp:
@@ -148,16 +150,21 @@ def build_pipeline(
     osd.set_property("process-mode", 1)
     osd.set_property("display-bbox", 1)
     osd.set_property("display-text", 1)
-    sink.set_property("sync", False)
-    sink.set_property("qos", False)
+    sink.set_property("sync", bool(stream.is_rtsp))
+    sink.set_property("qos", bool(stream.is_rtsp))
     configure_latest_queue(queue)
     if assessment_queue:
         configure_latest_queue(assessment_queue)
+    if display_queue:
+        configure_latest_queue(display_queue)
 
     elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux, pgie]
     if assessment_queue and sgie:
         elements.extend((assessment_queue, sgie))
-    elements.extend((convert, caps, osd, sink))
+    elements.extend((convert, caps, osd))
+    if display_queue:
+        elements.append(display_queue)
+    elements.append(sink)
 
     for elem in elements:
         pipeline.add(elem)
@@ -187,7 +194,11 @@ def build_pipeline(
         pgie.link(convert)
     convert.link(caps)
     caps.link(osd)
-    osd.link(sink)
+    if display_queue:
+        osd.link(display_queue)
+        display_queue.link(sink)
+    else:
+        osd.link(sink)
 
     return PipelineParts(
         pipeline=pipeline,
@@ -197,5 +208,6 @@ def build_pipeline(
         sgie=sgie,
         caps=caps,
         osd=osd,
+        display_queue=display_queue,
         sink=sink,
     )

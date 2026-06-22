@@ -71,7 +71,8 @@ from the RTSP server clock; original camera wall-clock time is only available if
 the upstream source provides it. RTSP jitterbuffer latency defaults to 0 ms: old
 network/decode buffers are dropped instead of queued, and detection runs on the
 newest frames available. Override with `--rtsp-latency-ms` only if a stream needs
-extra buffering.
+extra buffering. RTSP streams are paced by the stream clock, not by the app's
+local file playback limiter; late display frames are dropped instead of queued.
 
 ## Injury Assessment
 
@@ -93,7 +94,7 @@ python3 src/deepstream_yolo_parser_app.py \
 Assessment logs look like:
 
 ```text
-ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref compute_ms=11.84 fps=29.91
+ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref detect_ms=4.26 detect_fps=234.74 assess_ms=7.58 assess_fps=131.93
   object=0 bbox=1278,358,362,128 person 0 injuries: | manikin  hem-  resp- | head-  torso- | upper+  lower+  eyes_nt
   object=1 bbox=562,639,335,131 person 1 injuries: | human  hem-  resp- | head-  torso+ | upper+  lower+  eyes_nt
 ```
@@ -102,9 +103,9 @@ ASSESS frame=915 timestamp=22:46:20.242Z timestamp_source=ref compute_ms=11.84 f
 assessment for every frame is logged. Set `--assessment-log-interval` to a
 positive number to sample logs, or a negative number to disable assessment logs.
 Assessment overlay text is only shown on frames where fresh assessment tensor
-output is present. `compute_ms` is wall-clock time from mux output to assessment
-output for that frame, and `fps` is the assessed-frame output rate once a prior
-assessed frame exists.
+output is present. `detect_ms` is wall-clock time from mux output to detection
+output, and `assess_ms` is wall-clock time from detection output to assessment
+output. The matching FPS values are computed from those stage times.
 
 To display only frames with updated assessments:
 
@@ -122,6 +123,7 @@ python3 src/deepstream_yolo_parser_app.py \
 python3 src/deepstream_yolo_parser_app.py --help
 python3 src/deepstream_yolo_parser_app.py --show-gst-scan-warnings
 python3 src/deepstream_yolo_parser_app.py --rtsp-latency-ms 0
+python3 src/deepstream_yolo_parser_app.py --stream streams/my-video.mp4 --base-fps 30
 RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
 ```
 

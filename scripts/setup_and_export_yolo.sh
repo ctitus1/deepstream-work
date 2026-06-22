@@ -39,6 +39,20 @@ cd "$(dirname "$0")/.."
 
 mkdir -p models external configs lib outputs
 
+safe_copy() {
+    local src="$1"
+    local dst="$2"
+
+    mkdir -p "$(dirname "$dst")"
+
+    if [ -e "$src" ] && [ -e "$dst" ] && [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ]; then
+        return 0
+    fi
+
+    cp -f "$src" "$dst"
+}
+
+
 detect_dims() {
     local stream="$1"
 
@@ -102,7 +116,11 @@ python -m pip install \
     onnxscript \
     open_clip_torch \
     timm \
-    einops
+    einops \
+    ftfy \
+    regex \
+    tqdm \
+    git+https://github.com/openai/CLIP.git
 
 if [ ! -d external/DeepStream-Yolo ]; then
     echo "Cloning DeepStream-Yolo..."
@@ -113,7 +131,7 @@ MODEL_BASENAME="$(basename "$MODEL")"
 MODEL_STEM="${MODEL_BASENAME%.pt}"
 
 if [ -f "$MODEL" ]; then
-    cp -f "$MODEL" "models/$MODEL_BASENAME"
+    safe_copy "$MODEL" "models/$MODEL_BASENAME"
 elif [ -f "models/$MODEL_BASENAME" ]; then
     :
 else
@@ -128,7 +146,7 @@ else
         echo "Could not find downloaded model: $MODEL_BASENAME"
         exit 1
     fi
-    cp -f "$FOUND" "models/$MODEL_BASENAME"
+    safe_copy "$FOUND" "models/$MODEL_BASENAME"
 fi
 
 echo "Exporting for DeepStream-Yolo:"
@@ -169,7 +187,7 @@ ONNX="models/${MODEL_STEM}.onnx"
 if [ ! -f "$ONNX" ]; then
     FOUND_ONNX="$(find models . -maxdepth 4 -name "${MODEL_STEM}.onnx" | head -n1 || true)"
     if [ -n "$FOUND_ONNX" ]; then
-        cp -f "$FOUND_ONNX" "$ONNX"
+        safe_copy "$FOUND_ONNX" "$ONNX"
     fi
 fi
 

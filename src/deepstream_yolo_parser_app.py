@@ -19,7 +19,7 @@ import pyds
 
 
 PROJECT_DIR = Path("/home/user/deepstream-work")
-DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d4.mp4"
+DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d3-trimmed-short.mp4"
 SETUP_SCRIPT = PROJECT_DIR / "scripts/setup_and_export_yolo.sh"
 
 PERSON_CLASS_ID = 0

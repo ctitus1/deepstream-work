@@ -1,6 +1,6 @@
-# Runtime outputs
-outputs/
+# User-provided local media and runtime outputs
 data/
+outputs/
 streams/
 *.mp4
 *.mkv
@@ -10,47 +10,23 @@ streams/
 *.log
 *.tlog
 
-# Models can be huge; track deliberately with Git LFS if needed
+# Generated DeepStream configs
+configs/generated/*
+!configs/generated/.gitkeep
+
+# Models and generated inference artifacts
 models/*
 !models/.gitkeep
-
-# Python/cache/build artifacts
-__pycache__/
-.pytest_cache/
-*.pyc
-build/
-dist/
-.cache/
-
-# VS Code local-only files
-.vscode/*.log
-
-# DeepStream generated files
-*.engine
-*.etlt_b*
-*.onnx_b*
-
-# Python virtual environments
-.venv/
-.venv-*/
-venv/
-env/
-
-# Python caches
-__pycache__/
-*.pyc
-.pytest_cache/
-
-# YOLO / DeepStream generated artifacts
 *.engine
 *.plan
 *.cache
+*.etlt_b*
+*.onnx_b*
 
-# Large model/video/runtime artifacts
-models/*.pt
-models/*.engine
-streams/
-outputs/
+# Local model/download scratch files
+/bus.jpg
+/yolo*.pt
+/labels.txt
 
 # External cloned/build dependencies
 external/
@@ -59,39 +35,19 @@ external/
 lib/*.so
 lib/*.o
 
-# TensorRT generated engines
-models/*.engine
-*.engine
+# Python/cache/build artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+build/
+dist/
 
-# DeepStream-Yolo exporter temporary label output
-/labels.txt
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+env/
 
-# Temporary Ultralytics download/test artifacts
-/bus.jpg
-/yolo*.pt
-
-# Large model artifacts
-models/*.pt
-models/*.engine
-models/*.onnx_b*_gpu*_fp*.engine
-
-# Build/source dependencies cloned by scripts
-external/
-
-# Runtime outputs
-outputs/
-
-# Temporary Ultralytics download/test artifacts
-/bus.jpg
-/yolo*.pt
-
-# Large model artifacts
-models/*.pt
-models/*.engine
-models/*.onnx_b*_gpu*_fp*.engine
-
-# Build/source dependencies cloned by scripts
-external/
-
-# Runtime outputs
-outputs/
+# VS Code local-only files
+.vscode/*.log

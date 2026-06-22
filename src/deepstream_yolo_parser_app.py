@@ -1,140 +1,95 @@
 #!/usr/bin/env python3
 import argparse
-import json
-import shutil
-import subprocess
+import os
 import sys
 import termios
+import threading
 import time
 import tty
-from pathlib import Path
+
+
+class StderrLineFilter:
+    def __init__(self, suppress):
+        self.suppress = suppress
+        self.read_fd = None
+        self.saved_stderr_fd = None
+        self.thread = None
+        self.skip_blank = False
+
+    def start(self) -> None:
+        read_fd, write_fd = os.pipe()
+        self.read_fd = read_fd
+        self.saved_stderr_fd = os.dup(2)
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+
+    def stop(self) -> None:
+        if self.saved_stderr_fd is None:
+            return
+
+        sys.stderr.flush()
+        os.dup2(self.saved_stderr_fd, 2)
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        os.close(self.saved_stderr_fd)
+        self.saved_stderr_fd = None
+
+    def _emit(self, line: bytes) -> None:
+        if self.suppress(line):
+            self.skip_blank = True
+            return
+
+        if self.skip_blank and not line.strip():
+            return
+
+        self.skip_blank = False
+        os.write(self.saved_stderr_fd, line)
+
+    def _pump(self) -> None:
+        pending = b""
+        try:
+            while True:
+                chunk = os.read(self.read_fd, 4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    self._emit(line + b"\n")
+            if pending:
+                self._emit(pending)
+        finally:
+            os.close(self.read_fd)
+
+
+def is_gst_plugin_scan_warning(line: bytes) -> bool:
+    return b"gst-plugin-scanner" in line and b"Failed to load plugin" in line
+
+
+GST_SCAN_WARNING_FILTER = None
+if "--show-gst-scan-warnings" not in sys.argv:
+    GST_SCAN_WARNING_FILTER = StderrLineFilter(is_gst_plugin_scan_warning)
+    GST_SCAN_WARNING_FILTER.start()
 
 import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
-from gi.repository import GLib, Gst, GstPbutils
+from gi.repository import GLib, Gst
 
 import pyds
 
-
-PROJECT_DIR = Path("/home/user/deepstream-work")
-DEFAULT_STREAM = PROJECT_DIR / "streams/dtc-d3-trimmed-short.mp4"
-SETUP_SCRIPT = PROJECT_DIR / "scripts/setup_and_export_yolo.sh"
+from deepstream_yolo.model_cache import discover_size, ensure_model
+from deepstream_yolo.paths import DEFAULT_STREAM, resolve_project_path
 
 PERSON_CLASS_ID = 0
-CACHE_POLICY = "parser_line_osd_conf_v1"
 
 
-def discover_size(path: Path) -> tuple[int, int]:
-    info = GstPbutils.Discoverer.new(5 * Gst.SECOND).discover_uri(path.resolve().as_uri())
-    stream = info.get_video_streams()[0]
-    return int(stream.get_width()), int(stream.get_height())
-
-
-def model_stem(model: str) -> str:
-    return Path(model).stem
-
-
-def onnx_size(path: Path) -> tuple[int, int]:
-    code = (
-        "import onnx;"
-        f"m=onnx.load({str(path)!r});"
-        "d=[x.dim_value or x.dim_param for x in m.graph.input[0].type.tensor_type.shape.dim];"
-        "print(int(d[3]), int(d[2]))"
-    )
-    out = subprocess.check_output(
-        [str(PROJECT_DIR / ".venv-yolo/bin/python"), "-c", code],
-        text=True,
-    )
-    return tuple(map(int, out.split()))
-
-
-def paths(stem: str, long_side: int, w: int, h: int) -> dict[str, Path]:
-    tag = f"{stem}_{long_side}_{w}x{h}"
-    return {
-        "onnx": PROJECT_DIR / "models" / f"{tag}.onnx",
-        "meta": PROJECT_DIR / "models" / f"{tag}.meta.json",
-        "engine": PROJECT_DIR / "models" / f"{tag}.onnx_b1_gpu0_fp16.engine",
-        "config": PROJECT_DIR / "configs" / f"config_infer_primary_{tag}.txt",
-    }
-
-
-def write_config(p: dict[str, Path], conf: float) -> None:
-    p["config"].write_text(
-        f"""[property]
-gpu-id=0
-net-scale-factor=0.00392156862745098
-model-color-format=0
-onnx-file={p["onnx"]}
-model-engine-file={p["engine"]}
-labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
-batch-size=1
-network-mode=2
-num-detected-classes=80
-interval=0
-gie-unique-id=1
-process-mode=1
-network-type=0
-parse-bbox-func-name=NvDsInferParseYolo
-custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
-output-blob-names=output
-maintain-aspect-ratio=1
-symmetric-padding=1
-cluster-mode=2
-
-[class-attrs-all]
-pre-cluster-threshold={conf}
-nms-iou-threshold=0.45
-topk=300
-"""
-    )
-
-
-def ensure_model(
-    model: str,
-    stream: Path,
-    long_side: int,
-    src_w: int,
-    src_h: int,
-    conf: float,
-) -> tuple[int, int, Path]:
-    stem = model_stem(model)
-    cached = sorted((PROJECT_DIR / "models").glob(f"{stem}_{long_side}_*.onnx"))
-
-    if cached:
-        w, h = onnx_size(cached[0])
-        p = paths(stem, long_side, w, h)
-        write_config(p, conf)
-        return w, h, p["config"]
-
-    subprocess.run(
-        [str(SETUP_SCRIPT), model, str(long_side), str(stream.relative_to(PROJECT_DIR))],
-        cwd=PROJECT_DIR,
-        check=True,
-    )
-
-    base = PROJECT_DIR / "models" / f"{stem}.onnx"
-    w, h = onnx_size(base)
-    p = paths(stem, long_side, w, h)
-
-    shutil.copy2(base, p["onnx"])
-    p["meta"].write_text(
-        json.dumps(
-            {
-                "model": stem,
-                "source_width": src_w,
-                "source_height": src_h,
-                "model_width": w,
-                "model_height": h,
-                "cache_policy": CACHE_POLICY,
-            },
-            indent=2,
-        )
-        + "\n"
-    )
-    write_config(p, conf)
-    return w, h, p["config"]
+def stop_gst_scan_warning_filter() -> None:
+    if GST_SCAN_WARNING_FILTER:
+        GST_SCAN_WARNING_FILTER.stop()
 
 
 def conf_color(confidence: float, lower_conf: float):
@@ -195,6 +150,9 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
 def bbox_probe(conf: float):
     def _probe(_pad, info, _data):
         batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(info.get_buffer()))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
         frame_list = batch_meta.frame_meta_list
 
         while frame_list:
@@ -338,9 +296,10 @@ class KeyboardControls:
         self.loop = loop
         self.limiter = limiter
         self.paused = False
-        self.old_term = termios.tcgetattr(sys.stdin)
+        self.old_term = None
 
     def start(self):
+        self.old_term = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
         GLib.io_add_watch(sys.stdin, GLib.IO_IN, self.on_key)
         print(
@@ -349,7 +308,8 @@ class KeyboardControls:
         )
 
     def stop(self):
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_term)
+        if self.old_term is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_term)
 
     def on_key(self, _source, _condition):
         key = sys.stdin.read(1)
@@ -415,14 +375,17 @@ def main():
     ap.add_argument("--conf", type=float, default=0.2)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--base-fps", type=float, default=30.0)
+    ap.add_argument("--show-gst-scan-warnings", action="store_true")
     args = ap.parse_args()
 
-    Gst.init(None)
+    stream = resolve_project_path(args.stream)
 
-    stream = Path(args.stream)
-    stream = stream if stream.is_absolute() else PROJECT_DIR / stream
+    try:
+        Gst.init(None)
+        src_w, src_h = discover_size(stream)
+    finally:
+        stop_gst_scan_warning_filter()
 
-    src_w, src_h = discover_size(stream)
     model_w, model_h, config = ensure_model(
         args.model,
         stream,
@@ -517,8 +480,9 @@ def main():
             pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
     loop = GLib.MainLoop()
-    controls = KeyboardControls(pipeline, loop, limiter)
-    controls.start()
+    controls = KeyboardControls(pipeline, loop, limiter) if sys.stdin.isatty() else None
+    if controls:
+        controls.start()
 
     bus = pipeline.get_bus()
     bus.add_signal_watch()
@@ -529,7 +493,8 @@ def main():
     try:
         loop.run()
     finally:
-        controls.stop()
+        if controls:
+            controls.stop()
         pipeline.set_state(Gst.State.NULL)
 
 

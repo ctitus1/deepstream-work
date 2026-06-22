@@ -1,0 +1,12 @@
+ultralytics
+onnx
+onnxsim
+onnxruntime
+onnxscript
+open_clip_torch
+timm
+einops
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git

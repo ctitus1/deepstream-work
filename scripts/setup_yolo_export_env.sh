@@ -3,18 +3,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-python3 -m venv .venv-yolo
+VENV_DIR=".venv-yolo"
 
-source .venv-yolo/bin/activate
+if [ ! -x "$VENV_DIR/bin/python3" ]; then
+  rm -rf "$VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+fi
 
-python -m pip install --upgrade pip setuptools wheel
+PYTHON_BIN="$VENV_DIR/bin/python3"
 
-python -m pip install \
-  ultralytics \
-  onnx \
-  onnxsim \
-  onnxruntime \
-  onnxscript \
-  open_clip_torch \
-  timm \
-  einops
+"$PYTHON_BIN" -m pip install --upgrade 'pip' 'setuptools<82' wheel
+
+"$PYTHON_BIN" -m pip install -r requirements/yolo-export.txt

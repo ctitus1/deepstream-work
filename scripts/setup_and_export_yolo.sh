@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MODEL="${1:-}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Single model size parameter.
 # The script detects the input stream aspect ratio and converts this one dimension
@@ -19,10 +20,13 @@ MODEL_SIZE="${2:-1920}"
 
 # Stream used to derive aspect ratio.
 # Override as third arg if needed:
-#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.ts
-STREAM="${3:-streams/dtc-d4.ts}"
+#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.mp4
+STREAM="${3:-streams/dtc-d3-trimmed-short.mp4}"
 
 STRIDE=32
+DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
+GENERATED_CONFIG_DIR="${GENERATED_CONFIG_DIR:-configs/generated}"
+VENV_DIR=".venv-yolo"
 
 if [ -z "$MODEL" ]; then
     echo "Usage:"
@@ -30,14 +34,14 @@ if [ -z "$MODEL" ]; then
     echo
     echo "Examples:"
     echo "  $0 yolo11n.pt 640"
-    echo "  $0 yolo12x.pt 640 streams/dtc-d4.ts"
-    echo "  $0 yolo12x.pt 1920 streams/dtc-d4.ts"
+    echo "  $0 yolo12x.pt 640 streams/dtc-d3-trimmed-short.mp4"
+    echo "  $0 yolo12x.pt 1920 streams/dtc-d3-trimmed-short.mp4"
     exit 1
 fi
 
-cd "$(dirname "$0")/.."
+cd "$ROOT_DIR"
 
-mkdir -p models external configs lib outputs
+mkdir -p models external "$GENERATED_CONFIG_DIR" lib outputs
 
 safe_copy() {
     local src="$1"
@@ -52,13 +56,51 @@ safe_copy() {
     cp -f "$src" "$dst"
 }
 
+absolute_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+    esac
+}
+
+clone_deepstream_yolo() {
+    if [ ! -d external/DeepStream-Yolo ]; then
+        echo "Cloning DeepStream-Yolo..."
+        git clone https://github.com/marcoslucianops/DeepStream-Yolo.git external/DeepStream-Yolo
+    fi
+
+    git -C external/DeepStream-Yolo checkout "$DEEPSTREAM_YOLO_REF" >/dev/null
+}
+
+install_labels() {
+    if [ ! -f labels/coco_labels.txt ]; then
+        echo "Missing labels/coco_labels.txt"
+        exit 1
+    fi
+
+    cp -f labels/coco_labels.txt models/coco_labels.txt
+}
+
+ensure_export_venv() {
+    if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        echo "Creating YOLO export virtual environment..."
+        rm -rf "$VENV_DIR"
+        python3 -m venv "$VENV_DIR"
+    fi
+
+    PYTHON_BIN="$VENV_DIR/bin/python3"
+    YOLO_BIN="$VENV_DIR/bin/yolo"
+}
+
 
 detect_dims() {
     local stream="$1"
+    local stream_path
+    stream_path="$(absolute_path "$stream")"
 
-    if command -v gst-discoverer-1.0 >/dev/null 2>&1 && [ -f "$stream" ]; then
+    if command -v gst-discoverer-1.0 >/dev/null 2>&1 && [ -f "$stream_path" ]; then
         local out
-        out="$(gst-discoverer-1.0 "$stream" 2>/dev/null || true)"
+        out="$(gst-discoverer-1.0 "$stream_path" 2>/dev/null || true)"
         local w h
         w="$(printf '%s\n' "$out" | awk '/Width:/ {print $2; exit}')"
         h="$(printf '%s\n' "$out" | awk '/Height:/ {print $2; exit}')"
@@ -99,33 +141,17 @@ echo "Source stream: $STREAM"
 echo "Source size:   ${SRC_W}x${SRC_H}"
 echo "YOLO size:     ${INFER_W}x${INFER_H}"
 
-if [ ! -d .venv-yolo ]; then
-    echo "Creating YOLO export virtual environment..."
-    python3 -m venv .venv-yolo
+ensure_export_venv
+
+"$PYTHON_BIN" -m pip install --upgrade 'pip' 'setuptools<82' wheel
+
+"$PYTHON_BIN" -m pip install -r requirements/yolo-export.txt
+if [ ! -x "$YOLO_BIN" ]; then
+    echo "Missing YOLO CLI after dependency install: $YOLO_BIN"
+    exit 1
 fi
 
-source .venv-yolo/bin/activate
-
-python -m pip install --upgrade 'pip' 'setuptools<82' wheel
-
-python -m pip install \
-    ultralytics \
-    onnx \
-    onnxsim \
-    onnxruntime \
-    onnxscript \
-    open_clip_torch \
-    timm \
-    einops \
-    ftfy \
-    regex \
-    tqdm \
-    git+https://github.com/openai/CLIP.git
-
-if [ ! -d external/DeepStream-Yolo ]; then
-    echo "Cloning DeepStream-Yolo..."
-    git clone https://github.com/marcoslucianops/DeepStream-Yolo.git external/DeepStream-Yolo
-fi
+clone_deepstream_yolo
 
 MODEL_BASENAME="$(basename "$MODEL")"
 MODEL_STEM="${MODEL_BASENAME%.pt}"
@@ -136,7 +162,7 @@ elif [ -f "models/$MODEL_BASENAME" ]; then
     :
 else
     echo "Downloading model with Ultralytics: $MODEL"
-    yolo predict model="$MODEL" source='https://ultralytics.com/images/bus.jpg' imgsz="$INFER_W" save=False >/dev/null
+    "$YOLO_BIN" predict model="$MODEL" source='https://ultralytics.com/images/bus.jpg' imgsz="$INFER_W" save=False >/dev/null
 
     FOUND="$(find . -maxdepth 4 -name "$MODEL_BASENAME" | head -n1 || true)"
     if [ -z "$FOUND" ]; then
@@ -155,22 +181,22 @@ echo "  size:  ${INFER_H}x${INFER_W}"
 
 case "$MODEL_STEM" in
     yolo11*)
-        python external/DeepStream-Yolo/utils/export_yolo11.py \
-            -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
+        "$PYTHON_BIN" external/DeepStream-Yolo/utils/export_yolo11.py \
+            -w "$ROOT_DIR/models/$MODEL_BASENAME" \
             -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
         ;;
     yolov12*|yolo12*)
-        python external/DeepStream-Yolo/utils/export_yolov12.py \
-            -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
+        "$PYTHON_BIN" external/DeepStream-Yolo/utils/export_yolov12.py \
+            -w "$ROOT_DIR/models/$MODEL_BASENAME" \
             -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
         ;;
     yolov8*|yolo8*)
-        python external/DeepStream-Yolo/utils/export_yoloV8.py \
-            -w "/home/user/deepstream-work/models/$MODEL_BASENAME" \
+        "$PYTHON_BIN" external/DeepStream-Yolo/utils/export_yoloV8.py \
+            -w "$ROOT_DIR/models/$MODEL_BASENAME" \
             -s "$INFER_H" "$INFER_W" \
             --opset 18 \
             --simplify
@@ -196,94 +222,13 @@ if [ ! -f "$ONNX" ]; then
     exit 1
 fi
 
-cat > models/coco_labels.txt <<'LABELS'
-person
-bicycle
-car
-motorcycle
-airplane
-bus
-train
-truck
-boat
-traffic light
-fire hydrant
-stop sign
-parking meter
-bench
-bird
-cat
-dog
-horse
-sheep
-cow
-elephant
-bear
-zebra
-giraffe
-backpack
-umbrella
-handbag
-tie
-suitcase
-frisbee
-skis
-snowboard
-sports ball
-kite
-baseball bat
-baseball glove
-skateboard
-surfboard
-tennis racket
-bottle
-wine glass
-cup
-fork
-knife
-spoon
-bowl
-banana
-apple
-sandwich
-orange
-broccoli
-carrot
-hot dog
-pizza
-donut
-cake
-chair
-couch
-potted plant
-bed
-dining table
-toilet
-tv
-laptop
-mouse
-remote
-keyboard
-cell phone
-microwave
-oven
-toaster
-sink
-refrigerator
-book
-clock
-vase
-scissors
-teddy bear
-hair drier
-toothbrush
-LABELS
+install_labels
 
 rm -f labels.txt
 
 echo
 echo "ONNX check:"
-python - <<PY
+"$PYTHON_BIN" - <<PY
 import onnx
 
 path = "$ONNX"
@@ -303,17 +248,23 @@ PY
 rm -f "models/${MODEL_STEM}"*.engine "models/${MODEL_STEM}.onnx"*.engine
 
 ENGINE="${ONNX}_b1_gpu0_fp16.engine"
-INFER_CONFIG="configs/config_infer_primary_${MODEL_STEM}.txt"
-APP_CONFIG="configs/dtc_d4_${MODEL_STEM}.txt"
+INFER_CONFIG="${GENERATED_CONFIG_DIR}/config_infer_primary_${MODEL_STEM}.txt"
+APP_CONFIG="${GENERATED_CONFIG_DIR}/deepstream_${MODEL_STEM}.txt"
+INFER_CONFIG_ABS="$(absolute_path "$INFER_CONFIG")"
+STREAM_ABS="$(absolute_path "$STREAM")"
+ONNX_ABS="$(absolute_path "$ONNX")"
+ENGINE_ABS="$(absolute_path "$ENGINE")"
+LABELS_ABS="$(absolute_path "models/coco_labels.txt")"
+CUSTOM_LIB_ABS="$(absolute_path "lib/libnvdsinfer_custom_impl_Yolo.so")"
 
 cat > "$INFER_CONFIG" <<EOF_INFER
 [property]
 gpu-id=0
 net-scale-factor=0.00392156862745098
 model-color-format=0
-onnx-file=/home/user/deepstream-work/${ONNX}
-model-engine-file=/home/user/deepstream-work/${ENGINE}
-labelfile-path=/home/user/deepstream-work/models/coco_labels.txt
+onnx-file=${ONNX_ABS}
+model-engine-file=${ENGINE_ABS}
+labelfile-path=${LABELS_ABS}
 batch-size=1
 network-mode=2
 num-detected-classes=80
@@ -324,7 +275,7 @@ network-type=0
 
 # DeepStream-Yolo parser.
 parse-bbox-func-name=NvDsInferParseYolo
-custom-lib-path=/home/user/deepstream-work/lib/libnvdsinfer_custom_impl_Yolo.so
+custom-lib-path=${CUSTOM_LIB_ABS}
 output-blob-names=output
 
 # Robust bbox geometry:
@@ -357,7 +308,7 @@ nvbuf-memory-type=0
 [source0]
 enable=1
 type=3
-uri=file:///home/user/deepstream-work/${STREAM}
+uri=file://${STREAM_ABS}
 num-sources=1
 gpu-id=0
 cudadec-memtype=0
@@ -378,7 +329,7 @@ gpu-id=0
 batch-size=1
 gie-unique-id=1
 nvbuf-memory-type=0
-config-file=$(basename "$INFER_CONFIG")
+config-file=${INFER_CONFIG_ABS}
 
 [osd]
 enable=1

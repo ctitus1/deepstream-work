@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-source .venv-yolo/bin/activate
+LONG_SIDE="${1:-640}"
+STREAM="${2:-streams/dtc-d3-trimmed-short.mp4}"
 
-python external/DeepStream-Yolo/utils/export_yolo11.py \
-  -w /home/user/deepstream-work/models/yolo11n.pt \
-  -s 640 \
-  --opset 18 \
-  --simplify
-
-rm -f models/*.engine
+exec "$SCRIPT_DIR/setup_and_export_yolo.sh" yolo11n.pt "$LONG_SIDE" "$STREAM"

@@ -7,9 +7,12 @@ services:
         USERNAME: user
         USER_UID: ${HOST_UID:-1000}
         USER_GID: ${HOST_GID:-1000}
+        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     image: deepstream-work:9.0
     container_name: deepstream-dev
     hostname: docker
+    extra_hosts:
+      - "docker:127.0.1.1"
     network_mode: host
     ipc: host
     stdin_open: true
@@ -21,9 +24,9 @@ services:
       QT_X11_NO_MITSHM: "1"
       TERM: xterm-256color
     volumes:
-      - .:/home/user/deepstream-work
+      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
       - /tmp/.X11-unix:/tmp/.X11-unix
-    working_dir: /home/user/deepstream-work
+    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     devices:
       - /dev/dri:/dev/dri
     deploy:

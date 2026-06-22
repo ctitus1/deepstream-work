@@ -9,6 +9,8 @@ ENV QT_X11_NO_MITSHM=1
 ARG USERNAME=user
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG WORKSPACE_DIR=/workspace/deepstream-work
+ARG DEEPSTREAM_PYTHON_APPS_REF=8ad0349ed7a496fae35ebb21c350641727070b89
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash-completion \
@@ -48,9 +50,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
-# Build/install NVIDIA DeepStream Python bindings so /usr/bin/python3 can import pyds.
-RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/deepstream_python_apps \
+RUN git clone https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git /opt/deepstream_python_apps \
     && cd /opt/deepstream_python_apps \
+    && git checkout "${DEEPSTREAM_PYTHON_APPS_REF}" \
     && git submodule update --init \
     && cd bindings \
     && mkdir -p build \
@@ -78,12 +80,13 @@ RUN set -eux; \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}"; \
     chmod 0440 "/etc/sudoers.d/${USERNAME}"; \
     mkdir -p "/home/${USERNAME}"; \
-    chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}"
+    mkdir -p "${WORKSPACE_DIR}"; \
+    chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}" "${WORKSPACE_DIR}"
 
 COPY .bashrc.container /home/${USERNAME}/.bashrc
 RUN chown ${USER_UID}:${USER_GID} /home/${USERNAME}/.bashrc
 
-WORKDIR /home/user/deepstream-work
+WORKDIR ${WORKSPACE_DIR}
 
 USER ${USERNAME}
 

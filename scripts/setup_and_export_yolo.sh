@@ -21,7 +21,7 @@ MODEL_SIZE="${2:-1920}"
 # Stream used to derive aspect ratio.
 # Override as third arg if needed:
 #   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.mp4
-STREAM="${3:-streams/dtc-d3-trimmed-short.mp4}"
+STREAM="${3:-streams/dtc-d4-trimmed.mp4}"
 
 STRIDE=32
 DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
@@ -34,14 +34,16 @@ if [ -z "$MODEL" ]; then
     echo
     echo "Examples:"
     echo "  $0 yolo11n.pt 640"
-    echo "  $0 yolo12x.pt 640 streams/dtc-d3-trimmed-short.mp4"
-    echo "  $0 yolo12x.pt 1920 streams/dtc-d3-trimmed-short.mp4"
+    echo "  $0 yolo12x.pt 640 streams/dtc-d4-trimmed.mp4"
+    echo "  $0 yolo12x.pt 1920 streams/dtc-d4-trimmed.mp4"
     exit 1
 fi
 
 cd "$ROOT_DIR"
 
 mkdir -p models external "$GENERATED_CONFIG_DIR" lib outputs
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-$ROOT_DIR/outputs/ultralytics-config}"
+mkdir -p "$YOLO_CONFIG_DIR"
 
 safe_copy() {
     local src="$1"

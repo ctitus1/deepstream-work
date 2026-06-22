@@ -13,7 +13,7 @@ LABELS_PATH = MODELS_DIR / "coco_labels.txt"
 CUSTOM_LIB_PATH = LIB_DIR / "libnvdsinfer_custom_impl_Yolo.so"
 YOLO_PYTHON = PROJECT_DIR / ".venv-yolo" / "bin" / "python3"
 
-DEFAULT_STREAM = PROJECT_DIR / "streams" / "dtc-d3-trimmed-short.mp4"
+DEFAULT_STREAM = PROJECT_DIR / "streams" / "dtc-d4-trimmed.mp4"
 SETUP_SCRIPT = SCRIPTS_DIR / "setup_and_export_yolo.sh"
 
 

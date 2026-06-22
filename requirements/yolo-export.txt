@@ -1,6 +1,7 @@
 ultralytics
 onnx
 onnxsim
+onnxslim
 onnxruntime
 onnxscript
 open_clip_torch

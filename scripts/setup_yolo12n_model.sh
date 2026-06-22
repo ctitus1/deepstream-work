@@ -4,6 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 LONG_SIDE="${1:-640}"
-STREAM="${2:-streams/dtc-d3-trimmed-short.mp4}"
+STREAM="${2:-streams/dtc-d4-trimmed.mp4}"
 
 exec "$SCRIPT_DIR/setup_and_export_yolo.sh" yolo12n.pt "$LONG_SIDE" "$STREAM"

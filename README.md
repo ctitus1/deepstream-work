@@ -29,7 +29,7 @@ Export a model and generate local DeepStream configs. This creates or repairs
 do not need to activate the virtual environment.
 
 ```bash
-scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/dtc-d3-trimmed-short.mp4
+scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/dtc-d4-trimmed.mp4
 ```
 
 Generated DeepStream configs are written to `configs/generated/`.

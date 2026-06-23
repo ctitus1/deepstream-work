@@ -46,6 +46,7 @@ DEFAULT_ASSESS_ENDPOINT = "127.0.0.1:5611"
 DEFAULT_IMAGE_ENDPOINT = "127.0.0.1:5609"
 OUTPUT_WIDTH = 640
 OUTPUT_HEIGHT = 368
+INT32_MAX = 2_147_483_647
 BBox = tuple[float, float, float, float]
 
 
@@ -107,6 +108,8 @@ class FrameLog:
             "timing": list(self.timing_fields),
             "rows": self.rows,
             "objects": list(self.objects),
+            "object_count": len(self.objects),
+            "data_source_id": frame_data_source_id(self.frame_num),
             "log_text": self.format(),
         }
         if self.source_size:
@@ -152,6 +155,10 @@ class FrameLogStore:
         if allow_latest:
             return self.latest
         return None
+
+
+def frame_data_source_id(frame_num: int) -> int:
+    return int(frame_num) % INT32_MAX
 
 
 class FrameSocketSender:
@@ -382,6 +389,7 @@ def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_
             while obj_list:
                 obj = pyds.NvDsObjectMeta.cast(obj_list.data)
                 if obj.class_id == PERSON_CLASS_ID:
+                    object_index = len(objects)
                     fallback_id = person_index
                     person_index += 1
                     object_id = get_detection_id(obj, fallback_id)
@@ -397,6 +405,7 @@ def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_
                     )
                     objects.append(
                         {
+                            "object_index": object_index,
                             "object_id": int(object_id),
                             "bbox": bbox,
                             "source_bbox": list(source_bbox),
@@ -446,6 +455,7 @@ def assessment_frame_sink(store: FrameLogStore, image_space: ImageSpace):
         log_rows = []
         objects = []
         for row in rows:
+            object_index = len(objects)
             source_bbox = tuple(float(value) for value in row.bbox)
             bbox = image_space.scale_bbox(source_bbox)
             left, top, width, height = bbox
@@ -457,6 +467,7 @@ def assessment_frame_sink(store: FrameLogStore, image_space: ImageSpace):
             )
             objects.append(
                 {
+                    "object_index": object_index,
                     "object_id": int(row.object_id),
                     "bbox": bbox,
                     "source_bbox": list(source_bbox),

@@ -24,7 +24,7 @@ from deepstream_yolo.frame_wire import recv_frame
 DEFAULT_DETECT_ENDPOINT = "0.0.0.0:5610"
 DEFAULT_ASSESS_ENDPOINT = "0.0.0.0:5611"
 DEFAULT_IMAGE_ENDPOINT = "0.0.0.0:5609"
-DATA_SOURCE_ID_STRIDE = 1000
+INT32_MAX = 2_147_483_647
 
 
 class FramePublisherNode(Node):
@@ -77,7 +77,7 @@ class FramePublisherNode(Node):
             server.bind((self.host, self.port))
             server.listen(1)
             server.settimeout(0.5)
-            self.get_logger().info(f"listening endpoint={self.host}:{self.port} topic={self.topic}")
+            self.get_logger().debug(f"listening endpoint={self.host}:{self.port} topic={self.topic}")
 
             while not self.stop_event.is_set():
                 try:
@@ -89,7 +89,7 @@ class FramePublisherNode(Node):
                     conn.close()
                     break
 
-                self.get_logger().info(f"connected peer={addr[0]}:{addr[1]}")
+                self.get_logger().debug(f"connected peer={addr[0]}:{addr[1]}")
                 with conn:
                     conn.settimeout(0.5)
                     while not self.stop_event.is_set():
@@ -116,7 +116,7 @@ class FramePublisherNode(Node):
 
         if self.should_log():
             log_text = metadata.get("log_text", "metadata=missing")
-            self.get_logger().info(
+            self.get_logger().debug(
                 f"published topic={self.topic} messages={len(messages)} bytes={len(payload)}\n{log_text}"
             )
 
@@ -150,12 +150,12 @@ class FramePublisherNode(Node):
         metadata: dict,
         payload: bytes,
     ) -> list[CasualtyImageCompressed]:
-        source_img = self.compressed_image(metadata, payload)
         messages = []
         for obj in metadata.get("objects", []):
+            source_img = self.compressed_image(metadata, payload)
             bbox = obj.get("bbox", [0.0, 0.0, 0.0, 0.0])
             msg = CasualtyImageCompressed()
-            msg.data_source_id = data_source_id(metadata, obj)
+            msg.data_source_id = data_source_id(metadata)
             msg.stamp = source_img.header.stamp
             msg.image = source_img
             msg.position.header = source_img.header
@@ -179,7 +179,7 @@ class FramePublisherNode(Node):
         target_bbox.center.position.y = float(bbox[1]) + float(bbox[3]) / 2.0
 
         target_box = TargetBox()
-        target_box.data_source_id = data_source_id(metadata, obj)
+        target_box.data_source_id = data_source_id(metadata)
         target_box.target_bbox = target_bbox
         target_box.use_for_assessment = True
         target_box.detection_source.detection_source = AerialDetectionSource.DETECTION_YOLO
@@ -232,10 +232,20 @@ def parse_endpoint(endpoint: str) -> tuple[str, int]:
     return host, int(port)
 
 
-def data_source_id(metadata: dict, obj: dict) -> int:
-    frame_num = int(metadata.get("frame", 0))
-    object_id = int(obj.get("object_id", 0))
-    return int((frame_num % 2_000_000) * DATA_SOURCE_ID_STRIDE + max(0, object_id))
+def data_source_id(metadata: dict) -> int:
+    explicit_id = metadata.get("data_source_id")
+    if explicit_id is not None:
+        return int_value(explicit_id, 0)
+
+    frame_num = int_value(metadata.get("frame"), 0)
+    return frame_num % INT32_MAX
+
+
+def int_value(value, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
 
 
 def parse_args() -> argparse.Namespace:

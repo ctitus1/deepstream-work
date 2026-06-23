@@ -223,7 +223,9 @@ use the existing `clip_rgb_<injury_head>` convention, such as
 `clip_rgb_severe_hemorrhage`, and observations are probability vectors in the
 class-index order used by the injury model. Detect frames publish continuously;
 assess frames publish only when fresh assessment metadata matches the compressed
-frame.
+frame. Multiple casualties from the same frame are published as separate
+`CasualtyImageCompressed` messages with the same frame timestamp and the same
+image `data_source_id`; bbox fields identify the casualty within that image.
 
 Use `ROS_DOMAIN_ID` if your ROS graph needs a non-default domain:
 

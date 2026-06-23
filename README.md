@@ -6,10 +6,21 @@ DeepStream.
 
 The two normal workflows are:
 
-- Parser app: run DeepStream directly with a display window and console logs.
-- ROS publisher: run DeepStream as a frame source and publish detections as
-  `TargetBoxArray` messages and assessments as `CasualtyImageCompressed`
-  messages from a ROS Humble container.
+- Parser app: run `src/parser_app.py` directly with a display window and
+  console logs.
+- ROS publisher: run `scripts/run_stack.sh` to start the RTSP server,
+  DeepStream frame source, ROS publisher, and Foxglove Bridge together.
+
+The main entrypoints are intentionally short:
+
+- `src/parser_app.py`: display-oriented DeepStream app.
+- `src/ros_source.py`: DeepStream frame source for ROS publishing.
+- `src/ros_bridge.py`: ROS Humble publisher bridge.
+- `scripts/run_stack.sh`: full RTSP/ROS/Foxglove workflow helper.
+
+The ROS publisher workflow publishes detections as `TargetBoxArray` messages
+and assessments as `CasualtyImageCompressed` messages from a ROS Humble
+container.
 
 ## Shared Setup
 
@@ -148,11 +159,17 @@ matching FPS values are computed from those stage times.
 
 The ROS publishing workflow uses two containers:
 
-- `deepstream-ros-source`: runs the DeepStream pipeline, forks raw, detect, and
-  assess frame outputs, downsizes each image to `640x368`, JPEG-compresses
-  them, and sends frame metadata over local TCP.
-- `ros-humble-publisher`: receives those frames and publishes ROS Humble
+- `deepstream-ros-source`: runs `scripts/run_source.sh`, which starts
+  `src/ros_source.py`. It forks raw, detect, and assess frame outputs,
+  downsizes each image to `640x368`, JPEG-compresses them, and sends frame
+  metadata over local TCP.
+- `ros-humble-publisher`: runs `scripts/run_bridge.sh`, which starts
+  `src/ros_bridge.py`. It receives those frames and publishes ROS Humble
   `cdcl_umd_msgs` messages with the JPEG image embedded in each message.
+
+`scripts/run_stack.sh` starts those containers plus the RTSP server and
+Foxglove Bridge. With `--bag`, it also runs `scripts/record_bag.sh` to record
+all ROS topics to MCAP.
 
 From a host shell, start the full RTSP, ROS publisher, Foxglove, and DeepStream
 source stack:

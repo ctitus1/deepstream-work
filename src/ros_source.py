@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepStream ROS pub app.
+"""DeepStream frame source for ROS publishing.
 
 This entrypoint runs the same detection + assessment pipeline as the parser app,
 but forks three compressed frame streams instead of publishing ROS messages

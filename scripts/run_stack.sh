@@ -3,16 +3,16 @@
 #
 # The stack runs four pieces with host networking: an RTSP server for the sample
 # video, a ROS bridge that publishes messages, Foxglove Bridge for visualization,
-# and the DeepStream ROS pub app. Ctrl-C stops every container this script starts.
+# and the DeepStream source app. Ctrl-C stops every container this script starts.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/run_stack.sh [options] [-- ros-pub-args...]
+  scripts/run_stack.sh [options] [-- source-args...]
 
 Starts the local RTSP video server, ROS Humble publisher, Foxglove Bridge, and
-DeepStream ROS pub app. Press Ctrl-C to stop and remove the containers started by
+DeepStream ROS source. Press Ctrl-C to stop and remove the containers started by
 this script.
 
 Options:
@@ -46,9 +46,9 @@ RTSP_MOUNT="${RTSP_MOUNT:-dtc-d4-trimmed}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
 BUILD=0
 BAG=0
-PUB_ARGS=()
+SOURCE_ARGS=()
 
-# Parse stack options first; anything after "--" is passed to ros_pub.py.
+# Parse stack options first; anything after "--" is passed to ros_source.py.
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --video)
@@ -81,11 +81,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --)
       shift
-      PUB_ARGS+=("$@")
+      SOURCE_ARGS+=("$@")
       break
       ;;
     *)
-      PUB_ARGS+=("$1")
+      SOURCE_ARGS+=("$1")
       shift
       ;;
   esac
@@ -189,7 +189,7 @@ echo "  /uas4/target_detections"
 echo "  /casualty_image/compressed/annotated"
 echo
 
-# Launch in dependency order: stream, ROS publishers, Foxglove, optional bag, then ros_pub.
+# Launch in dependency order: stream, ROS publishers, Foxglove, optional bag, then DeepStream.
 start_compose_run \
   "deepstream-rtsp-${RUN_ID}" \
   deepstream-dev \
@@ -225,12 +225,12 @@ if [[ "$BAG" -eq 1 ]]; then
 fi
 
 start_compose_run \
-  "deepstream-ros-pub-${RUN_ID}" \
-  deepstream-ros-pub \
-  deepstream-ros-pub \
-  scripts/run_pub.sh \
+  "deepstream-ros-source-${RUN_ID}" \
+  deepstream-ros-source \
+  deepstream-ros-source \
+  scripts/run_source.sh \
   --stream "$RTSP_URL" \
-  "${PUB_ARGS[@]}"
+  "${SOURCE_ARGS[@]}"
 
 echo
 echo "Stack is running. Press Ctrl-C to stop everything cleanly."

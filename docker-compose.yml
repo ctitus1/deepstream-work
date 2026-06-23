@@ -36,7 +36,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-  deepstream-ros-pub:
+  deepstream-ros-source:
     profiles: ["ros"]
     build:
       context: .
@@ -47,7 +47,7 @@ services:
         USER_GID: ${HOST_GID:-1000}
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     image: deepstream-work:9.0
-    container_name: deepstream-ros-pub
+    container_name: deepstream-ros-source
     hostname: docker
     extra_hosts:
       - "docker:127.0.1.1"
@@ -66,7 +66,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
-      bash -lc "scripts/run_pub.sh
+      bash -lc "scripts/run_source.sh
       --model yolo12x-custom.pt
       --long-side 640"
     devices:

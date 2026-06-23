@@ -16,8 +16,12 @@ class PipelineParts:
     pipeline: Gst.Pipeline
     streammux: Gst.Element
     pgie: Gst.Element
+    detect_tee: Gst.Element | None
+    detect_appsink: Gst.Element | None
     assessment_queue: Gst.Element | None
     sgie: Gst.Element | None
+    assess_tee: Gst.Element | None
+    assess_appsink: Gst.Element | None
     caps: Gst.Element
     osd: Gst.Element
     display_queue: Gst.Element | None
@@ -48,6 +52,55 @@ def link_dynamic_pad(pad, sink) -> None:
     if sink.is_linked():
         return
     pad.link(sink)
+
+
+def link_tee_to_queue(tee, queue) -> None:
+    src = tee.request_pad_simple("src_%u")
+    sink = queue.get_static_pad("sink")
+    if src is None or sink is None:
+        raise RuntimeError(f"Failed to request tee pad for {tee.get_name()}")
+    result = src.link(sink)
+    if result != Gst.PadLinkReturn.OK:
+        raise RuntimeError(f"Failed to link {tee.get_name()} to {queue.get_name()}: {result}")
+
+
+def compressed_branch(
+    pipeline,
+    tee,
+    name: str,
+    width: int,
+    height: int,
+    jpeg_quality: int,
+):
+    queue = element("queue", f"{name}-queue")
+    convert_encode = element("nvvideoconvert", f"{name}-encode-convert")
+    caps_encode = element("capsfilter", f"{name}-encode-caps")
+    encoder = element("nvjpegenc", f"{name}-jpeg")
+    appsink = element("appsink", f"{name}-appsink")
+
+    configure_latest_queue(queue)
+    caps_encode.set_property(
+        "caps",
+        Gst.Caps.from_string(
+            f"video/x-raw(memory:NVMM), format=I420, width={width}, height={height}"
+        ),
+    )
+    set_property_if_present(encoder, "quality", int(jpeg_quality))
+    appsink.set_property("emit-signals", True)
+    appsink.set_property("sync", False)
+    appsink.set_property("max-buffers", 1)
+    set_property_if_present(appsink, "drop", True)
+
+    elements = [queue, convert_encode, caps_encode, encoder, appsink]
+    for elem in elements:
+        pipeline.add(elem)
+
+    link_tee_to_queue(tee, queue)
+    queue.link(convert_encode)
+    convert_encode.link(caps_encode)
+    caps_encode.link(encoder)
+    encoder.link(appsink)
+    return appsink
 
 
 def on_file_pad_added(_demux, pad, parsers):
@@ -86,8 +139,14 @@ def build_pipeline(
     config,
     assessment_config=None,
     rtsp_latency_ms: int = 0,
+    display: bool = True,
+    detect_output_size: tuple[int, int] | None = None,
+    assess_output_size: tuple[int, int] | None = None,
+    jpeg_quality: int = 85,
 ) -> PipelineParts:
     pipeline = Gst.Pipeline.new("yolo-parser")
+    if assess_output_size and not assessment_config:
+        raise ValueError("Assessment output requires an assessment config")
 
     if stream.is_rtsp:
         source = element("rtspsrc", "source")
@@ -105,13 +164,15 @@ def build_pipeline(
     queue = element("queue", "queue")
     streammux = element("nvstreammux", "streammux")
     pgie = element("nvinfer", "pgie")
+    detect_tee = element("tee", "detect-tee") if detect_output_size else None
     assessment_queue = element("queue", "assessment-queue") if assessment_config else None
     sgie = element("nvinfer", "assessment") if assessment_config else None
+    assess_tee = element("tee", "assess-tee") if assess_output_size else None
     convert = element("nvvideoconvert", "convert")
     caps = element("capsfilter", "caps")
     osd = element("nvdsosd", "osd")
     display_queue = element("queue", "display-queue") if stream.is_rtsp else None
-    sink = element("nveglglessink", "sink")
+    sink = element("nveglglessink" if display else "fakesink", "sink")
 
     if stream.is_rtsp:
         source.set_property("location", stream.uri)
@@ -150,8 +211,8 @@ def build_pipeline(
     osd.set_property("process-mode", 1)
     osd.set_property("display-bbox", 1)
     osd.set_property("display-text", 1)
-    sink.set_property("sync", bool(stream.is_rtsp))
-    sink.set_property("qos", bool(stream.is_rtsp))
+    sink.set_property("sync", bool(stream.is_rtsp and display))
+    set_property_if_present(sink, "qos", bool(stream.is_rtsp and display))
     configure_latest_queue(queue)
     if assessment_queue:
         configure_latest_queue(assessment_queue)
@@ -159,8 +220,12 @@ def build_pipeline(
         configure_latest_queue(display_queue)
 
     elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux, pgie]
+    if detect_tee:
+        elements.append(detect_tee)
     if assessment_queue and sgie:
         elements.extend((assessment_queue, sgie))
+    if assess_tee:
+        elements.append(assess_tee)
     elements.extend((convert, caps, osd))
     if display_queue:
         elements.append(display_queue)
@@ -186,12 +251,43 @@ def build_pipeline(
     decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
     streammux.link(pgie)
-    if assessment_queue and sgie:
+    detect_appsink = None
+    assess_appsink = None
+    if detect_tee and detect_output_size:
+        pgie.link(detect_tee)
+        detect_appsink = compressed_branch(
+            pipeline,
+            detect_tee,
+            "detect-output",
+            detect_output_size[0],
+            detect_output_size[1],
+            jpeg_quality,
+        )
+        if assessment_queue:
+            link_tee_to_queue(detect_tee, assessment_queue)
+        else:
+            link_tee_to_queue(detect_tee, convert)
+    elif assessment_queue:
         pgie.link(assessment_queue)
-        assessment_queue.link(sgie)
-        sgie.link(convert)
     else:
         pgie.link(convert)
+
+    if assessment_queue and sgie:
+        assessment_queue.link(sgie)
+        if assess_tee and assess_output_size:
+            sgie.link(assess_tee)
+            assess_appsink = compressed_branch(
+                pipeline,
+                assess_tee,
+                "assess-output",
+                assess_output_size[0],
+                assess_output_size[1],
+                jpeg_quality,
+            )
+            link_tee_to_queue(assess_tee, convert)
+        else:
+            sgie.link(convert)
+
     convert.link(caps)
     caps.link(osd)
     if display_queue:
@@ -204,8 +300,12 @@ def build_pipeline(
         pipeline=pipeline,
         streammux=streammux,
         pgie=pgie,
+        detect_tee=detect_tee,
+        detect_appsink=detect_appsink,
         assessment_queue=assessment_queue,
         sgie=sgie,
+        assess_tee=assess_tee,
+        assess_appsink=assess_appsink,
         caps=caps,
         osd=osd,
         display_queue=display_queue,

@@ -1,0 +1,19 @@
+FROM ros:humble-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONPATH=/workspace/deepstream-work/src
+
+ARG WORKSPACE_DIR=/workspace/deepstream-work
+
+WORKDIR ${WORKSPACE_DIR}
+
+# Optional visualization bridge for Foxglove Studio. Keep ROS additions near the
+# end so DeepStream image rebuilds stay untouched and this layer stays cacheable.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ros-humble-foxglove-bridge \
+      ros-humble-nav-msgs \
+      ros-humble-vision-msgs && \
+    rm -rf /var/lib/apt/lists/*
+
+CMD ["/bin/bash"]

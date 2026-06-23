@@ -33,7 +33,7 @@ class RuntimeArgumentParser(argparse.ArgumentParser):
 
 def parse_args() -> argparse.Namespace:
     parser = RuntimeArgumentParser()
-    parser.add_argument("--model", default="yolo12x.pt")
+    parser.add_argument("--model", default="yolo12x-custom.pt")
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
@@ -51,7 +51,20 @@ def parse_args() -> argparse.Namespace:
         help="RTSP jitterbuffer latency before old network packets are dropped; default 0.",
     )
     parser.add_argument("--show-gst-scan-warnings", action="store_true")
-    parser.add_argument("--enable-assessment", action="store_true")
+    assessment_group = parser.add_mutually_exclusive_group()
+    assessment_group.add_argument(
+        "--enable-assessment",
+        dest="enable_assessment",
+        action="store_true",
+        default=True,
+        help="Enable injury assessment; default.",
+    )
+    assessment_group.add_argument(
+        "--no-assessment",
+        dest="enable_assessment",
+        action="store_false",
+        help="Disable injury assessment.",
+    )
     parser.add_argument("--assessment-model", default="models/injury.pt")
     parser.add_argument("--assessment-batch-size", type=int, default=8)
     parser.add_argument(
@@ -60,7 +73,20 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Seconds between sampled assessment-log frames; 0 logs every assessment, negative disables.",
     )
-    parser.add_argument("--show-assessed-only", action="store_true")
+    display_group = parser.add_mutually_exclusive_group()
+    display_group.add_argument(
+        "--show-assessed-only",
+        dest="show_assessed_only",
+        action="store_true",
+        default=False,
+        help="Display only frames with fresh assessment output.",
+    )
+    display_group.add_argument(
+        "--show-all-frames",
+        dest="show_assessed_only",
+        action="store_false",
+        help="Display every frame, including frames without fresh assessment output.",
+    )
     args = parser.parse_args()
     if args.show_assessed_only and not args.enable_assessment:
         parser.error("--show-assessed-only requires --enable-assessment")

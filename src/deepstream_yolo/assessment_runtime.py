@@ -260,6 +260,7 @@ class AssessmentLogRow:
     object_id: int
     bbox: tuple[float, float, float, float]
     lines: list[str]
+    predictions: dict[str, dict]
 
 
 @dataclass(frozen=True)
@@ -309,6 +310,13 @@ class AssessmentTiming:
     def _trim(self, times: dict[int, float]) -> None:
         while len(times) > self.max_frames:
             times.pop(next(iter(times)))
+
+    def detect_compute_ms(self, frame_num: int) -> float | None:
+        start_time = self.start_times.get(frame_num)
+        detect_done_time = self.detect_done_times.get(frame_num)
+        if start_time is None or detect_done_time is None:
+            return None
+        return max(0.0, (detect_done_time - start_time) * 1000.0)
 
     def pop_compute_times(self, frame_num: int, now: float) -> AssessmentComputeTimes:
         start_time = self.start_times.pop(frame_num, None)
@@ -395,9 +403,10 @@ class AssessmentReporter:
 
 
 def assessment_probe(
-    reporter: AssessmentReporter,
+    reporter: AssessmentReporter | None,
     timing: AssessmentTiming | None = None,
     show_assessed_only: bool = False,
+    frame_sink=None,
 ):
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
@@ -447,6 +456,7 @@ def assessment_probe(
                                         object_id=box_id,
                                         bbox=(rect.left, rect.top, rect.width, rect.height),
                                         lines=lines,
+                                        predictions=predictions,
                                     )
                                 )
 
@@ -457,13 +467,23 @@ def assessment_probe(
             if frame_rows:
                 now = time.perf_counter()
                 compute_times = timing.pop_compute_times(frame_num, now) if timing else None
-                reporter.log_frame(
-                    frame_num,
-                    timestamp_source,
-                    timestamp,
-                    frame_rows,
-                    compute_times,
-                )
+                if reporter:
+                    reporter.log_frame(
+                        frame_num,
+                        timestamp_source,
+                        timestamp,
+                        frame_rows,
+                        compute_times,
+                    )
+                if frame_sink:
+                    frame_sink(
+                        buffer,
+                        frame_num,
+                        timestamp_source,
+                        timestamp,
+                        frame_rows,
+                        compute_times,
+                    )
 
             frame_list = frame_list.next
 

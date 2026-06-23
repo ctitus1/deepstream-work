@@ -36,3 +36,92 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  deepstream-ros-source:
+    profiles: ["ros"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: user
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    image: deepstream-work:9.0
+    container_name: deepstream-ros-source
+    hostname: docker
+    extra_hosts:
+      - "docker:127.0.1.1"
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: ${DISPLAY}
+      CUDA_CACHE_DISABLE: "0"
+      NVIDIA_DRIVER_CAPABILITIES: all
+      QT_X11_NO_MITSHM: "1"
+      TERM: xterm-256color
+    volumes:
+      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    command: >
+      bash -lc "scripts/run_ros_source.sh
+      --model yolo12x-custom.pt
+      --long-side 640"
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+  ros-humble-publisher:
+    profiles: ["ros"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ros-humble
+      args:
+        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    image: deepstream-work:ros-humble
+    container_name: ros-humble-publisher
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      CDCL_ROS_SETUP: ${CDCL_ROS_SETUP:-/ros2_ws/install/setup.bash}
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      TERM: xterm-256color
+    volumes:
+      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
+      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:/ros2_ws:ro
+    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    command: >
+      bash -lc "scripts/run_ros_humble_bridge.sh"
+  ros-foxglove-bridge:
+    profiles: ["ros"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ros-humble
+      args:
+        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    image: deepstream-work:ros-humble
+    container_name: ros-foxglove-bridge
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      CDCL_ROS_SETUP: ${CDCL_ROS_SETUP:-/ros2_ws/install/setup.bash}
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      FOXGLOVE_PORT: ${FOXGLOVE_PORT:-8765}
+      TERM: xterm-256color
+    volumes:
+      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
+      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:/ros2_ws:ro
+    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    command: >
+      bash -lc "scripts/run_foxglove_bridge.sh"

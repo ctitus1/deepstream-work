@@ -43,6 +43,7 @@ from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 
 DEFAULT_DETECT_ENDPOINT = "127.0.0.1:5610"
 DEFAULT_ASSESS_ENDPOINT = "127.0.0.1:5611"
+DEFAULT_IMAGE_ENDPOINT = "127.0.0.1:5609"
 OUTPUT_WIDTH = 640
 OUTPUT_HEIGHT = 368
 BBox = tuple[float, float, float, float]
@@ -261,6 +262,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-width", type=int, default=OUTPUT_WIDTH)
     parser.add_argument("--output-height", type=int, default=OUTPUT_HEIGHT)
     parser.add_argument("--jpeg-quality", type=int, default=85)
+    parser.add_argument("--image-endpoint", default=DEFAULT_IMAGE_ENDPOINT)
     parser.add_argument("--detect-endpoint", default=DEFAULT_DETECT_ENDPOINT)
     parser.add_argument("--assess-endpoint", default=DEFAULT_ASSESS_ENDPOINT)
     parser.add_argument("--display", action="store_true")
@@ -317,6 +319,43 @@ def serializable_predictions(predictions: dict[str, dict]) -> dict[str, dict]:
             ],
         }
     return serialized
+
+
+def image_metadata_probe(store: FrameLogStore, image_space: ImageSpace):
+    def _probe(_pad, info, _data):
+        buffer = info.get_buffer()
+        if not buffer:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        key = buffer_key(buffer)
+        frame_list = batch_meta.frame_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
+            frame_num = int(frame_meta.frame_num)
+            store.put(
+                key,
+                FrameLog(
+                    "IMAGE",
+                    frame_num,
+                    timestamp_source,
+                    timestamp,
+                    [],
+                    (),
+                    [],
+                    image_space.source_size(),
+                    image_space.image_size(),
+                ),
+            )
+            frame_list = frame_list.next
+
+        return Gst.PadProbeReturn.OK
+
+    return _probe
 
 
 def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_space: ImageSpace):
@@ -471,6 +510,7 @@ def print_runtime_info(
     )
     print(
         "frame_outputs="
+        f"image={args.image_endpoint} "
         f"detect={args.detect_endpoint} "
         f"assess={args.assess_endpoint} "
         f"size={args.output_width}x{args.output_height} "
@@ -495,8 +535,14 @@ def main() -> int:
     output_size = (args.output_width, args.output_height)
     image_space = ImageSpace(src_w, src_h, *output_size)
 
+    image_store = FrameLogStore()
     detect_store = FrameLogStore()
     assess_store = FrameLogStore()
+    image_sender = FrameSocketSender(
+        "IMAGE",
+        args.image_endpoint,
+        image_store,
+    )
     detect_sender = FrameSocketSender("DETECT", args.detect_endpoint, detect_store)
     assess_sender = FrameSocketSender(
         "ASSESS",
@@ -513,15 +559,21 @@ def main() -> int:
         assessment_config,
         rtsp_latency_ms=args.rtsp_latency_ms,
         display=args.display,
+        raw_output_size=output_size,
         detect_output_size=output_size,
         assess_output_size=output_size,
         jpeg_quality=args.jpeg_quality,
     )
-    if not parts.detect_appsink or not parts.assess_appsink:
-        raise RuntimeError("Frame source pipeline did not create both appsinks")
+    if not parts.raw_appsink or not parts.detect_appsink or not parts.assess_appsink:
+        raise RuntimeError("Frame source pipeline did not create all appsinks")
 
     timing = AssessmentTiming()
     parts.streammux.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, timing.mark_start, None)
+    parts.streammux.get_static_pad("src").add_probe(
+        Gst.PadProbeType.BUFFER,
+        image_metadata_probe(image_store, image_space),
+        None,
+    )
     parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, timing.mark_detect_done, None)
     parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, bbox_probe(args.conf), None)
     parts.pgie.get_static_pad("src").add_probe(
@@ -534,6 +586,7 @@ def main() -> int:
         assessment_probe(None, timing=timing, frame_sink=assessment_frame_sink(assess_store, image_space)),
         None,
     )
+    parts.raw_appsink.connect("new-sample", image_sender.on_sample)
     parts.detect_appsink.connect("new-sample", detect_sender.on_sample)
     parts.assess_appsink.connect("new-sample", assess_sender.on_sample)
 
@@ -547,6 +600,7 @@ def main() -> int:
         loop.run()
     finally:
         parts.pipeline.set_state(Gst.State.NULL)
+        image_sender.close()
         detect_sender.close()
         assess_sender.close()
 

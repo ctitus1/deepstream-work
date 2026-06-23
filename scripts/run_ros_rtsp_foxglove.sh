@@ -156,6 +156,7 @@ if [[ "$BUILD" -eq 1 ]]; then
 fi
 
 require_port_free "RTSP server" "$RTSP_PORT"
+require_port_free "ROS image publisher endpoint" 5609
 require_port_free "ROS detect publisher endpoint" 5610
 require_port_free "ROS assess publisher endpoint" 5611
 require_port_free "Foxglove Bridge" "$FOXGLOVE_PORT"
@@ -163,6 +164,7 @@ require_port_free "Foxglove Bridge" "$FOXGLOVE_PORT"
 echo "RTSP URL: ${RTSP_URL}"
 echo "Foxglove: ws://localhost:${FOXGLOVE_PORT}"
 echo "Topics:"
+echo "  /uas4/image"
 echo "  /uas4/target_detections"
 echo "  /casualty_image/compressed/annotated"
 echo
@@ -180,6 +182,7 @@ start_compose_run \
   "ros-humble-publisher-${RUN_ID}" \
   ros-humble-publisher \
   ros-humble-publisher
+wait_for_port "ROS image publisher endpoint" 5609 30
 wait_for_port "ROS detect publisher endpoint" 5610 30
 wait_for_port "ROS assess publisher endpoint" 5611 30
 

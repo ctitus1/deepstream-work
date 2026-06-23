@@ -15,6 +15,8 @@ from .stream_source import StreamSource
 class PipelineParts:
     pipeline: Gst.Pipeline
     streammux: Gst.Element
+    raw_tee: Gst.Element | None
+    raw_appsink: Gst.Element | None
     pgie: Gst.Element
     detect_tee: Gst.Element | None
     detect_appsink: Gst.Element | None
@@ -62,6 +64,15 @@ def link_tee_to_queue(tee, queue) -> None:
     result = src.link(sink)
     if result != Gst.PadLinkReturn.OK:
         raise RuntimeError(f"Failed to link {tee.get_name()} to {queue.get_name()}: {result}")
+
+
+def tee_queue_branch(pipeline, tee, name: str, sink) -> Gst.Element:
+    queue = element("queue", f"{name}-queue")
+    configure_latest_queue(queue)
+    pipeline.add(queue)
+    link_tee_to_queue(tee, queue)
+    queue.link(sink)
+    return queue
 
 
 def compressed_branch(
@@ -140,6 +151,7 @@ def build_pipeline(
     assessment_config=None,
     rtsp_latency_ms: int = 0,
     display: bool = True,
+    raw_output_size: tuple[int, int] | None = None,
     detect_output_size: tuple[int, int] | None = None,
     assess_output_size: tuple[int, int] | None = None,
     jpeg_quality: int = 85,
@@ -163,6 +175,7 @@ def build_pipeline(
     decoder = element("nvv4l2decoder", "decoder")
     queue = element("queue", "queue")
     streammux = element("nvstreammux", "streammux")
+    raw_tee = element("tee", "raw-input-tee") if raw_output_size else None
     pgie = element("nvinfer", "pgie")
     detect_tee = element("tee", "detect-tee") if detect_output_size else None
     assessment_queue = element("queue", "assessment-queue") if assessment_config else None
@@ -219,7 +232,10 @@ def build_pipeline(
     if display_queue:
         configure_latest_queue(display_queue)
 
-    elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux, pgie]
+    elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux]
+    if raw_tee:
+        elements.append(raw_tee)
+    elements.append(pgie)
     if detect_tee:
         elements.append(detect_tee)
     if assessment_queue and sgie:
@@ -250,7 +266,21 @@ def build_pipeline(
     h264_parser.link(decoder)
     decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
-    streammux.link(pgie)
+    raw_appsink = None
+    if raw_tee and raw_output_size:
+        streammux.link(raw_tee)
+        raw_appsink = compressed_branch(
+            pipeline,
+            raw_tee,
+            "raw-output",
+            raw_output_size[0],
+            raw_output_size[1],
+            jpeg_quality,
+        )
+        tee_queue_branch(pipeline, raw_tee, "raw-main", pgie)
+    else:
+        streammux.link(pgie)
+
     detect_appsink = None
     assess_appsink = None
     if detect_tee and detect_output_size:
@@ -299,6 +329,8 @@ def build_pipeline(
     return PipelineParts(
         pipeline=pipeline,
         streammux=streammux,
+        raw_tee=raw_tee,
+        raw_appsink=raw_appsink,
         pgie=pgie,
         detect_tee=detect_tee,
         detect_appsink=detect_appsink,

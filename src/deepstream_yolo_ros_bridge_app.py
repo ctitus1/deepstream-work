@@ -23,6 +23,7 @@ from deepstream_yolo.frame_wire import recv_frame
 
 DEFAULT_DETECT_ENDPOINT = "0.0.0.0:5610"
 DEFAULT_ASSESS_ENDPOINT = "0.0.0.0:5611"
+DEFAULT_IMAGE_ENDPOINT = "0.0.0.0:5609"
 DATA_SOURCE_ID_STRIDE = 1000
 
 
@@ -50,7 +51,11 @@ class FramePublisherNode(Node):
         self.platform_name = platform_name
         self.sensor_frame_id = sensor_frame_id
         self.seq = 0
-        message_type = TargetBoxArray if message_kind == "detect" else CasualtyImageCompressed
+        message_type = {
+            "image": CompressedImage,
+            "detect": TargetBoxArray,
+            "assess": CasualtyImageCompressed,
+        }[message_kind]
         self.publisher = self.create_publisher(message_type, topic, 10)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)
@@ -100,11 +105,12 @@ class FramePublisherNode(Node):
                         self.publish_frame(metadata, payload)
 
     def publish_frame(self, metadata: dict, payload: bytes) -> None:
-        messages = (
-            self.target_box_array_messages(metadata, payload)
-            if self.message_kind == "detect"
-            else self.casualty_image_messages(metadata, payload)
-        )
+        if self.message_kind == "image":
+            messages = [self.compressed_image(metadata, payload)]
+        elif self.message_kind == "detect":
+            messages = self.target_box_array_messages(metadata, payload)
+        else:
+            messages = self.casualty_image_messages(metadata, payload)
         for msg in messages:
             self.publisher.publish(msg)
 
@@ -234,8 +240,10 @@ def data_source_id(metadata: dict, obj: dict) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--image-endpoint", default=DEFAULT_IMAGE_ENDPOINT)
     parser.add_argument("--detect-endpoint", default=DEFAULT_DETECT_ENDPOINT)
     parser.add_argument("--assess-endpoint", default=DEFAULT_ASSESS_ENDPOINT)
+    parser.add_argument("--image-topic", default="/uas4/image")
     parser.add_argument("--detect-topic", default="/uas4/target_detections")
     parser.add_argument("--assess-topic", default="/casualty_image/compressed/annotated")
     parser.add_argument("--frame-id", default="deepstream_camera")
@@ -255,6 +263,17 @@ def main() -> int:
     args = parse_args()
     rclpy.init(args=None)
 
+    image_node = FramePublisherNode(
+        "deepstream_image_publisher",
+        args.image_topic,
+        args.image_endpoint,
+        args.metadata_log_interval,
+        "image",
+        args.frame_id,
+        args.system_id,
+        args.platform_name,
+        args.sensor_frame_id,
+    )
     detect_node = FramePublisherNode(
         "deepstream_detect_publisher",
         args.detect_topic,
@@ -278,9 +297,11 @@ def main() -> int:
         args.sensor_frame_id,
     )
     executor = MultiThreadedExecutor()
+    executor.add_node(image_node)
     executor.add_node(detect_node)
     executor.add_node(assess_node)
 
+    image_node.start()
     detect_node.start()
     assess_node.start()
     try:
@@ -288,10 +309,13 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        image_node.stop()
         detect_node.stop()
         assess_node.stop()
+        executor.remove_node(image_node)
         executor.remove_node(detect_node)
         executor.remove_node(assess_node)
+        image_node.destroy_node()
         detect_node.destroy_node()
         assess_node.destroy_node()
         if rclpy.ok():

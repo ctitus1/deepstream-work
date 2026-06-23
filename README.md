@@ -148,9 +148,9 @@ matching FPS values are computed from those stage times.
 
 The ROS publishing workflow uses two containers:
 
-- `deepstream-ros-source`: runs the DeepStream pipeline, forks detect and assess
-  frame outputs, downsizes each image to `640x368`, JPEG-compresses them, and
-  sends frame metadata over local TCP.
+- `deepstream-ros-source`: runs the DeepStream pipeline, forks raw, detect, and
+  assess frame outputs, downsizes each image to `640x368`, JPEG-compresses
+  them, and sends frame metadata over local TCP.
 - `ros-humble-publisher`: receives those frames and publishes ROS Humble
   `cdcl_umd_msgs` messages with the JPEG image embedded in each message.
 
@@ -192,6 +192,7 @@ docker compose --profile ros run --rm deepstream-ros-source
 Published topics:
 
 ```text
+/uas4/image
 /uas4/target_detections
 /casualty_image/compressed/annotated
 ```
@@ -199,23 +200,26 @@ Published topics:
 Foxglove should show:
 
 ```text
+/uas4/image [sensor_msgs/msg/CompressedImage]
 /uas4/target_detections [cdcl_umd_msgs/msg/TargetBoxArray]
 /casualty_image/compressed/annotated [cdcl_umd_msgs/msg/CasualtyImageCompressed]
 ```
 
-The bridge listens on `0.0.0.0:5610` for detect frames and `0.0.0.0:5611` for
-assess frames. The DeepStream source connects to `127.0.0.1:5610` and
-`127.0.0.1:5611` by default. Both services use host networking.
+The bridge listens on `0.0.0.0:5609` for raw image frames, `0.0.0.0:5610` for
+detect frames, and `0.0.0.0:5611` for assess frames. The DeepStream source
+connects to `127.0.0.1:5609`, `127.0.0.1:5610`, and `127.0.0.1:5611` by
+default. Both services use host networking.
 
 Each ROS publisher node logs the metadata associated with the published
-message. The detect node publishes one `TargetBoxArray` per detect frame; each
-person bbox becomes a `TargetBox` with bbox coordinates scaled to the compressed
-`640x368` detect image, YOLO confidence, and `DETECTION_YOLO`. The assess node
-publishes one `CasualtyImageCompressed` per assessed bbox with bbox coordinates
-scaled to the compressed `640x368` assessment image, embedded image, and injury
-probabilities as `Annotation[]`. Wire metadata also includes `source_bbox` and
-source/image dimensions for debugging. Annotation field names use the existing
-`clip_rgb_<injury_head>` convention, such as
+message. The image node publishes the raw input frame as a compressed image
+before detection. The detect node publishes one `TargetBoxArray` per detect
+frame; each person bbox becomes a `TargetBox` with bbox coordinates scaled to
+the compressed `640x368` detect image, YOLO confidence, and `DETECTION_YOLO`.
+The assess node publishes one `CasualtyImageCompressed` per assessed bbox with
+bbox coordinates scaled to the compressed `640x368` assessment image, embedded
+image, and injury probabilities as `Annotation[]`. Wire metadata also includes
+`source_bbox` and source/image dimensions for debugging. Annotation field names
+use the existing `clip_rgb_<injury_head>` convention, such as
 `clip_rgb_severe_hemorrhage`, and observations are probability vectors in the
 class-index order used by the injury model. Detect frames publish continuously;
 assess frames publish only when fresh assessment metadata matches the compressed

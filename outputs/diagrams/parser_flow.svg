@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2370" height="760" viewBox="0 0 2370 760">
+<svg xmlns="http://www.w3.org/2000/svg" width="1660" height="754" viewBox="0 0 1660 754">
 <defs>
 <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
 <path d="M2,2 L10,6 L2,10 z" fill="#94a3b8"/>
@@ -11,81 +11,81 @@
 .node-title{font:700 17px Arial,sans-serif;fill:#e5e7eb}
 .node-body{font:13px Arial,sans-serif;fill:#a7b0be}
 </style>
-<rect x="0" y="0" width="2370" height="760" fill="#0b1120"/>
-<text x="40" y="42" class="title">Parser App Data Flow</text>
-<text x="40" y="72" class="subtitle">parser_app.py prepares configs and probes; pipeline.py runs the display-oriented DeepStream graph.</text>
-<rect x="0" y="320" width="270" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="16" y="498" class="group-label">scripts/start_rtsp_stream.sh</text>
-<rect x="300" y="80" width="960" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="316" y="258" class="group-label">src/parser_app.py</text>
-<rect x="300" y="320" width="1260" height="382" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="316" y="688" class="group-label">src/deepstream_yolo/pipeline.py + probe helpers</text>
-<rect x="340" y="120" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="355" y="150" class="node-title">Args + configs</text>
-<text x="355" y="182" class="node-body">parse args</text>
-<text x="355" y="205" class="node-body">ensure model configs</text>
-<rect x="570" y="120" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="585" y="150" class="node-title">Build pipeline</text>
-<text x="585" y="182" class="node-body">build_pipeline()</text>
-<text x="585" y="205" class="node-body">shared GStreamer graph</text>
-<rect x="800" y="120" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="815" y="150" class="node-title">Attach probes</text>
-<text x="815" y="182" class="node-body">bbox + assessment</text>
-<text x="815" y="205" class="node-body">timing + rate limit</text>
-<rect x="1030" y="120" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1045" y="150" class="node-title">Run loop</text>
-<text x="1045" y="182" class="node-body">keyboard controls</text>
-<text x="1045" y="205" class="node-body">bus messages</text>
-<rect x="40" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="55" y="390" class="node-title">Video input</text>
-<text x="55" y="422" class="node-body">RTSP camera</text>
-<text x="55" y="445" class="node-body">or local MP4</text>
-<rect x="340" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="355" y="390" class="node-title">Decode + mux</text>
-<text x="355" y="422" class="node-body">parser -> decoder</text>
-<text x="355" y="445" class="node-body">nvstreammux</text>
-<rect x="570" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="585" y="390" class="node-title">YOLO detector</text>
-<text x="585" y="422" class="node-body">nvinfer PGIE</text>
-<text x="585" y="445" class="node-body">person ids + conf</text>
-<rect x="800" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="815" y="390" class="node-title">BBox probe</text>
-<text x="815" y="422" class="node-body">detection_overlay.py</text>
-<text x="815" y="445" class="node-body">draw person boxes</text>
-<rect x="1030" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1045" y="390" class="node-title">OSD + convert</text>
-<text x="1045" y="422" class="node-body">RGBA caps</text>
-<text x="1045" y="445" class="node-body">nvdsosd overlays</text>
-<rect x="1330" y="360" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1345" y="390" class="node-title">Display sink</text>
-<text x="1345" y="422" class="node-body">nveglglessink</text>
-<text x="1345" y="445" class="node-body">or fakesink</text>
-<rect x="570" y="550" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="585" y="580" class="node-title">Injury model</text>
-<text x="585" y="612" class="node-body">nvinfer SGIE</text>
-<text x="585" y="635" class="node-body">optional assessment</text>
-<rect x="800" y="550" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="815" y="580" class="node-title">Assess probe</text>
-<text x="815" y="612" class="node-body">assessment_runtime.py</text>
-<text x="815" y="635" class="node-body">fresh labels/logs</text>
-<rect x="1030" y="550" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1045" y="580" class="node-title">Display policy</text>
-<text x="1045" y="612" class="node-body">show all frames</text>
-<text x="1045" y="635" class="node-body">or assessed only</text>
-<path d="M 530.0 176.0 L 570.0 176.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 760.0 176.0 L 800.0 176.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 990.0 176.0 L 1030.0 176.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 665.0 232.0 L 665.0 296.0 L 435.0 296.0 L 435.0 360.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 895.0 232.0 L 895.0 296.0 L 895.0 296.0 L 895.0 360.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 942.5 232.0 L 942.5 550.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1125.0 232.0 L 1125.0 296.0 L 1425.0 296.0 L 1425.0 360.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 230.0 416.0 L 340.0 416.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 530.0 416.0 L 570.0 416.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 760.0 416.0 L 800.0 416.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 990.0 388.0 L 1030.0 388.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1220.0 416.0 L 1330.0 416.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 665.0 472.0 L 665.0 550.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 760.0 606.0 L 800.0 606.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 990.0 606.0 L 1030.0 606.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1125.0 550.0 L 1125.0 472.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<rect x="0" y="0" width="1660" height="754" fill="#0b1120"/>
+<text x="40" y="64" class="title">Parser App Data Flow</text>
+<text x="40" y="87" class="subtitle">parser_app.py prepares configs and probes; pipeline.py runs the display-oriented DeepStream graph.</text>
+<rect x="40" y="370" width="270" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="56" y="548" class="group-label">scripts/start_rtsp_stream.sh</text>
+<rect x="350" y="138" width="960" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="366" y="316" class="group-label">src/parser_app.py</text>
+<rect x="350" y="370" width="1270" height="344" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="366" y="700" class="group-label">src/deepstream_yolo/pipeline.py + probe helpers</text>
+<rect x="390" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="405" y="208" class="node-title">Args + configs</text>
+<text x="405" y="240" class="node-body">parse args</text>
+<text x="405" y="263" class="node-body">ensure model configs</text>
+<rect x="620" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="635" y="208" class="node-title">Build pipeline</text>
+<text x="635" y="240" class="node-body">build_pipeline()</text>
+<text x="635" y="263" class="node-body">shared GStreamer graph</text>
+<rect x="850" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="865" y="208" class="node-title">Attach probes</text>
+<text x="865" y="240" class="node-body">bbox + assessment</text>
+<text x="865" y="263" class="node-body">timing + rate limit</text>
+<rect x="1080" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1095" y="208" class="node-title">Run loop</text>
+<text x="1095" y="240" class="node-body">keyboard controls</text>
+<text x="1095" y="263" class="node-body">bus messages</text>
+<rect x="80" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="95" y="440" class="node-title">Video input</text>
+<text x="95" y="472" class="node-body">RTSP camera</text>
+<text x="95" y="495" class="node-body">or local MP4</text>
+<rect x="390" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="405" y="440" class="node-title">Decode + mux</text>
+<text x="405" y="472" class="node-body">parser -> decoder</text>
+<text x="405" y="495" class="node-body">nvstreammux</text>
+<rect x="620" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="635" y="440" class="node-title">YOLO detector</text>
+<text x="635" y="472" class="node-body">nvinfer PGIE</text>
+<text x="635" y="495" class="node-body">person ids + conf</text>
+<rect x="850" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="865" y="440" class="node-title">BBox probe</text>
+<text x="865" y="472" class="node-body">detection_overlay.py</text>
+<text x="865" y="495" class="node-body">draw person boxes</text>
+<rect x="1080" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1095" y="440" class="node-title">OSD + convert</text>
+<text x="1095" y="472" class="node-body">RGBA caps</text>
+<text x="1095" y="495" class="node-body">nvdsosd overlays</text>
+<rect x="1390" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1405" y="440" class="node-title">Display sink</text>
+<text x="1405" y="472" class="node-body">nveglglessink</text>
+<text x="1405" y="495" class="node-body">or fakesink</text>
+<rect x="620" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="635" y="592" class="node-title">Injury model</text>
+<text x="635" y="624" class="node-body">nvinfer SGIE</text>
+<text x="635" y="647" class="node-body">optional assessment</text>
+<rect x="850" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="865" y="592" class="node-title">Assess probe</text>
+<text x="865" y="624" class="node-body">assessment_runtime.py</text>
+<text x="865" y="647" class="node-body">fresh labels/logs</text>
+<rect x="1080" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1095" y="592" class="node-title">Display policy</text>
+<text x="1095" y="624" class="node-body">show all frames</text>
+<text x="1095" y="647" class="node-body">or assessed only</text>
+<path d="M 580.0 234.0 L 620.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 810.0 234.0 L 850.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1040.0 234.0 L 1080.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 715.0 290.0 L 715.0 350.0 L 485.0 350.0 L 485.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 945.0 290.0 L 945.0 350.0 L 945.0 350.0 L 945.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 992.5 290.0 L 992.5 562.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1175.0 290.0 L 1175.0 350.0 L 1485.0 350.0 L 1485.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 270.0 466.0 L 390.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 580.0 466.0 L 620.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 810.0 466.0 L 850.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1040.0 438.0 L 1080.0 438.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1270.0 466.0 L 1390.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 715.0 522.0 L 715.0 562.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 810.0 618.0 L 850.0 618.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1040.0 618.0 L 1080.0 618.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1175.0 562.0 L 1175.0 522.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
 </svg>

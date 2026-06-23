@@ -25,21 +25,33 @@ from PIL import Image, ImageDraw, ImageFont
 
 OUT_DIR = Path(__file__).resolve().parent
 
-CANVAS_W = 2370
-CANVAS_H = 760
+SPACING = 40
 NODE_W = 190
 WIDE_NODE_W = 270
 NODE_H = 112
-GROUP_INSET = 40
-GROUP_GAP = 30
-NODE_GAP = 40
+GROUP_INSET = SPACING
+GROUP_GAP = SPACING
+NODE_GAP = SPACING
 
-ROW_TOP = 150
-ROW_MIDDLE = 340
-ROW_BOTTOM = 530
+HEADER_X = SPACING
+HEADER_TITLE_Y = SPACING
+HEADER_TITLE_HEIGHT = 34
+HEADER_SUBTITLE_Y = HEADER_TITLE_Y + HEADER_TITLE_HEIGHT
+HEADER_SUBTITLE_HEIGHT = 24
+HEADER_BOTTOM = HEADER_SUBTITLE_Y + HEADER_SUBTITLE_HEIGHT
+HEADER_TITLE_SVG_Y = HEADER_TITLE_Y + 24
+HEADER_SUBTITLE_SVG_Y = HEADER_SUBTITLE_Y + 13
+HEADER_TITLE_PNG_Y = HEADER_TITLE_Y
+HEADER_SUBTITLE_PNG_Y = HEADER_SUBTITLE_Y
 
-X_VIDEO = GROUP_INSET
-X_DECODE = 300 + GROUP_INSET
+ROW_TOP = HEADER_BOTTOM + SPACING + GROUP_INSET
+ROW_MIDDLE = ROW_TOP + NODE_H + SPACING
+ROW_BOTTOM = ROW_MIDDLE + NODE_H + SPACING
+ROW_GAP = NODE_H + SPACING
+assert ROW_BOTTOM - ROW_MIDDLE == ROW_GAP
+
+X_VIDEO = SPACING + GROUP_INSET
+X_DECODE = X_VIDEO + NODE_W + GROUP_INSET + GROUP_GAP + GROUP_INSET
 X_STAMP = X_DECODE + NODE_W + NODE_GAP
 X_PROCESS = X_STAMP + NODE_W + NODE_GAP
 X_BRANCH = X_PROCESS + NODE_W + NODE_GAP
@@ -48,6 +60,8 @@ X_BUILDER = X_TCP + NODE_W + NODE_GAP
 X_TOPICS = X_BUILDER + NODE_W + NODE_GAP
 X_CONSUMERS = X_TOPICS + WIDE_NODE_W + NODE_GAP
 BRANCH_JOIN_X = X_BRANCH + NODE_W + GROUP_INSET + GROUP_GAP // 2
+CANVAS_W = X_CONSUMERS + NODE_W + GROUP_INSET + SPACING
+CANVAS_H = ROW_BOTTOM + NODE_H + GROUP_INSET + SPACING
 
 COLORS = {
     "background": "#0b1120",
@@ -138,6 +152,22 @@ def edge_points(diagram: Diagram, edge: Edge) -> list[tuple[float, float]]:
     source = nodes[edge.source]
     target = nodes[edge.target]
     return [port_point(source, edge.source_port), *edge.points, port_point(target, edge.target_port)]
+
+
+def validate_spacing(diagram: Diagram) -> None:
+    group_left = min(group.x for group in diagram.groups)
+    group_top = min(group.y for group in diagram.groups)
+    group_right = max(group.x + group.w for group in diagram.groups)
+    group_bottom = max(group.y + group.h for group in diagram.groups)
+    checks = {
+        "left edge": group_left,
+        "header to groups": group_top - HEADER_BOTTOM,
+        "right edge": diagram.width - group_right,
+        "bottom edge": diagram.height - group_bottom,
+    }
+    for label, actual in checks.items():
+        if actual != SPACING:
+            raise ValueError(f"{diagram.basename} {label} spacing is {actual}, expected {SPACING}")
 
 
 def drawio_value(title: str, lines: tuple[str, ...]) -> str:
@@ -322,8 +352,8 @@ def build_drawio(diagram: Diagram) -> str:
     ET.SubElement(root, "mxCell", {"id": "1", "parent": "0"})
 
     add_background(root, diagram)
-    add_text(root, "title", diagram.title, 40, 16, 700, 34, 24)
-    add_text(root, "subtitle", diagram.subtitle, 40, 50, 1180, 24, 13)
+    add_text(root, "title", diagram.title, HEADER_X, HEADER_TITLE_Y, 700, HEADER_TITLE_HEIGHT, 24)
+    add_text(root, "subtitle", diagram.subtitle, HEADER_X, HEADER_SUBTITLE_Y, 1180, HEADER_SUBTITLE_HEIGHT, 13)
     for group in diagram.groups:
         add_group(root, group)
     for node in diagram.nodes:
@@ -372,8 +402,8 @@ def build_svg(diagram: Diagram) -> str:
             "rect",
             {"x": 0, "y": 0, "width": diagram.width, "height": diagram.height, "fill": COLORS["background"]},
         ),
-        svg_element("text", {"x": 40, "y": 42, "class": "title"}, diagram.title),
-        svg_element("text", {"x": 40, "y": 72, "class": "subtitle"}, diagram.subtitle),
+        svg_element("text", {"x": HEADER_X, "y": HEADER_TITLE_SVG_Y, "class": "title"}, diagram.title),
+        svg_element("text", {"x": HEADER_X, "y": HEADER_SUBTITLE_SVG_Y, "class": "subtitle"}, diagram.subtitle),
     ]
 
     for group in diagram.groups:
@@ -471,8 +501,8 @@ def render_png(diagram: Diagram, output_path: Path) -> None:
     image = Image.new("RGBA", (diagram.width, diagram.height), COLORS["background"])
     draw = ImageDraw.Draw(image)
 
-    draw.text((40, 18), diagram.title, font=title_font, fill=COLORS["text"])
-    draw.text((40, 52), diagram.subtitle, font=subtitle_font, fill=COLORS["muted_text"])
+    draw.text((HEADER_X, HEADER_TITLE_PNG_Y), diagram.title, font=title_font, fill=COLORS["text"])
+    draw.text((HEADER_X, HEADER_SUBTITLE_PNG_Y), diagram.subtitle, font=subtitle_font, fill=COLORS["muted_text"])
 
     for group in diagram.groups:
         draw.rounded_rectangle(
@@ -592,10 +622,10 @@ def ros_publisher_diagram() -> Diagram:
 
 
 def parser_app_diagram() -> Diagram:
-    row_setup = 120
-    row_runtime = 360
-    row_assess = 550
-    group_gap_y = (row_setup + NODE_H + row_runtime) // 2
+    row_setup = ROW_TOP
+    row_runtime = row_setup + NODE_H + GROUP_INSET + GROUP_GAP + GROUP_INSET
+    row_assess = row_runtime + NODE_H + NODE_GAP
+    group_gap_y = row_setup + NODE_H + GROUP_INSET + GROUP_GAP // 2
 
     x_setup = X_DECODE
     x_call = X_STAMP
@@ -699,10 +729,13 @@ def parser_app_diagram() -> Diagram:
         groups,
         nodes,
         edges,
+        width=x_sink + NODE_W + GROUP_INSET + SPACING,
+        height=row_assess + NODE_H + GROUP_INSET + SPACING,
     )
 
 
 def write_diagram(diagram: Diagram) -> None:
+    validate_spacing(diagram)
     drawio_path = OUT_DIR / f"{diagram.basename}.drawio"
     svg_path = OUT_DIR / f"{diagram.basename}.svg"
     png_path = OUT_DIR / f"{diagram.basename}.png"

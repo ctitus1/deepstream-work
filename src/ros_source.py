@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""DeepStream frame source for ROS publishing.
+
+This entrypoint runs the same detection + assessment pipeline as the parser app,
+but forks three compressed frame streams instead of publishing ROS messages
+directly. Raw input, detection output, and assessment output are resized,
+JPEG-compressed, paired with source-frame metadata, and sent over local TCP to
+``ros_bridge.py``. The source timestamp is captured once at streammux output and
+then reused for all downstream metadata from that frame.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -97,6 +107,8 @@ class SourceTimestamp:
 
 
 class SourceTimestampStore:
+    """Immutable source timestamp lookup keyed by DeepStream frame number."""
+
     def __init__(self, max_frames: int = 2048):
         self.max_frames = max_frames
         self.timestamps: OrderedDict[int, SourceTimestamp] = OrderedDict()
@@ -140,6 +152,7 @@ class FrameLog:
     image_size: tuple[int, int] | None = None
 
     def metadata(self) -> dict:
+        # The ROS bridge treats source_timestamp_ns as the authoritative stamp.
         metadata = {
             "stage": self.stage,
             "frame": self.frame_num,
@@ -180,6 +193,8 @@ class FrameLog:
 
 
 class FrameLogStore:
+    """Small handoff buffer between pad probes and compressed appsinks."""
+
     def __init__(self, max_frames: int = 512):
         self.max_frames = max_frames
         self.logs: OrderedDict[int, FrameLog] = OrderedDict()
@@ -222,6 +237,7 @@ class FrameSocketSender:
         self.next_connect_time = 0.0
 
     def on_sample(self, appsink):
+        # Appsinks emit already-compressed JPEG buffers; attach the matching metadata and send.
         sample = appsink.emit("pull-sample")
         if sample is None:
             return Gst.FlowReturn.OK
@@ -385,6 +401,7 @@ def source_timestamp_probe(timestamps: SourceTimestampStore):
 
         frame_list = batch_meta.frame_meta_list
         while frame_list:
+            # Capture the network/source timestamp before branch-local buffers can diverge.
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
             timestamps.put(int(frame_meta.frame_num), timestamp_source, timestamp)
@@ -412,6 +429,7 @@ def image_metadata_probe(
         key = buffer_key(buffer)
         frame_list = batch_meta.frame_meta_list
         while frame_list:
+            # Raw images carry no object rows but still need source-frame identity.
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
@@ -455,6 +473,7 @@ def detect_metadata_probe(
         key = buffer_key(buffer)
         frame_list = batch_meta.frame_meta_list
         while frame_list:
+            # Detection metadata is emitted in the compressed image coordinate space.
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
@@ -536,6 +555,7 @@ def assessment_frame_sink(
     ) -> None:
         log_rows = []
         objects = []
+        # Assessment rows inherit the immutable timestamp captured before inference.
         source_timestamp = timestamps.resolve(frame_num, timestamp_source, timestamp)
         for row in rows:
             object_index = len(objects)
@@ -617,6 +637,7 @@ def main() -> int:
     args = parse_args()
     stream = resolve_stream_source(args.stream)
 
+    # Prepare source geometry and model configs before assembling the GStreamer graph.
     try:
         Gst.init(None)
         src_w, src_h = discover_size(stream.uri)
@@ -633,6 +654,7 @@ def main() -> int:
     detect_store = FrameLogStore()
     assess_store = FrameLogStore()
     source_timestamps = SourceTimestampStore()
+    # Each sender owns one compressed branch and one TCP endpoint.
     image_sender = FrameSocketSender(
         "IMAGE",
         args.image_endpoint,
@@ -668,6 +690,7 @@ def main() -> int:
     if not parts.raw_appsink or not parts.detect_appsink or not parts.assess_appsink:
         raise RuntimeError("Frame source pipeline did not create all appsinks")
 
+    # Probes produce metadata; appsinks produce JPEG payloads; FrameLogStore joins them.
     timing = AssessmentTiming()
     streammux_src = parts.streammux.get_static_pad("src")
     streammux_src.add_probe(Gst.PadProbeType.BUFFER, source_timestamp_probe(source_timestamps), None)

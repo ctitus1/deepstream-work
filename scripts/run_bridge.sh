@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Start the ROS Humble bridge.
+#
+# The bridge needs both ROS Humble and the mounted cdcl_umd_msgs workspace
+# sourced before it can publish the custom message types used by Foxglove.
 set -euo pipefail
 
 if [[ -f /opt/ros/humble/setup.bash ]]; then
@@ -15,4 +19,4 @@ if [[ -n "${CDCL_ROS_SETUP:-}" && -f "$CDCL_ROS_SETUP" ]]; then
   set -u
 fi
 
-python3 src/deepstream_yolo_ros_bridge_app.py "$@"
+python3 src/ros_bridge.py "$@"

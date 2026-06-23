@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""ROS Humble publisher bridge for DeepStream frame outputs.
+
+``ros_source.py`` sends JPEG payloads plus JSON metadata over three local TCP
+endpoints. This bridge receives those frame packets and publishes ROS messages:
+raw frames as ``CompressedImage``, detections as ``TargetBoxArray``, and
+assessments as ``CasualtyImageCompressed``. Each packet is converted to one ROS
+timestamp, then that exact stamp is copied to every timestamp-bearing field in
+the emitted message.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -73,6 +83,7 @@ class FramePublisherNode(Node):
         self.thread.join(timeout=2.0)
 
     def serve(self) -> None:
+        # One listener thread per stage keeps image, detect, and assess sockets independent.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind((self.host, self.port))
@@ -106,6 +117,7 @@ class FramePublisherNode(Node):
                         self.publish_frame(metadata, payload)
 
     def publish_frame(self, metadata: dict, payload: bytes) -> None:
+        # Compute the stamp once per packet so embedded images and parent messages agree.
         stamp = self.stamp(metadata)
         if self.message_kind == "image":
             messages = [self.compressed_image(metadata, payload, stamp)]
@@ -126,20 +138,19 @@ class FramePublisherNode(Node):
         msg = CompressedImage()
         if stamp is None:
             stamp = self.stamp(metadata)
-        msg.header.stamp.sec = int(stamp.sec)
-        msg.header.stamp.nanosec = int(stamp.nanosec)
+        copy_stamp(msg.header.stamp, stamp)
         msg.header.frame_id = self.frame_id
         msg.format = str(metadata.get("format", "jpeg"))
         msg.data = payload
         return msg
 
     def target_box_array_messages(self, metadata: dict, payload: bytes, stamp) -> list[TargetBoxArray]:
+        # TargetBoxArray carries the detection image plus one bbox entry per detected person.
         source_img = self.compressed_image(metadata, payload, stamp)
         msg = TargetBoxArray()
         msg.seq = self.seq
         self.seq += 1
-        msg.header.stamp.sec = int(stamp.sec)
-        msg.header.stamp.nanosec = int(stamp.nanosec)
+        copy_stamp(msg.header.stamp, stamp)
         msg.header.frame_id = self.frame_id
         msg.system_id = self.system_id
         msg.source_img = source_img
@@ -160,15 +171,14 @@ class FramePublisherNode(Node):
     ) -> list[CasualtyImageCompressed]:
         messages = []
         for obj in metadata.get("objects", []):
+            # Publish one casualty image per assessed object from the source frame.
             source_img = self.compressed_image(metadata, payload, stamp)
             bbox = obj.get("bbox", [0.0, 0.0, 0.0, 0.0])
             msg = CasualtyImageCompressed()
             msg.data_source_id = data_source_id(metadata)
-            msg.stamp.sec = int(stamp.sec)
-            msg.stamp.nanosec = int(stamp.nanosec)
+            copy_stamp(msg.stamp, stamp)
             msg.image = source_img
-            msg.position.header.stamp.sec = int(stamp.sec)
-            msg.position.header.stamp.nanosec = int(stamp.nanosec)
+            copy_stamp(msg.position.header.stamp, stamp)
             msg.position.header.frame_id = self.frame_id
             msg.annotations = self.annotations(obj.get("predictions", {}))
             msg.bbox_x = float(bbox[0])
@@ -214,6 +224,7 @@ class FramePublisherNode(Node):
         return annotations
 
     def stamp(self, metadata: dict):
+        # Source metadata is preferred; node time is only a last-resort fallback.
         timestamp_ns = metadata_timestamp_ns(metadata)
         if timestamp_ns is None:
             self.get_logger().debug(
@@ -267,6 +278,11 @@ def metadata_timestamp_ns(metadata: dict) -> int | None:
     return None
 
 
+def copy_stamp(target, source) -> None:
+    target.sec = int(source.sec)
+    target.nanosec = int(source.nanosec)
+
+
 def int_value(value, fallback: int) -> int:
     try:
         return int(value)
@@ -299,6 +315,7 @@ def main() -> int:
     args = parse_args()
     rclpy.init(args=None)
 
+    # Each node owns one endpoint/topic pair; a shared executor handles ROS callbacks.
     image_node = FramePublisherNode(
         "deepstream_image_publisher",
         args.image_topic,

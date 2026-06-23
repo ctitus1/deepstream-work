@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Record the active ROS graph to an MCAP bag.
+#
+# This is launched by run_stack.sh when --bag is supplied, but it can also be
+# run directly inside the ROS Humble container.
 set -euo pipefail
 
 OUTPUT="${1:-outputs/rosbags/deepstream-$(date +%Y%m%d%H%M%S)}"

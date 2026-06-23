@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""Interactive DeepStream parser app.
+
+This entrypoint runs the local display pipeline: video input, YOLO detection,
+optional injury assessment, overlays, keyboard controls, and console logging.
+Model/config generation is delegated to the shared cache helpers; this file
+mostly wires runtime options into the common GStreamer pipeline.
+"""
+
 import argparse
 import sys
 
@@ -125,6 +133,7 @@ def print_runtime_info(
 def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
     assessment_timing = None
     if parts.sgie:
+        # Measure detect and assessment compute windows from the shared pipeline.
         assessment_timing = AssessmentTiming()
         parts.streammux.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER,
@@ -143,6 +152,7 @@ def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
         None,
     )
     if parts.sgie and assessment_timing:
+        # Parse secondary tensor output, render assessment text, and optionally drop stale frames.
         reporter = AssessmentReporter(args.assessment_log_interval)
         parts.sgie.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER,
@@ -156,6 +166,7 @@ def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
 
     limiter = RateLimiter(base_fps=args.base_fps, enabled=not stream.is_rtsp)
     if limiter.enabled:
+        # Local files can outrun real time, so pace only non-RTSP playback.
         parts.sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, limiter.probe, None)
     return limiter
 
@@ -184,6 +195,7 @@ def main():
     args = parse_args()
     stream = resolve_stream_source(args.stream)
 
+    # Discover source geometry before creating model-specific DeepStream configs.
     try:
         Gst.init(None)
         src_w, src_h = discover_size(stream.uri)
@@ -220,6 +232,7 @@ def main():
         args.assessment_batch_size,
     )
 
+    # Build once, then attach app-specific probes around the shared pipeline.
     parts = build_pipeline(
         stream,
         src_w,
@@ -237,6 +250,7 @@ def main():
     if controls:
         controls.start()
 
+    # Run until EOS, error, or a keyboard/UI stop request.
     bus = parts.pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", on_message, loop)

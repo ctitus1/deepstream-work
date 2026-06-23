@@ -66,7 +66,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
-      bash -lc "scripts/run_ros_source.sh
+      bash -lc "scripts/run_source.sh
       --model yolo12x-custom.pt
       --long-side 640"
     devices:
@@ -100,7 +100,7 @@ services:
       - ${CDCL_ROS_WS:-/home/user/ros2_ws}:/ros2_ws:ro
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
-      bash -lc "scripts/run_ros_humble_bridge.sh"
+      bash -lc "scripts/run_bridge.sh"
   ros-foxglove-bridge:
     profiles: ["ros"]
     build:

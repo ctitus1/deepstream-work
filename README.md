@@ -81,17 +81,17 @@ RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
 Then pass the matching RTSP URL with `--stream`:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py --stream rtsp://127.0.0.1:8560/test
+python3 src/parser_app.py --stream rtsp://127.0.0.1:8560/test
 docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_ros_source.sh --stream rtsp://127.0.0.1:8560/test
+  scripts/run_source.sh --stream rtsp://127.0.0.1:8560/test
 ```
 
 For quick debugging, both DeepStream apps can also read a local file directly:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py --stream streams/dtc-d4-trimmed.mp4
+python3 src/parser_app.py --stream streams/dtc-d4-trimmed.mp4
 docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_ros_source.sh --stream streams/dtc-d4-trimmed.mp4
+  scripts/run_source.sh --stream streams/dtc-d4-trimmed.mp4
 ```
 
 Local-file input is useful for development, but RTSP better matches the live
@@ -103,13 +103,13 @@ them, and can expose network/reference timestamp metadata.
 Run the parser app from another DeepStream container shell:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py
+python3 src/parser_app.py
 ```
 
 The plain command defaults to:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py \
+python3 src/parser_app.py \
   --model yolo12x-custom.pt \
   --long-side 640 \
   --enable-assessment
@@ -118,11 +118,11 @@ python3 src/deepstream_yolo_parser_app.py \
 Useful parser options:
 
 ```bash
-python3 src/deepstream_yolo_parser_app.py --no-assessment
-python3 src/deepstream_yolo_parser_app.py --show-assessed-only
-python3 src/deepstream_yolo_parser_app.py --rtsp-latency-ms 0
-python3 src/deepstream_yolo_parser_app.py --show-gst-scan-warnings
-python3 src/deepstream_yolo_parser_app.py --help
+python3 src/parser_app.py --no-assessment
+python3 src/parser_app.py --show-assessed-only
+python3 src/parser_app.py --rtsp-latency-ms 0
+python3 src/parser_app.py --show-gst-scan-warnings
+python3 src/parser_app.py --help
 ```
 
 By default, every display frame is shown; assessment overlay text appears only
@@ -158,20 +158,20 @@ From a host shell, start the full RTSP, ROS publisher, Foxglove, and DeepStream
 source stack:
 
 ```bash
-scripts/run_ros_rtsp_foxglove.sh
+scripts/run_stack.sh
 ```
 
 Press Ctrl-C in that shell to stop and remove the containers started by the
 script. To also record all ROS topics to an MCAP bag under `outputs/rosbags/`:
 
 ```bash
-scripts/run_ros_rtsp_foxglove.sh --bag
+scripts/run_stack.sh --bag
 ```
 
 To serve a different video:
 
 ```bash
-scripts/run_ros_rtsp_foxglove.sh --video streams/my-video.mp4 --rtsp-mount my-video
+scripts/run_stack.sh --video streams/my-video.mp4 --rtsp-mount my-video
 ```
 
 Connect Foxglove Studio to:

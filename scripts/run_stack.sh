@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
+# Start the local RTSP + ROS + Foxglove workflow.
+#
+# The stack runs four pieces with host networking: an RTSP server for the sample
+# video, a ROS bridge that publishes messages, Foxglove Bridge for visualization,
+# and the DeepStream source app. Ctrl-C stops every container this script starts.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/run_ros_rtsp_foxglove.sh [options] [-- source-args...]
+  scripts/run_stack.sh [options] [-- source-args...]
 
 Starts the local RTSP video server, ROS Humble publisher, Foxglove Bridge, and
 DeepStream ROS source. Press Ctrl-C to stop and remove the containers started by
@@ -25,10 +30,10 @@ Environment:
   ROS_DOMAIN_ID        ROS domain ID. Default: 0
 
 Examples:
-  scripts/run_ros_rtsp_foxglove.sh
-  scripts/run_ros_rtsp_foxglove.sh --bag
-  scripts/run_ros_rtsp_foxglove.sh --video streams/demo.mp4 --rtsp-mount demo
-  scripts/run_ros_rtsp_foxglove.sh -- --rtsp-latency-ms 0 --jpeg-quality 90
+  scripts/run_stack.sh
+  scripts/run_stack.sh --bag
+  scripts/run_stack.sh --video streams/demo.mp4 --rtsp-mount demo
+  scripts/run_stack.sh -- --rtsp-latency-ms 0 --jpeg-quality 90
 EOF
 }
 
@@ -43,6 +48,7 @@ BUILD=0
 BAG=0
 SOURCE_ARGS=()
 
+# Parse stack options first; anything after "--" is passed to ros_source.py.
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --video)
@@ -93,6 +99,7 @@ BAG_OUTPUT="${BAG_OUTPUT:-outputs/rosbags/deepstream-${RUN_ID}}"
 CONTAINERS=()
 PIDS=()
 
+# Track all launched containers/processes so Ctrl-C leaves no stack leftovers.
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
@@ -164,6 +171,7 @@ if [[ "$BUILD" -eq 1 ]]; then
   docker compose --profile ros build
 fi
 
+# Fail early if a previous run still owns one of the fixed host-network ports.
 require_port_free "RTSP server" "$RTSP_PORT"
 require_port_free "ROS image publisher endpoint" 5609
 require_port_free "ROS detect publisher endpoint" 5610
@@ -181,6 +189,7 @@ echo "  /uas4/target_detections"
 echo "  /casualty_image/compressed/annotated"
 echo
 
+# Launch in dependency order: stream, ROS publishers, Foxglove, optional bag, then DeepStream.
 start_compose_run \
   "deepstream-rtsp-${RUN_ID}" \
   deepstream-dev \
@@ -211,7 +220,7 @@ if [[ "$BAG" -eq 1 ]]; then
     "rosbag-${RUN_ID}" \
     "rosbag recorder" \
     ros-humble-publisher \
-    scripts/run_ros_bag_record.sh "$BAG_OUTPUT"
+    scripts/record_bag.sh "$BAG_OUTPUT"
   sleep 2
 fi
 
@@ -219,7 +228,7 @@ start_compose_run \
   "deepstream-ros-source-${RUN_ID}" \
   deepstream-ros-source \
   deepstream-ros-source \
-  scripts/run_ros_source.sh \
+  scripts/run_source.sh \
   --stream "$RTSP_URL" \
   "${SOURCE_ARGS[@]}"
 

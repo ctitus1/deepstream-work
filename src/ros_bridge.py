@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ROS Humble publisher bridge for DeepStream frame outputs.
 
-``ros_source.py`` sends JPEG payloads plus JSON metadata over three local TCP
+``ros_pub.py`` sends JPEG payloads plus JSON metadata over three local TCP
 endpoints. This bridge receives those frame packets and publishes ROS messages:
 raw frames as ``CompressedImage``, detections as ``TargetBoxArray``, and
 assessments as ``CasualtyImageCompressed``. Each packet is converted to one ROS

@@ -14,7 +14,7 @@ The two normal workflows are:
 The main entrypoints are intentionally short:
 
 - `src/parser_app.py`: display-oriented DeepStream app.
-- `src/ros_source.py`: DeepStream frame source for ROS publishing.
+- `src/ros_pub.py`: DeepStream ROS frame publisher.
 - `src/ros_bridge.py`: ROS Humble publisher bridge.
 - `scripts/run_stack.sh`: full RTSP/ROS/Foxglove workflow helper.
 
@@ -82,7 +82,7 @@ By default this serves:
 rtsp://127.0.0.1:8555/dtc-d4-trimmed
 ```
 
-Both the parser app and the ROS DeepStream source use that URL by default. To
+Both the parser app and the ROS pub app use that URL by default. To
 serve a different local video or mount:
 
 ```bash
@@ -93,16 +93,16 @@ Then pass the matching RTSP URL with `--stream`:
 
 ```bash
 python3 src/parser_app.py --stream rtsp://127.0.0.1:8560/test
-docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_source.sh --stream rtsp://127.0.0.1:8560/test
+docker compose --profile ros run --rm deepstream-ros-pub \
+  scripts/run_pub.sh --stream rtsp://127.0.0.1:8560/test
 ```
 
 For quick debugging, both DeepStream apps can also read a local file directly:
 
 ```bash
 python3 src/parser_app.py --stream streams/dtc-d4-trimmed.mp4
-docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_source.sh --stream streams/dtc-d4-trimmed.mp4
+docker compose --profile ros run --rm deepstream-ros-pub \
+  scripts/run_pub.sh --stream streams/dtc-d4-trimmed.mp4
 ```
 
 Local-file input is useful for development, but RTSP better matches the live
@@ -159,10 +159,10 @@ matching FPS values are computed from those stage times.
 
 The ROS publishing workflow uses two containers:
 
-- `deepstream-ros-source`: runs `scripts/run_source.sh`, which starts
-  `src/ros_source.py`. It forks raw, detect, and assess frame outputs,
-  downsizes each image to `640x368`, JPEG-compresses them, and sends frame
-  metadata over local TCP.
+- `deepstream-ros-pub`: runs `scripts/run_pub.sh`, which starts
+  `src/ros_pub.py`. It forks raw, detect, and assess frame outputs, downsizes
+  each image to `640x368`, JPEG-compresses them, and sends frame metadata over
+  local TCP.
 - `ros-humble-publisher`: runs `scripts/run_bridge.sh`, which starts
   `src/ros_bridge.py`. It receives those frames and publishes ROS Humble
   `cdcl_umd_msgs` messages with the JPEG image embedded in each message.
@@ -172,7 +172,7 @@ Foxglove Bridge. With `--bag`, it also runs `scripts/record_bag.sh` to record
 all ROS topics to MCAP.
 
 From a host shell, start the full RTSP, ROS publisher, Foxglove, and DeepStream
-source stack:
+ROS pub stack:
 
 ```bash
 scripts/run_stack.sh
@@ -198,7 +198,7 @@ ws://localhost:8765
 ```
 
 To run the components separately for debugging, start the publisher, Foxglove,
-and DeepStream source from separate host shells:
+and DeepStream ROS pub app from separate host shells:
 
 ```bash
 docker compose --profile ros run --rm ros-humble-publisher
@@ -209,7 +209,7 @@ docker compose --profile ros run --rm ros-foxglove-bridge
 ```
 
 ```bash
-docker compose --profile ros run --rm deepstream-ros-source
+docker compose --profile ros run --rm deepstream-ros-pub
 ```
 
 Published topics:
@@ -229,7 +229,7 @@ Foxglove should show:
 ```
 
 The bridge listens on `0.0.0.0:5609` for raw image frames, `0.0.0.0:5610` for
-detect frames, and `0.0.0.0:5611` for assess frames. The DeepStream source
+detect frames, and `0.0.0.0:5611` for assess frames. The DeepStream ROS pub app
 connects to `127.0.0.1:5609`, `127.0.0.1:5610`, and `127.0.0.1:5611` by
 default. Both services use host networking.
 

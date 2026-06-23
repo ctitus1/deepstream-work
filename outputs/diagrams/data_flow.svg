@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2370" height="760" viewBox="0 0 2370 760">
+<defs>
+<marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+<path d="M2,2 L10,6 L2,10 z" fill="#94a3b8"/>
+</marker>
+</defs>
+<style>
+.title{font:700 24px Arial,sans-serif;fill:#e5e7eb}
+.subtitle{font:13px Arial,sans-serif;fill:#a7b0be}
+.group-label{font:700 14px Arial,sans-serif;fill:#a7b0be}
+.node-title{font:700 17px Arial,sans-serif;fill:#e5e7eb}
+.node-body{font:13px Arial,sans-serif;fill:#a7b0be}
+</style>
+<rect x="0" y="0" width="2370" height="760" fill="#0b1120"/>
+<text x="40" y="42" class="title">ROS Publisher Data Flow</text>
+<text x="40" y="72" class="subtitle">ros_source.py joins DeepStream JPEG appsinks with metadata; ros_bridge.py publishes ROS Humble topics.</text>
+<rect x="0" y="300" width="270" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="16" y="478" class="group-label">scripts/start_rtsp_stream.sh</text>
+<rect x="300" y="110" width="960" height="572" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="316" y="668" class="group-label">src/ros_source.py + src/deepstream_yolo/pipeline.py</text>
+<rect x="1290" y="300" width="1040" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="1306" y="478" class="group-label">src/ros_bridge.py</text>
+<rect x="40" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="55" y="370" class="node-title">Video input</text>
+<text x="55" y="402" class="node-body">RTSP camera</text>
+<text x="55" y="425" class="node-body">or local MP4</text>
+<rect x="340" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="355" y="370" class="node-title">Decode + mux</text>
+<text x="355" y="402" class="node-body">parser -> decoder</text>
+<text x="355" y="425" class="node-body">nvstreammux</text>
+<rect x="570" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="585" y="370" class="node-title">Source time</text>
+<text x="585" y="402" class="node-body">streammux src probe</text>
+<text x="585" y="425" class="node-body">immutable metadata</text>
+<rect x="1030" y="150" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1045" y="180" class="node-title">Raw appsink</text>
+<text x="1045" y="212" class="node-body">raw tee -> 640x368</text>
+<text x="1045" y="235" class="node-body">JPEG payload</text>
+<rect x="800" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="815" y="370" class="node-title">YOLO detector</text>
+<text x="815" y="402" class="node-body">nvinfer PGIE</text>
+<text x="815" y="425" class="node-body">person ids + conf</text>
+<rect x="1030" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1045" y="370" class="node-title">Detect appsink</text>
+<text x="1045" y="402" class="node-body">detect tee -> 640x368</text>
+<text x="1045" y="425" class="node-body">scaled bbox metadata</text>
+<rect x="800" y="530" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="815" y="560" class="node-title">Injury model</text>
+<text x="815" y="592" class="node-body">nvinfer SGIE</text>
+<text x="815" y="615" class="node-body">per-person tensors</text>
+<rect x="1030" y="530" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1045" y="560" class="node-title">Assess appsink</text>
+<text x="1045" y="592" class="node-body">assess tee -> 640x368</text>
+<text x="1045" y="615" class="node-body">labels/probabilities</text>
+<rect x="1330" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1345" y="370" class="node-title">TCP senders</text>
+<text x="1345" y="402" class="node-body">FrameSocketSender</text>
+<text x="1345" y="425" class="node-body">5609 | 5610 | 5611</text>
+<rect x="1560" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1575" y="370" class="node-title">ROS publishers</text>
+<text x="1575" y="402" class="node-body">one node per endpoint</text>
+<text x="1575" y="425" class="node-body">copy source stamp</text>
+<rect x="1790" y="340" width="270" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1805" y="370" class="node-title">Published topics</text>
+<text x="1805" y="402" class="node-body">/uas4/image</text>
+<text x="1805" y="425" class="node-body">/uas4/target_detections</text>
+<text x="1805" y="448" class="node-body">/casualty_image/...</text>
+<rect x="2100" y="340" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="2115" y="370" class="node-title">Consumers</text>
+<text x="2115" y="402" class="node-body">Foxglove bridge</text>
+<text x="2115" y="425" class="node-body">rosbag -s mcap</text>
+<path d="M 230.0 396.0 L 340.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 530.0 396.0 L 570.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 665.0 340.0 L 665.0 206.0 L 1030.0 206.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 760.0 396.0 L 800.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 990.0 396.0 L 1030.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 895.0 452.0 L 895.0 530.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 990.0 586.0 L 1030.0 586.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1220.0 206.0 L 1275.0 206.0 L 1275.0 368.0 L 1330.0 368.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1220.0 396.0 L 1330.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1220.0 586.0 L 1275.0 586.0 L 1275.0 424.0 L 1330.0 424.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1520.0 396.0 L 1560.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1750.0 396.0 L 1790.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 2060.0 396.0 L 2100.0 396.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+</svg>

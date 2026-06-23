@@ -1,3 +1,11 @@
+"""Injury-assessment tensor parsing, overlays, timestamps, and logs.
+
+The parser app uses ``assessment_probe()`` to turn SGIE tensor metadata into
+fresh assessment overlays and console logs. The ROS source uses the same tensor
+parsing and timing helpers, but sends each assessed object's labels and
+probabilities as metadata for ``ros_bridge.py``.
+"""
+
 import ctypes
 import datetime as dt
 import math

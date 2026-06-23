@@ -111,6 +111,8 @@ them, and can expose network/reference timestamp metadata.
 
 ## Parser App
 
+![DeepStream parser app flow](outputs/diagrams/parser_flow.svg)
+
 Run the parser app from another DeepStream container shell:
 
 ```bash
@@ -156,6 +158,11 @@ positive number to sample logs, or a negative number to disable assessment logs.
 matching FPS values are computed from those stage times.
 
 ## ROS Publisher
+
+![DeepStream ROS data flow](outputs/diagrams/data_flow.svg)
+
+The editable draw.io sources and preview generator live in
+`outputs/diagrams/`.
 
 The ROS publishing workflow uses two containers:
 

@@ -1,3 +1,10 @@
+"""Parser-app keyboard controls and local-file playback pacing.
+
+``parser_app.py`` uses ``KeyboardControls`` for pause/quit/rate keys and
+``RateLimiter`` only for local-file playback. Live RTSP streams remain paced by
+the stream clock and late-frame dropping in the GStreamer pipeline.
+"""
+
 import sys
 import termios
 import time

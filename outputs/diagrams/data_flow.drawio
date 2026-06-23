@@ -1,0 +1,127 @@
+<?xml version="1.0" ?>
+<mxfile host="app.diagrams.net" agent="Codex" version="24.7.17" type="device">
+  <diagram id="data_flow" name="ROS Publisher Data Flow">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2370" pageHeight="760" background="#0b1120" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="background" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#0b1120;strokeColor=none;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="0" y="0" width="2370" height="760" as="geometry"/>
+        </mxCell>
+        <mxCell id="title" value="ROS Publisher Data Flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontColor=#e5e7eb;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="700" height="34" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="ros_source.py joins DeepStream JPEG appsinks with metadata; ros_bridge.py publishes ROS Humble topics." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#e5e7eb;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="50" width="1180" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="stream_group" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;absoluteArcSize=1;fillColor=#0f172a;strokeColor=#334155;dashed=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="0" y="300" width="270" height="192" as="geometry"/>
+        </mxCell>
+        <mxCell id="stream_group_label" value="scripts/start_rtsp_stream.sh" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=bottom;whiteSpace=wrap;rounded=0;fontSize=14;fontColor=#a7b0be;fontStyle=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="16" y="460" width="238" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="source_group" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;absoluteArcSize=1;fillColor=#0f172a;strokeColor=#334155;dashed=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="300" y="110" width="960" height="572" as="geometry"/>
+        </mxCell>
+        <mxCell id="source_group_label" value="src/ros_source.py + src/deepstream_yolo/pipeline.py" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=bottom;whiteSpace=wrap;rounded=0;fontSize=14;fontColor=#a7b0be;fontStyle=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="316" y="650" width="928" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="bridge_group" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=4;absoluteArcSize=1;fillColor=#0f172a;strokeColor=#334155;dashed=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="1290" y="300" width="1040" height="192" as="geometry"/>
+        </mxCell>
+        <mxCell id="bridge_group_label" value="src/ros_bridge.py" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=bottom;whiteSpace=wrap;rounded=0;fontSize=14;fontColor=#a7b0be;fontStyle=1;" vertex="1" parent="1" connectable="0">
+          <mxGeometry x="1306" y="460" width="1008" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="video" value="&lt;b&gt;Video input&lt;/b&gt;&lt;br&gt;RTSP camera&lt;br&gt;or local MP4" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="decode" value="&lt;b&gt;Decode + mux&lt;/b&gt;&lt;br&gt;parser -&amp;gt; decoder&lt;br&gt;nvstreammux" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="340" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="stamp" value="&lt;b&gt;Source time&lt;/b&gt;&lt;br&gt;streammux src probe&lt;br&gt;immutable metadata" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="570" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="raw" value="&lt;b&gt;Raw appsink&lt;/b&gt;&lt;br&gt;raw tee -&amp;gt; 640x368&lt;br&gt;JPEG payload" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="150" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="pgie" value="&lt;b&gt;YOLO detector&lt;/b&gt;&lt;br&gt;nvinfer PGIE&lt;br&gt;person ids + conf" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="800" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="detect" value="&lt;b&gt;Detect appsink&lt;/b&gt;&lt;br&gt;detect tee -&amp;gt; 640x368&lt;br&gt;scaled bbox metadata" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="sgie" value="&lt;b&gt;Injury model&lt;/b&gt;&lt;br&gt;nvinfer SGIE&lt;br&gt;per-person tensors" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="800" y="530" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="assess" value="&lt;b&gt;Assess appsink&lt;/b&gt;&lt;br&gt;assess tee -&amp;gt; 640x368&lt;br&gt;labels/probabilities" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="530" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="tcp" value="&lt;b&gt;TCP senders&lt;/b&gt;&lt;br&gt;FrameSocketSender&lt;br&gt;5609 | 5610 | 5611" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="builder" value="&lt;b&gt;ROS publishers&lt;/b&gt;&lt;br&gt;one node per endpoint&lt;br&gt;copy source stamp" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="topics" value="&lt;b&gt;Published topics&lt;/b&gt;&lt;br&gt;/uas4/image&lt;br&gt;/uas4/target_detections&lt;br&gt;/casualty_image/..." style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="1790" y="340" width="270" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="consumers" value="&lt;b&gt;Consumers&lt;/b&gt;&lt;br&gt;Foxglove bridge&lt;br&gt;rosbag -s mcap" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;absoluteArcSize=1;fillColor=#111827;strokeColor=#38bdf8;fontColor=#e5e7eb;spacing=10;spacingTop=4;spacingBottom=4;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="2100" y="340" width="190" height="112" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_video_decode" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="video" target="decode">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_decode_stamp" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="decode" target="stamp">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_stamp_raw" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="stamp" target="raw">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="665" y="206"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_stamp_pgie" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="stamp" target="pgie">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_pgie_detect" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="pgie" target="detect">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_pgie_sgie" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pgie" target="sgie">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_sgie_assess" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="sgie" target="assess">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_raw_tcp" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="raw" target="tcp">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1275" y="206"/>
+              <mxPoint x="1275" y="368"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_detect_tcp" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="detect" target="tcp">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_assess_tcp" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="assess" target="tcp">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1275" y="586"/>
+              <mxPoint x="1275" y="424"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_tcp_builder" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="tcp" target="builder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_builder_topics" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="builder" target="topics">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="edge_topics_consumers" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#94a3b8;fontColor=#a7b0be;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="topics" target="consumers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

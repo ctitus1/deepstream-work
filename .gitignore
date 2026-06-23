@@ -1,5 +1,7 @@
 # User-provided local media and runtime outputs
-outputs/
+outputs/*
+!outputs/diagrams/
+!outputs/diagrams/*
 streams/
 *.mp4
 *.mkv

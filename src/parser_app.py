@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Interactive DeepStream parser app.
 
-This entrypoint runs the local display pipeline: video input, YOLO detection,
-optional injury assessment, overlays, keyboard controls, and console logging.
-Model/config generation is delegated to the shared cache helpers; this file
-mostly wires runtime options into the common GStreamer pipeline.
+This entrypoint prepares runtime options and model configs, calls
+``deepstream_yolo.pipeline.build_pipeline()`` for the display-oriented
+GStreamer graph, attaches parser-specific probes, and runs the GLib/keyboard
+loop. The shared pipeline owns decode, inference, OSD, and sink elements; this
+file owns app policy such as logging, fresh-assessment display, pacing for local
+files, and debug timing probes.
 """
 
 import argparse
@@ -131,6 +133,7 @@ def print_runtime_info(
 
 
 def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
+    """Attach parser-app probes to the shared DeepStream pipeline."""
     assessment_timing = None
     if parts.sgie:
         # Measure detect and assessment compute windows from the shared pipeline.
@@ -172,6 +175,7 @@ def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
 
 
 def attach_debug_probes(parts) -> None:
+    """Attach optional stage timing logs without changing pipeline behavior."""
     timer = TimeLog()
     parts.sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER, timer.fps_probe, None)
     timing_pads = [

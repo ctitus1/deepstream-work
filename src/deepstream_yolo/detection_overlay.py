@@ -1,3 +1,11 @@
+"""Detection overlay probe helpers.
+
+``parser_app.py`` and ``ros_source.py`` attach ``bbox_probe()`` at the PGIE
+output. The probe assigns stable per-frame person ids, clears the default
+DeepStream label, and draws the colored person-confidence box used by the
+display pipeline and downstream metadata.
+"""
+
 import gi
 
 gi.require_version("Gst", "1.0")

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """DeepStream frame source for ROS publishing.
 
-This entrypoint runs the same detection + assessment pipeline as the parser app,
-but forks three compressed frame streams instead of publishing ROS messages
-directly. Raw input, detection output, and assessment output are resized,
-JPEG-compressed, paired with source-frame metadata, and sent over local TCP to
-``ros_bridge.py``. The source timestamp is captured once at streammux output and
-then reused for all downstream metadata from that frame.
+This entrypoint prepares model configs, calls
+``deepstream_yolo.pipeline.build_pipeline()`` with raw/detect/assess compressed
+appsinks enabled, attaches metadata probes, and sends frame packets to
+``ros_bridge.py`` over local TCP. The shared pipeline owns decode, inference,
+tees, JPEG appsinks, and optional display; this file owns source timestamp
+capture, bbox/assessment metadata construction, and ``FrameSocketSender``.
 """
 
 from __future__ import annotations

@@ -1,3 +1,11 @@
+"""Shared DeepStream pipeline builder.
+
+Both ``parser_app.py`` and ``ros_source.py`` call ``build_pipeline()``. This
+module owns the GStreamer element graph: input decode, ``nvstreammux``, PGIE
+YOLO inference, optional SGIE assessment, optional compressed appsink branches,
+OSD conversion, and display/fake sink output.
+"""
+
 from __future__ import annotations
 
 import sys

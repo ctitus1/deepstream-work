@@ -2,11 +2,11 @@
 """ROS Humble publisher bridge for DeepStream frame outputs.
 
 ``ros_source.py`` sends JPEG payloads plus JSON metadata over three local TCP
-endpoints. This bridge receives those frame packets and publishes ROS messages:
-raw frames as ``CompressedImage``, detections as ``TargetBoxArray``, and
-assessments as ``CasualtyImageCompressed``. Each packet is converted to one ROS
-timestamp, then that exact stamp is copied to every timestamp-bearing field in
-the emitted message.
+endpoints. This bridge creates one ``FramePublisherNode`` per endpoint/topic:
+raw frames become ``CompressedImage``, detections become ``TargetBoxArray``, and
+assessments become one or more ``CasualtyImageCompressed`` messages. Each frame
+packet is converted to one ROS timestamp, then that exact stamp is copied to
+every timestamp-bearing field in the emitted message.
 """
 
 from __future__ import annotations

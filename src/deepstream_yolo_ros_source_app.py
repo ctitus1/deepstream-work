@@ -87,6 +87,47 @@ class RuntimeArgumentParser(argparse.ArgumentParser):
 
 
 @dataclass(frozen=True)
+class SourceTimestamp:
+    frame_num: int
+    source: str
+    timestamp: int | None
+
+    def formatted(self) -> str:
+        return format_timestamp(self.source, self.timestamp)
+
+
+class SourceTimestampStore:
+    def __init__(self, max_frames: int = 2048):
+        self.max_frames = max_frames
+        self.timestamps: OrderedDict[int, SourceTimestamp] = OrderedDict()
+
+    def put(self, frame_num: int, source: str, timestamp: int | None) -> SourceTimestamp:
+        key = int(frame_num)
+        existing = self.timestamps.get(key)
+        if existing is not None:
+            return existing
+
+        source_timestamp = SourceTimestamp(key, source, timestamp)
+        self.timestamps[key] = source_timestamp
+        self.timestamps.move_to_end(key)
+        while len(self.timestamps) > self.max_frames:
+            self.timestamps.popitem(last=False)
+        return source_timestamp
+
+    def resolve(
+        self,
+        frame_num: int,
+        fallback_source: str,
+        fallback_timestamp: int | None,
+    ) -> SourceTimestamp:
+        key = int(frame_num)
+        source_timestamp = self.timestamps.get(key)
+        if source_timestamp is not None:
+            return source_timestamp
+        return self.put(key, fallback_source, fallback_timestamp)
+
+
+@dataclass(frozen=True)
 class FrameLog:
     stage: str
     frame_num: int
@@ -105,6 +146,10 @@ class FrameLog:
             "timestamp_ns": self.timestamp,
             "timestamp": format_timestamp(self.timestamp_source, self.timestamp),
             "timestamp_source": self.timestamp_source,
+            "source_timestamp_ns": self.timestamp,
+            "source_timestamp": format_timestamp(self.timestamp_source, self.timestamp),
+            "source_timestamp_source": self.timestamp_source,
+            "timestamp_is_source": True,
             "timing": list(self.timing_fields),
             "rows": self.rows,
             "objects": list(self.objects),
@@ -328,7 +373,33 @@ def serializable_predictions(predictions: dict[str, dict]) -> dict[str, dict]:
     return serialized
 
 
-def image_metadata_probe(store: FrameLogStore, image_space: ImageSpace):
+def source_timestamp_probe(timestamps: SourceTimestampStore):
+    def _probe(_pad, info, _data):
+        buffer = info.get_buffer()
+        if not buffer:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+        if not batch_meta:
+            return Gst.PadProbeReturn.OK
+
+        frame_list = batch_meta.frame_meta_list
+        while frame_list:
+            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+            timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
+            timestamps.put(int(frame_meta.frame_num), timestamp_source, timestamp)
+            frame_list = frame_list.next
+
+        return Gst.PadProbeReturn.OK
+
+    return _probe
+
+
+def image_metadata_probe(
+    store: FrameLogStore,
+    image_space: ImageSpace,
+    timestamps: SourceTimestampStore,
+):
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
         if not buffer:
@@ -342,15 +413,16 @@ def image_metadata_probe(store: FrameLogStore, image_space: ImageSpace):
         frame_list = batch_meta.frame_meta_list
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
-            timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
+            fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
+            source_timestamp = timestamps.resolve(frame_num, fallback_source, fallback_timestamp)
             store.put(
                 key,
                 FrameLog(
                     "IMAGE",
                     frame_num,
-                    timestamp_source,
-                    timestamp,
+                    source_timestamp.source,
+                    source_timestamp.timestamp,
                     [],
                     (),
                     [],
@@ -365,7 +437,12 @@ def image_metadata_probe(store: FrameLogStore, image_space: ImageSpace):
     return _probe
 
 
-def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_space: ImageSpace):
+def detect_metadata_probe(
+    store: FrameLogStore,
+    timing: AssessmentTiming,
+    image_space: ImageSpace,
+    timestamps: SourceTimestampStore,
+):
     def _probe(_pad, info, _data):
         buffer = info.get_buffer()
         if not buffer:
@@ -379,8 +456,9 @@ def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_
         frame_list = batch_meta.frame_meta_list
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
-            timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
+            fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
+            source_timestamp = timestamps.resolve(frame_num, fallback_source, fallback_timestamp)
             rows = []
             objects = []
             person_index = 0
@@ -427,8 +505,8 @@ def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_
                 FrameLog(
                     "DETECT",
                     frame_num,
-                    timestamp_source,
-                    timestamp,
+                    source_timestamp.source,
+                    source_timestamp.timestamp,
                     rows,
                     tuple(fields),
                     objects,
@@ -443,7 +521,11 @@ def detect_metadata_probe(store: FrameLogStore, timing: AssessmentTiming, image_
     return _probe
 
 
-def assessment_frame_sink(store: FrameLogStore, image_space: ImageSpace):
+def assessment_frame_sink(
+    store: FrameLogStore,
+    image_space: ImageSpace,
+    timestamps: SourceTimestampStore,
+):
     def _sink(
         buffer,
         frame_num: int,
@@ -454,6 +536,7 @@ def assessment_frame_sink(store: FrameLogStore, image_space: ImageSpace):
     ) -> None:
         log_rows = []
         objects = []
+        source_timestamp = timestamps.resolve(frame_num, timestamp_source, timestamp)
         for row in rows:
             object_index = len(objects)
             source_bbox = tuple(float(value) for value in row.bbox)
@@ -481,8 +564,8 @@ def assessment_frame_sink(store: FrameLogStore, image_space: ImageSpace):
             FrameLog(
                 "ASSESS",
                 frame_num,
-                timestamp_source,
-                timestamp,
+                source_timestamp.source,
+                source_timestamp.timestamp,
                 log_rows,
                 timing_fields(compute_times),
                 objects,
@@ -549,12 +632,19 @@ def main() -> int:
     image_store = FrameLogStore()
     detect_store = FrameLogStore()
     assess_store = FrameLogStore()
+    source_timestamps = SourceTimestampStore()
     image_sender = FrameSocketSender(
         "IMAGE",
         args.image_endpoint,
         image_store,
+        require_fresh_metadata=True,
     )
-    detect_sender = FrameSocketSender("DETECT", args.detect_endpoint, detect_store)
+    detect_sender = FrameSocketSender(
+        "DETECT",
+        args.detect_endpoint,
+        detect_store,
+        require_fresh_metadata=True,
+    )
     assess_sender = FrameSocketSender(
         "ASSESS",
         args.assess_endpoint,
@@ -579,22 +669,28 @@ def main() -> int:
         raise RuntimeError("Frame source pipeline did not create all appsinks")
 
     timing = AssessmentTiming()
-    parts.streammux.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, timing.mark_start, None)
-    parts.streammux.get_static_pad("src").add_probe(
+    streammux_src = parts.streammux.get_static_pad("src")
+    streammux_src.add_probe(Gst.PadProbeType.BUFFER, source_timestamp_probe(source_timestamps), None)
+    streammux_src.add_probe(Gst.PadProbeType.BUFFER, timing.mark_start, None)
+    streammux_src.add_probe(
         Gst.PadProbeType.BUFFER,
-        image_metadata_probe(image_store, image_space),
+        image_metadata_probe(image_store, image_space, source_timestamps),
         None,
     )
     parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, timing.mark_detect_done, None)
     parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, bbox_probe(args.conf), None)
     parts.pgie.get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER,
-        detect_metadata_probe(detect_store, timing, image_space),
+        detect_metadata_probe(detect_store, timing, image_space, source_timestamps),
         None,
     )
     parts.sgie.get_static_pad("src").add_probe(
         Gst.PadProbeType.BUFFER,
-        assessment_probe(None, timing=timing, frame_sink=assessment_frame_sink(assess_store, image_space)),
+        assessment_probe(
+            None,
+            timing=timing,
+            frame_sink=assessment_frame_sink(assess_store, image_space, source_timestamps),
+        ),
         None,
     )
     parts.raw_appsink.connect("new-sample", image_sender.on_sample)

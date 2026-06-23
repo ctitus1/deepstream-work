@@ -15,15 +15,18 @@ Options:
   --rtsp-port PORT     RTSP server port. Default: 8555
   --rtsp-mount NAME    RTSP mount name. Default: dtc-d4-trimmed
   --foxglove-port PORT Foxglove Bridge websocket port. Default: 8765
+  --bag                Record all ROS topics to an MCAP bag under outputs/rosbags.
   --build              Build ROS profile images before starting.
   -h, --help           Show this help.
 
 Environment:
+  BAG_OUTPUT           Bag output path. Default: outputs/rosbags/deepstream-<run-id>
   CDCL_ROS_WS          Host ROS workspace for cdcl_umd_msgs. Default: /home/user/ros2_ws
   ROS_DOMAIN_ID        ROS domain ID. Default: 0
 
 Examples:
   scripts/run_ros_rtsp_foxglove.sh
+  scripts/run_ros_rtsp_foxglove.sh --bag
   scripts/run_ros_rtsp_foxglove.sh --video streams/demo.mp4 --rtsp-mount demo
   scripts/run_ros_rtsp_foxglove.sh -- --rtsp-latency-ms 0 --jpeg-quality 90
 EOF
@@ -37,6 +40,7 @@ RTSP_PORT="${RTSP_PORT:-8555}"
 RTSP_MOUNT="${RTSP_MOUNT:-dtc-d4-trimmed}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
 BUILD=0
+BAG=0
 SOURCE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     --foxglove-port)
       FOXGLOVE_PORT="$2"
       shift 2
+      ;;
+    --bag)
+      BAG=1
+      shift
       ;;
     --build)
       BUILD=1
@@ -81,6 +89,7 @@ RTSP_MOUNT="${RTSP_MOUNT#/}"
 RTSP_MOUNT="${RTSP_MOUNT:-stream}"
 RTSP_URL="rtsp://127.0.0.1:${RTSP_PORT}/${RTSP_MOUNT}"
 RUN_ID="${ROS_STACK_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
+BAG_OUTPUT="${BAG_OUTPUT:-outputs/rosbags/deepstream-${RUN_ID}}"
 CONTAINERS=()
 PIDS=()
 
@@ -163,6 +172,9 @@ require_port_free "Foxglove Bridge" "$FOXGLOVE_PORT"
 
 echo "RTSP URL: ${RTSP_URL}"
 echo "Foxglove: ws://localhost:${FOXGLOVE_PORT}"
+if [[ "$BAG" -eq 1 ]]; then
+  echo "Bag: ${BAG_OUTPUT}"
+fi
 echo "Topics:"
 echo "  /uas4/image"
 echo "  /uas4/target_detections"
@@ -192,6 +204,16 @@ start_compose_run \
   -e FOXGLOVE_PORT="$FOXGLOVE_PORT" \
   ros-foxglove-bridge
 wait_for_port "Foxglove Bridge" "$FOXGLOVE_PORT" 30
+
+if [[ "$BAG" -eq 1 ]]; then
+  mkdir -p "$(dirname "$BAG_OUTPUT")"
+  start_compose_run \
+    "rosbag-${RUN_ID}" \
+    "rosbag recorder" \
+    ros-humble-publisher \
+    scripts/run_ros_bag_record.sh "$BAG_OUTPUT"
+  sleep 2
+fi
 
 start_compose_run \
   "deepstream-ros-source-${RUN_ID}" \

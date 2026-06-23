@@ -7,6 +7,7 @@ import threading
 import time
 
 import rclpy
+from builtin_interfaces.msg import Time as RosTime
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from cdcl_umd_msgs.msg import (
@@ -105,12 +106,13 @@ class FramePublisherNode(Node):
                         self.publish_frame(metadata, payload)
 
     def publish_frame(self, metadata: dict, payload: bytes) -> None:
+        stamp = self.stamp(metadata)
         if self.message_kind == "image":
-            messages = [self.compressed_image(metadata, payload)]
+            messages = [self.compressed_image(metadata, payload, stamp)]
         elif self.message_kind == "detect":
-            messages = self.target_box_array_messages(metadata, payload)
+            messages = self.target_box_array_messages(metadata, payload, stamp)
         else:
-            messages = self.casualty_image_messages(metadata, payload)
+            messages = self.casualty_image_messages(metadata, payload, stamp)
         for msg in messages:
             self.publisher.publish(msg)
 
@@ -120,20 +122,25 @@ class FramePublisherNode(Node):
                 f"published topic={self.topic} messages={len(messages)} bytes={len(payload)}\n{log_text}"
             )
 
-    def compressed_image(self, metadata: dict, payload: bytes) -> CompressedImage:
+    def compressed_image(self, metadata: dict, payload: bytes, stamp=None) -> CompressedImage:
         msg = CompressedImage()
-        msg.header.stamp = self.stamp(metadata)
+        if stamp is None:
+            stamp = self.stamp(metadata)
+        msg.header.stamp.sec = int(stamp.sec)
+        msg.header.stamp.nanosec = int(stamp.nanosec)
         msg.header.frame_id = self.frame_id
         msg.format = str(metadata.get("format", "jpeg"))
         msg.data = payload
         return msg
 
-    def target_box_array_messages(self, metadata: dict, payload: bytes) -> list[TargetBoxArray]:
-        source_img = self.compressed_image(metadata, payload)
+    def target_box_array_messages(self, metadata: dict, payload: bytes, stamp) -> list[TargetBoxArray]:
+        source_img = self.compressed_image(metadata, payload, stamp)
         msg = TargetBoxArray()
         msg.seq = self.seq
         self.seq += 1
-        msg.header = source_img.header
+        msg.header.stamp.sec = int(stamp.sec)
+        msg.header.stamp.nanosec = int(stamp.nanosec)
+        msg.header.frame_id = self.frame_id
         msg.system_id = self.system_id
         msg.source_img = source_img
         msg.gimbal_attitude_quaternion.w = 1.0
@@ -149,16 +156,20 @@ class FramePublisherNode(Node):
         self,
         metadata: dict,
         payload: bytes,
+        stamp,
     ) -> list[CasualtyImageCompressed]:
         messages = []
         for obj in metadata.get("objects", []):
-            source_img = self.compressed_image(metadata, payload)
+            source_img = self.compressed_image(metadata, payload, stamp)
             bbox = obj.get("bbox", [0.0, 0.0, 0.0, 0.0])
             msg = CasualtyImageCompressed()
             msg.data_source_id = data_source_id(metadata)
-            msg.stamp = source_img.header.stamp
+            msg.stamp.sec = int(stamp.sec)
+            msg.stamp.nanosec = int(stamp.nanosec)
             msg.image = source_img
-            msg.position.header = source_img.header
+            msg.position.header.stamp.sec = int(stamp.sec)
+            msg.position.header.stamp.nanosec = int(stamp.nanosec)
+            msg.position.header.frame_id = self.frame_id
             msg.annotations = self.annotations(obj.get("predictions", {}))
             msg.bbox_x = float(bbox[0])
             msg.bbox_y = float(bbox[1])
@@ -203,14 +214,16 @@ class FramePublisherNode(Node):
         return annotations
 
     def stamp(self, metadata: dict):
-        timestamp_ns = metadata.get("timestamp_ns")
-        source = metadata.get("timestamp_source")
-        if isinstance(timestamp_ns, int) and source in {"ntp", "ref"}:
-            msg = self.get_clock().now().to_msg()
-            msg.sec = int(timestamp_ns // 1_000_000_000)
-            msg.nanosec = int(timestamp_ns % 1_000_000_000)
-            return msg
-        return self.get_clock().now().to_msg()
+        timestamp_ns = metadata_timestamp_ns(metadata)
+        if timestamp_ns is None:
+            self.get_logger().debug(
+                f"metadata timestamp missing; using node clock data_source_id={data_source_id(metadata)}"
+            )
+            return self.get_clock().now().to_msg()
+        msg = RosTime()
+        msg.sec = int(timestamp_ns // 1_000_000_000)
+        msg.nanosec = int(timestamp_ns % 1_000_000_000)
+        return msg
 
     def should_log(self) -> bool:
         if self.log_interval < 0:
@@ -239,6 +252,19 @@ def data_source_id(metadata: dict) -> int:
 
     frame_num = int_value(metadata.get("frame"), 0)
     return frame_num % INT32_MAX
+
+
+def metadata_timestamp_ns(metadata: dict) -> int | None:
+    for key in ("source_timestamp_ns", "timestamp_ns"):
+        value = metadata.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return None
 
 
 def int_value(value, fallback: int) -> int:

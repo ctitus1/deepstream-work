@@ -13,6 +13,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ros-humble-foxglove-bridge \
       ros-humble-nav-msgs \
+      ros-humble-rosbag2-storage-mcap \
       ros-humble-vision-msgs && \
     rm -rf /var/lib/apt/lists/*
 

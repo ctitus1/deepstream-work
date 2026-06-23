@@ -162,7 +162,13 @@ scripts/run_ros_rtsp_foxglove.sh
 ```
 
 Press Ctrl-C in that shell to stop and remove the containers started by the
-script. To serve a different video:
+script. To also record all ROS topics to an MCAP bag under `outputs/rosbags/`:
+
+```bash
+scripts/run_ros_rtsp_foxglove.sh --bag
+```
+
+To serve a different video:
 
 ```bash
 scripts/run_ros_rtsp_foxglove.sh --video streams/my-video.mp4 --rtsp-mount my-video
@@ -222,10 +228,13 @@ image, and injury probabilities as `Annotation[]`. Wire metadata also includes
 use the existing `clip_rgb_<injury_head>` convention, such as
 `clip_rgb_severe_hemorrhage`, and observations are probability vectors in the
 class-index order used by the injury model. Detect frames publish continuously;
-assess frames publish only when fresh assessment metadata matches the compressed
-frame. Multiple casualties from the same frame are published as separate
+compressed frame outputs publish only when fresh metadata matches the compressed
+payload. Multiple casualties from the same frame are published as separate
 `CasualtyImageCompressed` messages with the same frame timestamp and the same
 image `data_source_id`; bbox fields identify the casualty within that image.
+Raw image, detection, and assessment metadata all use the immutable source frame
+timestamp captured before detection. The bridge copies that same timestamp into
+each compressed image and ROS message header for that frame.
 
 Use `ROS_DOMAIN_ID` if your ROS graph needs a non-default domain:
 

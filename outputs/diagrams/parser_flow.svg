@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1660" height="754" viewBox="0 0 1660 754">
+<svg xmlns="http://www.w3.org/2000/svg" width="1960" height="823" viewBox="0 0 1960 823">
 <defs>
 <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
 <path d="M2,2 L10,6 L2,10 z" fill="#94a3b8"/>
@@ -11,81 +11,81 @@
 .node-title{font:700 17px Arial,sans-serif;fill:#e5e7eb}
 .node-body{font:13px Arial,sans-serif;fill:#a7b0be}
 </style>
-<rect x="0" y="0" width="1660" height="754" fill="#0b1120"/>
-<text x="40" y="64" class="title">Parser App Data Flow</text>
-<text x="40" y="87" class="subtitle">parser_app.py prepares configs and probes; pipeline.py runs the display-oriented DeepStream graph.</text>
-<rect x="40" y="370" width="270" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="56" y="548" class="group-label">scripts/start_rtsp_stream.sh</text>
-<rect x="350" y="138" width="960" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="366" y="316" class="group-label">src/parser_app.py</text>
-<rect x="350" y="370" width="1270" height="344" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="366" y="700" class="group-label">src/deepstream_yolo/pipeline.py + probe helpers</text>
-<rect x="390" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="405" y="208" class="node-title">Args + configs</text>
-<text x="405" y="240" class="node-body">parse args</text>
-<text x="405" y="263" class="node-body">ensure model configs</text>
-<rect x="620" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="635" y="208" class="node-title">Build pipeline</text>
-<text x="635" y="240" class="node-body">build_pipeline()</text>
-<text x="635" y="263" class="node-body">shared GStreamer graph</text>
-<rect x="850" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="865" y="208" class="node-title">Attach probes</text>
-<text x="865" y="240" class="node-body">bbox + assessment</text>
-<text x="865" y="263" class="node-body">timing + rate limit</text>
-<rect x="1080" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="208" class="node-title">Run loop</text>
-<text x="1095" y="240" class="node-body">keyboard controls</text>
-<text x="1095" y="263" class="node-body">bus messages</text>
-<rect x="80" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="95" y="440" class="node-title">Video input</text>
-<text x="95" y="472" class="node-body">RTSP camera</text>
-<text x="95" y="495" class="node-body">or local MP4</text>
-<rect x="390" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="405" y="440" class="node-title">Decode + mux</text>
-<text x="405" y="472" class="node-body">parser -> decoder</text>
-<text x="405" y="495" class="node-body">nvstreammux</text>
-<rect x="620" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="635" y="440" class="node-title">YOLO detector</text>
-<text x="635" y="472" class="node-body">nvinfer PGIE</text>
-<text x="635" y="495" class="node-body">person ids + conf</text>
-<rect x="850" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="865" y="440" class="node-title">BBox probe</text>
-<text x="865" y="472" class="node-body">detection_overlay.py</text>
-<text x="865" y="495" class="node-body">draw person boxes</text>
-<rect x="1080" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="440" class="node-title">OSD + convert</text>
-<text x="1095" y="472" class="node-body">RGBA caps</text>
-<text x="1095" y="495" class="node-body">nvdsosd overlays</text>
-<rect x="1390" y="410" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1405" y="440" class="node-title">Display sink</text>
-<text x="1405" y="472" class="node-body">nveglglessink</text>
-<text x="1405" y="495" class="node-body">or fakesink</text>
-<rect x="620" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="635" y="592" class="node-title">Injury model</text>
-<text x="635" y="624" class="node-body">nvinfer SGIE</text>
-<text x="635" y="647" class="node-body">optional assessment</text>
-<rect x="850" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="865" y="592" class="node-title">Assess probe</text>
-<text x="865" y="624" class="node-body">assessment_runtime.py</text>
-<text x="865" y="647" class="node-body">fresh labels/logs</text>
-<rect x="1080" y="562" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="592" class="node-title">Display policy</text>
-<text x="1095" y="624" class="node-body">show all frames</text>
-<text x="1095" y="647" class="node-body">or assessed only</text>
-<path d="M 580.0 234.0 L 620.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 810.0 234.0 L 850.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1040.0 234.0 L 1080.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 715.0 290.0 L 715.0 350.0 L 485.0 350.0 L 485.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 945.0 290.0 L 945.0 350.0 L 945.0 350.0 L 945.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 992.5 290.0 L 992.5 562.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1175.0 290.0 L 1175.0 350.0 L 1485.0 350.0 L 1485.0 410.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 270.0 466.0 L 390.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 580.0 466.0 L 620.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 810.0 466.0 L 850.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1040.0 438.0 L 1080.0 438.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1270.0 466.0 L 1390.0 466.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 715.0 522.0 L 715.0 562.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 810.0 618.0 L 850.0 618.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1040.0 618.0 L 1080.0 618.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1175.0 562.0 L 1175.0 522.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<rect x="0" y="0" width="1960" height="823" fill="#0b1120"/>
+<text x="40" y="64" class="title">Parser App Flow</text>
+<text x="40" y="87" class="subtitle">The parser app opens video, finds people, optionally checks injuries, draws labels, and shows/logs the result.</text>
+<rect x="40" y="393" width="320" height="215" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="56" y="594" class="group-label">Video starter: scripts/start_rtsp_stream.sh</text>
+<rect x="400" y="138" width="1160" height="215" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="416" y="339" class="group-label">Parser app: src/parser_app.py</text>
+<rect x="400" y="393" width="1520" height="390" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="416" y="769" class="group-label">Video pipeline: pipeline.py + helper probes</text>
+<rect x="440" y="178" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="455" y="208" class="node-title">Startup settings</text>
+<text x="455" y="240" class="node-body">choose models</text>
+<text x="455" y="263" class="node-body">make configs</text>
+<rect x="720" y="178" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="735" y="208" class="node-title">Create pipeline</text>
+<text x="735" y="240" class="node-body">build_pipeline()</text>
+<text x="735" y="263" class="node-body">video processing graph</text>
+<rect x="1000" y="178" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1015" y="208" class="node-title">Add frame hooks</text>
+<text x="1015" y="240" class="node-body">boxes + injuries</text>
+<text x="1015" y="263" class="node-body">timing + playback</text>
+<rect x="1280" y="178" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="208" class="node-title">Run the app</text>
+<text x="1295" y="240" class="node-body">keyboard controls</text>
+<text x="1295" y="263" class="node-body">stop on errors</text>
+<rect x="80" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="95" y="463" class="node-title">Video input</text>
+<text x="95" y="495" class="node-body">camera stream</text>
+<text x="95" y="518" class="node-body">or saved video</text>
+<rect x="440" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="455" y="463" class="node-title">Read frames</text>
+<text x="455" y="495" class="node-body">open the video</text>
+<text x="455" y="518" class="node-body">one frame at a time</text>
+<rect x="720" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="735" y="463" class="node-title">Find people</text>
+<text x="735" y="495" class="node-body">draw person boxes</text>
+<text x="735" y="518" class="node-body">add score + id</text>
+<rect x="1000" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1015" y="463" class="node-title">Box overlay</text>
+<text x="1015" y="495" class="node-body">show person boxes</text>
+<text x="1015" y="518" class="node-body">and confidence</text>
+<rect x="1280" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="463" class="node-title">Draw overlays</text>
+<text x="1295" y="495" class="node-body">combine boxes/text</text>
+<text x="1295" y="518" class="node-body">prepare display</text>
+<rect x="1640" y="433" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1655" y="463" class="node-title">Show window</text>
+<text x="1655" y="495" class="node-body">display output</text>
+<text x="1655" y="518" class="node-body">or no-window mode</text>
+<rect x="720" y="608" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="735" y="638" class="node-title">Check injuries</text>
+<text x="735" y="670" class="node-body">optional model</text>
+<text x="735" y="693" class="node-body">one person at a time</text>
+<rect x="1000" y="608" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1015" y="638" class="node-title">Injury labels</text>
+<text x="1015" y="670" class="node-body">fresh labels</text>
+<text x="1015" y="693" class="node-body">console logs</text>
+<rect x="1280" y="608" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="638" class="node-title">Frame choice</text>
+<text x="1295" y="670" class="node-body">show all frames</text>
+<text x="1295" y="693" class="node-body">or fresh checks only</text>
+<path d="M 680.0 245.5 L 720.0 245.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 960.0 245.5 L 1000.0 245.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1240.0 245.5 L 1280.0 245.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 840.0 313.0 L 840.0 373.0 L 560.0 373.0 L 560.0 433.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1120.0 313.0 L 1120.0 373.0 L 1120.0 373.0 L 1120.0 433.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1180.0 313.0 L 1180.0 608.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1400.0 313.0 L 1400.0 373.0 L 1760.0 373.0 L 1760.0 433.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 320.0 500.5 L 440.0 500.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 680.0 500.5 L 720.0 500.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 960.0 500.5 L 1000.0 500.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1240.0 466.8 L 1280.0 466.8" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1520.0 500.5 L 1640.0 500.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 840.0 568.0 L 840.0 608.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 960.0 675.5 L 1000.0 675.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1240.0 675.5 L 1280.0 675.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1400.0 608.0 L 1400.0 568.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
 </svg>

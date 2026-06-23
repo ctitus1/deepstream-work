@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2430" height="674" viewBox="0 0 2430 674">
+<svg xmlns="http://www.w3.org/2000/svg" width="2800" height="743" viewBox="0 0 2800 743">
 <defs>
 <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
 <path d="M2,2 L10,6 L2,10 z" fill="#94a3b8"/>
@@ -11,75 +11,75 @@
 .node-title{font:700 17px Arial,sans-serif;fill:#e5e7eb}
 .node-body{font:13px Arial,sans-serif;fill:#a7b0be}
 </style>
-<rect x="0" y="0" width="2430" height="674" fill="#0b1120"/>
-<text x="40" y="64" class="title">ROS Publisher Data Flow</text>
-<text x="40" y="87" class="subtitle">ros_source.py joins DeepStream JPEG appsinks with metadata; ros_bridge.py publishes ROS Humble topics.</text>
-<rect x="40" y="290" width="270" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="56" y="468" class="group-label">scripts/start_rtsp_stream.sh</text>
-<rect x="350" y="138" width="960" height="496" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="366" y="620" class="group-label">src/ros_source.py + src/deepstream_yolo/pipeline.py</text>
-<rect x="1350" y="290" width="1040" height="192" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
-<text x="1366" y="468" class="group-label">src/ros_bridge.py</text>
-<rect x="80" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="95" y="360" class="node-title">Video input</text>
-<text x="95" y="392" class="node-body">RTSP camera</text>
-<text x="95" y="415" class="node-body">or local MP4</text>
-<rect x="390" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="405" y="360" class="node-title">Decode + mux</text>
-<text x="405" y="392" class="node-body">parser -> decoder</text>
-<text x="405" y="415" class="node-body">nvstreammux</text>
-<rect x="620" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="635" y="360" class="node-title">Source time</text>
-<text x="635" y="392" class="node-body">streammux src probe</text>
-<text x="635" y="415" class="node-body">immutable metadata</text>
-<rect x="1080" y="178" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="208" class="node-title">Raw appsink</text>
-<text x="1095" y="240" class="node-body">raw tee -> 640x368</text>
-<text x="1095" y="263" class="node-body">JPEG payload</text>
-<rect x="850" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="865" y="360" class="node-title">YOLO detector</text>
-<text x="865" y="392" class="node-body">nvinfer PGIE</text>
-<text x="865" y="415" class="node-body">person ids + conf</text>
-<rect x="1080" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="360" class="node-title">Detect appsink</text>
-<text x="1095" y="392" class="node-body">detect tee -> 640x368</text>
-<text x="1095" y="415" class="node-body">scaled bbox metadata</text>
-<rect x="850" y="482" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="865" y="512" class="node-title">Injury model</text>
-<text x="865" y="544" class="node-body">nvinfer SGIE</text>
-<text x="865" y="567" class="node-body">per-person tensors</text>
-<rect x="1080" y="482" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1095" y="512" class="node-title">Assess appsink</text>
-<text x="1095" y="544" class="node-body">assess tee -> 640x368</text>
-<text x="1095" y="567" class="node-body">labels/probabilities</text>
-<rect x="1390" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1405" y="360" class="node-title">TCP senders</text>
-<text x="1405" y="392" class="node-body">FrameSocketSender</text>
-<text x="1405" y="415" class="node-body">5609 | 5610 | 5611</text>
-<rect x="1620" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1635" y="360" class="node-title">ROS publishers</text>
-<text x="1635" y="392" class="node-body">one node per endpoint</text>
-<text x="1635" y="415" class="node-body">copy source stamp</text>
-<rect x="1850" y="330" width="270" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="1865" y="360" class="node-title">Published topics</text>
-<text x="1865" y="392" class="node-body">/uas4/image</text>
-<text x="1865" y="415" class="node-body">/uas4/target_detections</text>
-<text x="1865" y="438" class="node-body">/casualty_image/...</text>
-<rect x="2160" y="330" width="190" height="112" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
-<text x="2175" y="360" class="node-title">Consumers</text>
-<text x="2175" y="392" class="node-body">Foxglove bridge</text>
-<text x="2175" y="415" class="node-body">rosbag -s mcap</text>
-<path d="M 270.0 386.0 L 390.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 580.0 386.0 L 620.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 715.0 330.0 L 715.0 234.0 L 1080.0 234.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 810.0 386.0 L 850.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1040.0 386.0 L 1080.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 945.0 442.0 L 945.0 482.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1040.0 538.0 L 1080.0 538.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1270.0 234.0 L 1330.0 234.0 L 1330.0 358.0 L 1390.0 358.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1270.0 386.0 L 1390.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1270.0 538.0 L 1330.0 538.0 L 1330.0 414.0 L 1390.0 414.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1580.0 386.0 L 1620.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 1810.0 386.0 L 1850.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
-<path d="M 2120.0 386.0 L 2160.0 386.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<rect x="0" y="0" width="2800" height="743" fill="#0b1120"/>
+<text x="40" y="64" class="title">ROS Publisher Flow</text>
+<text x="40" y="87" class="subtitle">DeepStream turns video into images, person boxes, and injury checks; ROS publishes them for tools to view or record.</text>
+<rect x="40" y="313" width="320" height="215" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="56" y="514" class="group-label">Video starter: scripts/start_rtsp_stream.sh</text>
+<rect x="400" y="138" width="1160" height="565" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="416" y="689" class="group-label">DeepStream sender: src/ros_source.py + pipeline.py</text>
+<rect x="1600" y="313" width="1160" height="215" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.6" stroke-dasharray="7 7"/>
+<text x="1616" y="514" class="group-label">ROS publisher: src/ros_bridge.py</text>
+<rect x="80" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="95" y="383" class="node-title">Video input</text>
+<text x="95" y="415" class="node-body">camera stream</text>
+<text x="95" y="438" class="node-body">or saved video</text>
+<rect x="440" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="455" y="383" class="node-title">Read frames</text>
+<text x="455" y="415" class="node-body">open the video</text>
+<text x="455" y="438" class="node-body">one frame at a time</text>
+<rect x="720" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="735" y="383" class="node-title">Frame time</text>
+<text x="735" y="415" class="node-body">save the source time</text>
+<text x="735" y="438" class="node-body">keep it with frame</text>
+<rect x="1280" y="178" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="208" class="node-title">Plain image</text>
+<text x="1295" y="240" class="node-body">resize to 640x368</text>
+<text x="1295" y="263" class="node-body">send as JPEG</text>
+<rect x="1000" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1015" y="383" class="node-title">Find people</text>
+<text x="1015" y="415" class="node-body">draw person boxes</text>
+<text x="1015" y="438" class="node-body">add score + id</text>
+<rect x="1280" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="383" class="node-title">Detection image</text>
+<text x="1295" y="415" class="node-body">resize with boxes</text>
+<text x="1295" y="438" class="node-body">send box data</text>
+<rect x="1000" y="528" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1015" y="558" class="node-title">Check injuries</text>
+<text x="1015" y="590" class="node-body">look at each person</text>
+<text x="1015" y="613" class="node-body">make injury scores</text>
+<rect x="1280" y="528" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1295" y="558" class="node-title">Assessment image</text>
+<text x="1295" y="590" class="node-body">one image/person</text>
+<text x="1295" y="613" class="node-body">send injury labels</text>
+<rect x="1640" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1655" y="383" class="node-title">Send to bridge</text>
+<text x="1655" y="415" class="node-body">three local ports</text>
+<text x="1655" y="438" class="node-body">raw | boxes | injury</text>
+<rect x="1920" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="1935" y="383" class="node-title">Make ROS messages</text>
+<text x="1935" y="415" class="node-body">one publisher each</text>
+<text x="1935" y="438" class="node-body">reuse frame time</text>
+<rect x="2200" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="2215" y="383" class="node-title">Published topics</text>
+<text x="2215" y="415" class="node-body">/uas4/image</text>
+<text x="2215" y="438" class="node-body">/uas4/target_detections</text>
+<text x="2215" y="461" class="node-body">/casualty_image/...</text>
+<rect x="2480" y="353" width="240" height="135" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="1.8"/>
+<text x="2495" y="383" class="node-title">View or record</text>
+<text x="2495" y="415" class="node-body">Foxglove</text>
+<text x="2495" y="438" class="node-body">rosbag -s mcap</text>
+<path d="M 320.0 420.5 L 440.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 680.0 420.5 L 720.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 840.0 353.0 L 840.0 245.0 L 1280.0 245.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 960.0 420.5 L 1000.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1240.0 420.5 L 1280.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1120.0 488.0 L 1120.0 528.0" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1240.0 595.5 L 1280.0 595.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1520.0 245.5 L 1580.0 245.0 L 1580.0 386.0 L 1640.0 386.8" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1520.0 420.5 L 1640.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1520.0 595.5 L 1580.0 595.0 L 1580.0 454.0 L 1640.0 454.2" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 1880.0 420.5 L 1920.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 2160.0 420.5 L 2200.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
+<path d="M 2440.0 420.5 L 2480.0 420.5" fill="none" stroke="#94a3b8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrow)"/>
 </svg>

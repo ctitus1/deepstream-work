@@ -26,12 +26,11 @@ from PIL import Image, ImageDraw, ImageFont
 OUT_DIR = Path(__file__).resolve().parent
 
 SPACING = 40
-NODE_W = 190
-WIDE_NODE_W = 270
-NODE_H = 112
+BOX_W = 240
+BOX_H = 135
 GROUP_INSET = SPACING
 GROUP_GAP = SPACING
-NODE_GAP = SPACING
+BOX_GAP = SPACING
 
 HEADER_X = SPACING
 HEADER_TITLE_Y = SPACING
@@ -45,23 +44,23 @@ HEADER_TITLE_PNG_Y = HEADER_TITLE_Y
 HEADER_SUBTITLE_PNG_Y = HEADER_SUBTITLE_Y
 
 ROW_TOP = HEADER_BOTTOM + SPACING + GROUP_INSET
-ROW_MIDDLE = ROW_TOP + NODE_H + SPACING
-ROW_BOTTOM = ROW_MIDDLE + NODE_H + SPACING
-ROW_GAP = NODE_H + SPACING
+ROW_MIDDLE = ROW_TOP + BOX_H + SPACING
+ROW_BOTTOM = ROW_MIDDLE + BOX_H + SPACING
+ROW_GAP = BOX_H + SPACING
 assert ROW_BOTTOM - ROW_MIDDLE == ROW_GAP
 
 X_VIDEO = SPACING + GROUP_INSET
-X_DECODE = X_VIDEO + NODE_W + GROUP_INSET + GROUP_GAP + GROUP_INSET
-X_STAMP = X_DECODE + NODE_W + NODE_GAP
-X_PROCESS = X_STAMP + NODE_W + NODE_GAP
-X_BRANCH = X_PROCESS + NODE_W + NODE_GAP
-X_TCP = X_BRANCH + NODE_W + GROUP_INSET + GROUP_GAP + GROUP_INSET
-X_BUILDER = X_TCP + NODE_W + NODE_GAP
-X_TOPICS = X_BUILDER + NODE_W + NODE_GAP
-X_CONSUMERS = X_TOPICS + WIDE_NODE_W + NODE_GAP
-BRANCH_JOIN_X = X_BRANCH + NODE_W + GROUP_INSET + GROUP_GAP // 2
-CANVAS_W = X_CONSUMERS + NODE_W + GROUP_INSET + SPACING
-CANVAS_H = ROW_BOTTOM + NODE_H + GROUP_INSET + SPACING
+X_DECODE = X_VIDEO + BOX_W + GROUP_INSET + GROUP_GAP + GROUP_INSET
+X_STAMP = X_DECODE + BOX_W + BOX_GAP
+X_PROCESS = X_STAMP + BOX_W + BOX_GAP
+X_BRANCH = X_PROCESS + BOX_W + BOX_GAP
+X_TCP = X_BRANCH + BOX_W + GROUP_INSET + GROUP_GAP + GROUP_INSET
+X_BUILDER = X_TCP + BOX_W + BOX_GAP
+X_TOPICS = X_BUILDER + BOX_W + BOX_GAP
+X_CONSUMERS = X_TOPICS + BOX_W + BOX_GAP
+BRANCH_JOIN_X = X_BRANCH + BOX_W + GROUP_INSET + GROUP_GAP // 2
+CANVAS_W = X_CONSUMERS + BOX_W + GROUP_INSET + SPACING
+CANVAS_H = ROW_BOTTOM + BOX_H + GROUP_INSET + SPACING
 
 COLORS = {
     "background": "#0b1120",
@@ -85,8 +84,8 @@ class Node:
     lines: tuple[str, ...]
     x: int
     y: int
-    w: int = NODE_W
-    h: int = NODE_H
+    w: int = BOX_W
+    h: int = BOX_H
 
 
 @dataclass(frozen=True)
@@ -536,44 +535,43 @@ def render_png(diagram: Diagram, output_path: Path) -> None:
 
 def ros_publisher_diagram() -> Diagram:
     groups = (
-        group_around("stream_group", "scripts/start_rtsp_stream.sh", X_VIDEO, ROW_MIDDLE, NODE_W, NODE_H),
+        group_around("stream_group", "Video starter: scripts/start_rtsp_stream.sh", X_VIDEO, ROW_MIDDLE, BOX_W, BOX_H),
         group_around(
             "source_group",
-            "src/ros_source.py + src/deepstream_yolo/pipeline.py",
+            "DeepStream sender: src/ros_source.py + pipeline.py",
             X_DECODE,
             ROW_TOP,
-            X_BRANCH + NODE_W - X_DECODE,
-            ROW_BOTTOM + NODE_H - ROW_TOP,
+            X_BRANCH + BOX_W - X_DECODE,
+            ROW_BOTTOM + BOX_H - ROW_TOP,
         ),
         group_around(
             "bridge_group",
-            "src/ros_bridge.py",
+            "ROS publisher: src/ros_bridge.py",
             X_TCP,
             ROW_MIDDLE,
-            X_CONSUMERS + NODE_W - X_TCP,
-            NODE_H,
+            X_CONSUMERS + BOX_W - X_TCP,
+            BOX_H,
         ),
     )
     nodes = (
-        Node("video", "Video input", ("RTSP camera", "or local MP4"), X_VIDEO, ROW_MIDDLE),
-        Node("decode", "Decode + mux", ("parser -> decoder", "nvstreammux"), X_DECODE, ROW_MIDDLE),
-        Node("stamp", "Source time", ("streammux src probe", "immutable metadata"), X_STAMP, ROW_MIDDLE),
-        Node("raw", "Raw appsink", ("raw tee -> 640x368", "JPEG payload"), X_BRANCH, ROW_TOP),
-        Node("pgie", "YOLO detector", ("nvinfer PGIE", "person ids + conf"), X_PROCESS, ROW_MIDDLE),
-        Node("detect", "Detect appsink", ("detect tee -> 640x368", "scaled bbox metadata"), X_BRANCH, ROW_MIDDLE),
-        Node("sgie", "Injury model", ("nvinfer SGIE", "per-person tensors"), X_PROCESS, ROW_BOTTOM),
-        Node("assess", "Assess appsink", ("assess tee -> 640x368", "labels/probabilities"), X_BRANCH, ROW_BOTTOM),
-        Node("tcp", "TCP senders", ("FrameSocketSender", "5609 | 5610 | 5611"), X_TCP, ROW_MIDDLE),
-        Node("builder", "ROS publishers", ("one node per endpoint", "copy source stamp"), X_BUILDER, ROW_MIDDLE),
+        Node("video", "Video input", ("camera stream", "or saved video"), X_VIDEO, ROW_MIDDLE),
+        Node("decode", "Read frames", ("open the video", "one frame at a time"), X_DECODE, ROW_MIDDLE),
+        Node("stamp", "Frame time", ("save the source time", "keep it with frame"), X_STAMP, ROW_MIDDLE),
+        Node("raw", "Plain image", ("resize to 640x368", "send as JPEG"), X_BRANCH, ROW_TOP),
+        Node("pgie", "Find people", ("draw person boxes", "add score + id"), X_PROCESS, ROW_MIDDLE),
+        Node("detect", "Detection image", ("resize with boxes", "send box data"), X_BRANCH, ROW_MIDDLE),
+        Node("sgie", "Check injuries", ("look at each person", "make injury scores"), X_PROCESS, ROW_BOTTOM),
+        Node("assess", "Assessment image", ("one image/person", "send injury labels"), X_BRANCH, ROW_BOTTOM),
+        Node("tcp", "Send to bridge", ("three local ports", "raw | boxes | injury"), X_TCP, ROW_MIDDLE),
+        Node("builder", "Make ROS messages", ("one publisher each", "reuse frame time"), X_BUILDER, ROW_MIDDLE),
         Node(
             "topics",
             "Published topics",
             ("/uas4/image", "/uas4/target_detections", "/casualty_image/..."),
             X_TOPICS,
             ROW_MIDDLE,
-            WIDE_NODE_W,
         ),
-        Node("consumers", "Consumers", ("Foxglove bridge", "rosbag -s mcap"), X_CONSUMERS, ROW_MIDDLE),
+        Node("consumers", "View or record", ("Foxglove", "rosbag -s mcap"), X_CONSUMERS, ROW_MIDDLE),
     )
     edges = (
         Edge("video_decode", "video", "decode"),
@@ -584,7 +582,7 @@ def ros_publisher_diagram() -> Diagram:
             "raw",
             Port("top", 0.5),
             Port("left", 0.5),
-            ((X_STAMP + NODE_W // 2, ROW_TOP + NODE_H // 2),),
+            ((X_STAMP + BOX_W // 2, ROW_TOP + BOX_H // 2),),
         ),
         Edge("stamp_pgie", "stamp", "pgie", Port("right", 0.5), Port("left", 0.5)),
         Edge("pgie_detect", "pgie", "detect"),
@@ -596,7 +594,7 @@ def ros_publisher_diagram() -> Diagram:
             "tcp",
             Port("right", 0.5),
             Port("left", 0.25),
-            ((BRANCH_JOIN_X, ROW_TOP + NODE_H // 2), (BRANCH_JOIN_X, ROW_MIDDLE + NODE_H // 4)),
+            ((BRANCH_JOIN_X, ROW_TOP + BOX_H // 2), (BRANCH_JOIN_X, ROW_MIDDLE + BOX_H // 4)),
         ),
         Edge("detect_tcp", "detect", "tcp"),
         Edge(
@@ -605,7 +603,7 @@ def ros_publisher_diagram() -> Diagram:
             "tcp",
             Port("right", 0.5),
             Port("left", 0.75),
-            ((BRANCH_JOIN_X, ROW_BOTTOM + NODE_H // 2), (BRANCH_JOIN_X, ROW_MIDDLE + NODE_H * 3 // 4)),
+            ((BRANCH_JOIN_X, ROW_BOTTOM + BOX_H // 2), (BRANCH_JOIN_X, ROW_MIDDLE + BOX_H * 3 // 4)),
         ),
         Edge("tcp_builder", "tcp", "builder"),
         Edge("builder_topics", "builder", "topics"),
@@ -613,8 +611,8 @@ def ros_publisher_diagram() -> Diagram:
     )
     return Diagram(
         "data_flow",
-        "ROS Publisher Data Flow",
-        "ros_source.py joins DeepStream JPEG appsinks with metadata; ros_bridge.py publishes ROS Humble topics.",
+        "ROS Publisher Flow",
+        "DeepStream turns video into images, person boxes, and injury checks; ROS publishes them for tools to view or record.",
         groups,
         nodes,
         edges,
@@ -623,9 +621,9 @@ def ros_publisher_diagram() -> Diagram:
 
 def parser_app_diagram() -> Diagram:
     row_setup = ROW_TOP
-    row_runtime = row_setup + NODE_H + GROUP_INSET + GROUP_GAP + GROUP_INSET
-    row_assess = row_runtime + NODE_H + NODE_GAP
-    group_gap_y = row_setup + NODE_H + GROUP_INSET + GROUP_GAP // 2
+    row_runtime = row_setup + BOX_H + GROUP_INSET + GROUP_GAP + GROUP_INSET
+    row_assess = row_runtime + BOX_H + BOX_GAP
+    group_gap_y = row_setup + BOX_H + GROUP_INSET + GROUP_GAP // 2
 
     x_setup = X_DECODE
     x_call = X_STAMP
@@ -638,38 +636,38 @@ def parser_app_diagram() -> Diagram:
     x_status = X_BRANCH
 
     groups = (
-        group_around("stream_group", "scripts/start_rtsp_stream.sh", X_VIDEO, row_runtime, NODE_W, NODE_H),
+        group_around("stream_group", "Video starter: scripts/start_rtsp_stream.sh", X_VIDEO, row_runtime, BOX_W, BOX_H),
         group_around(
             "parser_group",
-            "src/parser_app.py",
+            "Parser app: src/parser_app.py",
             x_setup,
             row_setup,
-            x_loop + NODE_W - x_setup,
-            NODE_H,
+            x_loop + BOX_W - x_setup,
+            BOX_H,
         ),
         group_around(
             "pipeline_group",
-            "src/deepstream_yolo/pipeline.py + probe helpers",
+            "Video pipeline: pipeline.py + helper probes",
             X_DECODE,
             row_runtime,
-            x_sink + NODE_W - X_DECODE,
-            row_assess + NODE_H - row_runtime,
+            x_sink + BOX_W - X_DECODE,
+            row_assess + BOX_H - row_runtime,
         ),
     )
     nodes = (
-        Node("setup", "Args + configs", ("parse args", "ensure model configs"), x_setup, row_setup),
-        Node("call", "Build pipeline", ("build_pipeline()", "shared GStreamer graph"), x_call, row_setup),
-        Node("attach", "Attach probes", ("bbox + assessment", "timing + rate limit"), x_attach, row_setup),
-        Node("loop", "Run loop", ("keyboard controls", "bus messages"), x_loop, row_setup),
-        Node("video", "Video input", ("RTSP camera", "or local MP4"), X_VIDEO, row_runtime),
-        Node("decode", "Decode + mux", ("parser -> decoder", "nvstreammux"), X_DECODE, row_runtime),
-        Node("pgie", "YOLO detector", ("nvinfer PGIE", "person ids + conf"), X_STAMP, row_runtime),
-        Node("bbox", "BBox probe", ("detection_overlay.py", "draw person boxes"), x_bbox, row_runtime),
-        Node("osd", "OSD + convert", ("RGBA caps", "nvdsosd overlays"), x_osd, row_runtime),
-        Node("sink", "Display sink", ("nveglglessink", "or fakesink"), x_sink, row_runtime),
-        Node("sgie", "Injury model", ("nvinfer SGIE", "optional assessment"), X_STAMP, row_assess),
-        Node("assess", "Assess probe", ("assessment_runtime.py", "fresh labels/logs"), x_assess, row_assess),
-        Node("status", "Display policy", ("show all frames", "or assessed only"), x_status, row_assess),
+        Node("setup", "Startup settings", ("choose models", "make configs"), x_setup, row_setup),
+        Node("call", "Create pipeline", ("build_pipeline()", "video processing graph"), x_call, row_setup),
+        Node("attach", "Add frame hooks", ("boxes + injuries", "timing + playback"), x_attach, row_setup),
+        Node("loop", "Run the app", ("keyboard controls", "stop on errors"), x_loop, row_setup),
+        Node("video", "Video input", ("camera stream", "or saved video"), X_VIDEO, row_runtime),
+        Node("decode", "Read frames", ("open the video", "one frame at a time"), X_DECODE, row_runtime),
+        Node("pgie", "Find people", ("draw person boxes", "add score + id"), X_STAMP, row_runtime),
+        Node("bbox", "Box overlay", ("show person boxes", "and confidence"), x_bbox, row_runtime),
+        Node("osd", "Draw overlays", ("combine boxes/text", "prepare display"), x_osd, row_runtime),
+        Node("sink", "Show window", ("display output", "or no-window mode"), x_sink, row_runtime),
+        Node("sgie", "Check injuries", ("optional model", "one person at a time"), X_STAMP, row_assess),
+        Node("assess", "Injury labels", ("fresh labels", "console logs"), x_assess, row_assess),
+        Node("status", "Frame choice", ("show all frames", "or fresh checks only"), x_status, row_assess),
     )
     edges = (
         Edge("setup_call", "setup", "call"),
@@ -681,7 +679,7 @@ def parser_app_diagram() -> Diagram:
             "decode",
             Port("bottom", 0.5),
             Port("top", 0.5),
-            ((x_call + NODE_W // 2, group_gap_y), (X_DECODE + NODE_W // 2, group_gap_y)),
+            ((x_call + BOX_W // 2, group_gap_y), (X_DECODE + BOX_W // 2, group_gap_y)),
         ),
         Edge(
             "attach_bbox",
@@ -689,7 +687,7 @@ def parser_app_diagram() -> Diagram:
             "bbox",
             Port("bottom", 0.5),
             Port("top", 0.5),
-            ((x_attach + NODE_W // 2, group_gap_y), (x_bbox + NODE_W // 2, group_gap_y)),
+            ((x_attach + BOX_W // 2, group_gap_y), (x_bbox + BOX_W // 2, group_gap_y)),
         ),
         Edge(
             "attach_assess",
@@ -704,7 +702,7 @@ def parser_app_diagram() -> Diagram:
             "sink",
             Port("bottom", 0.5),
             Port("top", 0.5),
-            ((x_loop + NODE_W // 2, group_gap_y), (x_sink + NODE_W // 2, group_gap_y)),
+            ((x_loop + BOX_W // 2, group_gap_y), (x_sink + BOX_W // 2, group_gap_y)),
         ),
         Edge("video_decode", "video", "decode"),
         Edge("decode_pgie", "decode", "pgie"),
@@ -724,13 +722,13 @@ def parser_app_diagram() -> Diagram:
     )
     return Diagram(
         "parser_flow",
-        "Parser App Data Flow",
-        "parser_app.py prepares configs and probes; pipeline.py runs the display-oriented DeepStream graph.",
+        "Parser App Flow",
+        "The parser app opens video, finds people, optionally checks injuries, draws labels, and shows/logs the result.",
         groups,
         nodes,
         edges,
-        width=x_sink + NODE_W + GROUP_INSET + SPACING,
-        height=row_assess + NODE_H + GROUP_INSET + SPACING,
+        width=x_sink + BOX_W + GROUP_INSET + SPACING,
+        height=row_assess + BOX_H + GROUP_INSET + SPACING,
     )
 
 

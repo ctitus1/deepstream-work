@@ -3,7 +3,7 @@
 Both ``parser_app.py`` and ``ros_source.py`` call ``build_pipeline()``. This
 module owns the GStreamer element graph: input decode, ``nvstreammux``, PGIE
 YOLO inference, optional SGIE assessment, optional compressed appsink branches,
-OSD conversion, and display/fake sink output.
+OSD conversion, an optional mp4 recording branch, and display/fake sink output.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+from .recording import select_encoder
 from .stream_source import StreamSource
 
 
@@ -36,6 +37,8 @@ class PipelineParts:
     osd: Gst.Element
     display_queue: Gst.Element | None
     sink: Gst.Element
+    record_tee: Gst.Element | None = None
+    record_sink: Gst.Element | None = None
 
 
 def element(factory: str, name: str):
@@ -51,6 +54,19 @@ def configure_latest_queue(queue) -> None:
     queue.set_property("max-size-time", 0)
     queue.set_property("leaky", 2)
     set_property_if_present(queue, "flush-on-eos", True)
+
+
+def configure_record_queue(queue) -> None:
+    """Buffer the record branch so encoder backpressure never stalls display.
+
+    Unlike ``configure_latest_queue`` this keeps a real backlog (recordings want
+    every frame) and must not flush on EOS or mp4mux loses the tail.
+    """
+    queue.set_property("max-size-buffers", 30)
+    queue.set_property("max-size-bytes", 0)
+    queue.set_property("max-size-time", 0)
+    queue.set_property("leaky", 2)
+    set_property_if_present(queue, "flush-on-eos", False)
 
 
 def set_property_if_present(elem, name: str, value) -> None:
@@ -122,6 +138,43 @@ def compressed_branch(
     return appsink
 
 
+def recording_branch(pipeline, tee, record_path) -> Gst.Element:
+    """Encode the burned-in OSD output straight to mp4, staying in NVMM when possible."""
+    choice = select_encoder()
+    queue = element("queue", "record-queue")
+    convert = element("nvvideoconvert", "record-convert")
+    caps = element("capsfilter", "record-caps")
+    encoder = element(choice.factory, "record-encoder")
+    parser = element("h264parse", "record-parser")
+    muxer = element("mp4mux", "record-mux")
+    sink = element("filesink", "record-sink")
+
+    configure_record_queue(queue)
+    caps.set_property("caps", Gst.Caps.from_string(choice.caps))
+    for name, value in choice.properties.items():
+        set_property_if_present(encoder, name, value)
+    set_property_if_present(muxer, "faststart", True)
+    sink.set_property("location", str(record_path))
+    sink.set_property("sync", False)
+    set_property_if_present(sink, "async", False)
+
+    elements = [queue, convert, caps]
+    if choice.software:
+        elements.append(element("videoconvert", "record-videoconvert"))
+    elements.extend((encoder, parser, muxer, sink))
+
+    for elem in elements:
+        pipeline.add(elem)
+
+    link_tee_to_queue(tee, queue)
+    for upstream, downstream in zip(elements, elements[1:]):
+        if not upstream.link(downstream):
+            raise RuntimeError(
+                f"Failed to link {upstream.get_name()} to {downstream.get_name()}"
+            )
+    return sink
+
+
 def on_file_pad_added(_demux, pad, parsers):
     caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
 
@@ -163,6 +216,7 @@ def build_pipeline(
     detect_output_size: tuple[int, int] | None = None,
     assess_output_size: tuple[int, int] | None = None,
     jpeg_quality: int = 85,
+    record_path=None,
 ) -> PipelineParts:
     pipeline = Gst.Pipeline.new("yolo-parser")
     if assess_output_size and not assessment_config:
@@ -192,6 +246,7 @@ def build_pipeline(
     convert = element("nvvideoconvert", "convert")
     caps = element("capsfilter", "caps")
     osd = element("nvdsosd", "osd")
+    record_tee = element("tee", "record-tee") if record_path else None
     display_queue = element("queue", "display-queue") if stream.is_rtsp else None
     sink = element("nveglglessink" if display else "fakesink", "sink")
 
@@ -251,6 +306,8 @@ def build_pipeline(
     if assess_tee:
         elements.append(assess_tee)
     elements.extend((convert, caps, osd))
+    if record_tee:
+        elements.append(record_tee)
     if display_queue:
         elements.append(display_queue)
     elements.append(sink)
@@ -328,7 +385,17 @@ def build_pipeline(
 
     convert.link(caps)
     caps.link(osd)
-    if display_queue:
+    record_sink = None
+    if record_tee:
+        # Tee after the OSD so the recording captures the burned-in overlay.
+        osd.link(record_tee)
+        record_sink = recording_branch(pipeline, record_tee, record_path)
+        if display_queue:
+            link_tee_to_queue(record_tee, display_queue)
+            display_queue.link(sink)
+        else:
+            tee_queue_branch(pipeline, record_tee, "display-main", sink)
+    elif display_queue:
         osd.link(display_queue)
         display_queue.link(sink)
     else:
@@ -350,4 +417,6 @@ def build_pipeline(
         osd=osd,
         display_queue=display_queue,
         sink=sink,
+        record_tee=record_tee,
+        record_sink=record_sink,
     )

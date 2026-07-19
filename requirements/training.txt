@@ -1,0 +1,41 @@
+# Detection training / fine-tuning dependencies.
+#
+# Install into a dedicated venv, NOT the DeepStream system interpreter and NOT
+# .venv-yolo (the export env, requirements/yolo-export.txt):
+#
+#   python3 -m venv .venv-train
+#   .venv-train/bin/python3 -m pip install --upgrade pip 'setuptools<82' wheel
+#   .venv-train/bin/python3 -m pip install -r requirements/training.txt
+#
+# .venv-*/ is already gitignored.
+#
+# YOLO12 NOTE
+# -----------
+# ultralytics does NOT ship YOLO12. `YOLO("yolo12x.pt")` is not a supported
+# ultralytics model; YOLO12 comes from the sunsmarterjie/yolov12 research repo,
+# which vendors its own patched fork of ultralytics. Installing this file gives
+# you YOLO11 (and v8) fine-tuning only. To fine-tune YOLO12, clone
+# sunsmarterjie/yolov12 and install ITS requirements into a separate venv -
+# installing both into one env produces two conflicting `ultralytics` packages.
+# See training/README.md.
+#
+# torch is pinned CPU/CUDA-agnostic. For a specific CUDA build, install torch
+# first from the matching PyTorch index, then install this file.
+
+ultralytics==8.3.100
+torch==2.5.1
+torchvision==0.20.1
+
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+pyyaml==6.0.2
+scipy==1.14.1
+matplotlib==3.9.2
+pandas==2.2.3
+tqdm==4.66.5
+psutil==6.0.0
+py-cpuinfo==9.0.0
+
+# COCO-style offline evaluation (imported inside functions only).
+pycocotools==2.0.8

@@ -11,6 +11,7 @@ files, and debug timing probes.
 
 import argparse
 import sys
+from pathlib import Path
 
 from deepstream_yolo.gst_warnings import (
     maybe_start_gst_scan_warning_filter,
@@ -31,6 +32,7 @@ from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
 from deepstream_yolo.paths import DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
+from deepstream_yolo.recording import resolve_record_path
 from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 from deepstream_yolo.timing import TimeLog
 
@@ -61,6 +63,14 @@ def parse_args() -> argparse.Namespace:
         help="RTSP jitterbuffer latency before old network packets are dropped; default 0.",
     )
     parser.add_argument("--show-gst-scan-warnings", action="store_true")
+    parser.add_argument(
+        "--record",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help="Record the annotated video to PATH; omit PATH for an auto-named mp4 under outputs/.",
+    )
     assessment_group = parser.add_mutually_exclusive_group()
     assessment_group.add_argument(
         "--enable-assessment",
@@ -195,6 +205,55 @@ def attach_debug_probes(parts) -> None:
         pad.add_probe(Gst.PadProbeType.BUFFER, timer.mark(stage), None)
 
 
+class ShutdownTracker:
+    """Remembers how the pipeline terminated, so teardown can flush accordingly."""
+
+    def __init__(self):
+        self.saw_eos = False
+        self.saw_error = False
+
+    def on_message(self, _bus, msg, _data):
+        if msg.type == Gst.MessageType.EOS:
+            self.saw_eos = True
+        elif msg.type == Gst.MessageType.ERROR:
+            self.saw_error = True
+        return True
+
+
+def finish_recording(parts, tracker, timeout_s: float = 10.0) -> None:
+    """Flush mp4mux with a clean EOS, otherwise the recording has no moov atom."""
+    if parts.record_sink is None:
+        return
+
+    location = Path(parts.record_sink.get_property("location"))
+    if tracker.saw_error and not tracker.saw_eos:
+        # A broken pipeline cannot drain; flushing would just block until timeout.
+        print(f"record: pipeline errored, {location} is likely unplayable", file=sys.stderr)
+    elif not tracker.saw_eos:
+        # A keyboard quit stops the loop without EOS, and a paused pipeline
+        # cannot drain, so resume before asking the graph to finish.
+        parts.pipeline.set_state(Gst.State.PLAYING)
+        parts.pipeline.get_state(Gst.SECOND)
+        bus = parts.pipeline.get_bus()
+        bus.remove_signal_watch()
+        parts.pipeline.send_event(Gst.Event.new_eos())
+        msg = bus.timed_pop_filtered(
+            int(timeout_s * Gst.SECOND),
+            Gst.MessageType.EOS | Gst.MessageType.ERROR,
+        )
+        if msg is None:
+            print(f"record: timed out waiting for EOS, {location} may be unplayable", file=sys.stderr)
+        elif msg.type == Gst.MessageType.ERROR:
+            err, dbg = msg.parse_error()
+            print(f"record ERROR: {err}\nDEBUG: {dbg}", file=sys.stderr)
+
+    parts.pipeline.set_state(Gst.State.NULL)
+    if location.exists():
+        print(f"recorded={location} bytes={location.stat().st_size}", flush=True)
+    else:
+        print(f"record: {location} missing", file=sys.stderr)
+
+
 def main():
     args = parse_args()
     stream = resolve_stream_source(args.stream)
@@ -236,6 +295,10 @@ def main():
         args.assessment_batch_size,
     )
 
+    record_path = resolve_record_path(args.record, stream.uri) if args.record is not None else None
+    if record_path:
+        print(f"record={record_path}", flush=True)
+
     # Build once, then attach app-specific probes around the shared pipeline.
     parts = build_pipeline(
         stream,
@@ -244,6 +307,7 @@ def main():
         config,
         assessment_config,
         rtsp_latency_ms=args.rtsp_latency_ms,
+        record_path=record_path,
     )
     limiter = attach_runtime_probes(parts, args, stream)
     if args.debug:
@@ -255,8 +319,10 @@ def main():
         controls.start()
 
     # Run until EOS, error, or a keyboard/UI stop request.
+    tracker = ShutdownTracker()
     bus = parts.pipeline.get_bus()
     bus.add_signal_watch()
+    bus.connect("message", tracker.on_message, None)
     bus.connect("message", on_message, loop)
 
     parts.pipeline.set_state(Gst.State.PLAYING)
@@ -266,6 +332,7 @@ def main():
     finally:
         if controls:
             controls.stop()
+        finish_recording(parts, tracker)
         parts.pipeline.set_state(Gst.State.NULL)
 
 

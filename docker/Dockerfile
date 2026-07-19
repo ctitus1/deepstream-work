@@ -158,7 +158,16 @@ RUN set -eux; \
             || { PY_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
                  cp pyds*.so "${PY_SITE}/"; }; \
     fi; \
-    python3 -c "import pyds; print('pyds OK:', pyds.__file__)"
+    python3 -c "import importlib.util, sys; \
+spec = importlib.util.find_spec('pyds'); \
+sys.exit('pyds did not install') if spec is None else print('pyds installed:', spec.origin)"
+
+# Note: the check above deliberately uses find_spec rather than importing pyds.
+# pyds links against libcuda.so.1, which the NVIDIA container runtime injects at
+# run time and which does not exist during a build, so a real import always
+# fails here even when the install is correct. find_spec confirms the module is
+# present and locatable without dlopening CUDA; the actual import is exercised
+# by the smoke test, which runs with the GPU attached.
 
 USER ${USERNAME}
 

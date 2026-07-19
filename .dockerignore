@@ -1,0 +1,44 @@
+# Keep the build context small. Both images copy only
+# docker/.bashrc.container, so nothing heavy needs to reach the daemon.
+# Without this, every build shipped ~2.6 GB of models, videos and venvs.
+
+.git/
+.venv-yolo/
+.venv/
+venv/
+env/
+
+# Model weights, ONNX graphs and TensorRT engines
+models/
+*.pt
+*.onnx
+*.engine
+*.plan
+*.cache
+
+# User-provided media and run outputs
+streams/
+outputs/
+*.mp4
+*.mkv
+*.avi
+*.h264
+*.h265
+
+# Cloned build dependencies and compiled artifacts
+external/
+lib/
+build/
+dist/
+__pycache__/
+*.pyc
+*.o
+*.so
+
+# Generated DeepStream configs
+configs/generated/
+
+# Logs and editor state
+*.log
+*.tlog
+.vscode/

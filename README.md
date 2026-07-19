@@ -4,7 +4,27 @@ Development container and scripts for running YOLO detections, injury
 assessment, RTSP video input, and ROS Humble publishing through NVIDIA
 DeepStream.
 
-The two normal workflows are:
+The container targets **DeepStream 7.1 by default**. The release is a build
+argument, so 8.0 and 9.0 build from the same Dockerfile:
+
+```bash
+scripts/build.sh                      # DeepStream 7.1
+DS_VERSION=9.0 scripts/build.sh       # DeepStream 9.0
+```
+
+The image is tagged `deepstream-work:<DS_VERSION>`, so several releases can
+coexist. See [docker/README.md](docker/README.md) for what changes per release.
+
+Work in this repo is organized into four areas:
+
+| Area | Directory | What lives there |
+| --- | --- | --- |
+| Runtime pipeline | `src/` | the shared `deepstream_yolo` package and the app entrypoints |
+| Model training | `training/` | dataset prep, fine-tuning, and the handoff into export |
+| Validation | `validation/` | detection accuracy, benchmarking, timestamp diagnostics |
+| Motion tracking | `tracking/` | placeholders for a future custom tracker |
+
+The two normal runtime workflows are:
 
 - Parser app: run `src/parser_app.py` directly with a display window and
   console logs.
@@ -135,8 +155,17 @@ python3 src/parser_app.py --no-assessment
 python3 src/parser_app.py --show-assessed-only
 python3 src/parser_app.py --rtsp-latency-ms 0
 python3 src/parser_app.py --show-gst-scan-warnings
+python3 src/parser_app.py --record
+python3 src/parser_app.py --record outputs/run42.mp4
 python3 src/parser_app.py --help
 ```
+
+`--record` writes the annotated video (detection boxes and assessment text
+burned in) to an mp4. With no path it auto-names one under `outputs/`. The
+recording branch taps the frame after `nvdsosd` and stays on the GPU, so it
+costs a hardware encode rather than a readback. Recording needs a clean
+shutdown to finalize the mp4 container: quit with `q` or Ctrl-C rather than
+killing the process, otherwise the file has no moov atom and will not play.
 
 By default, every display frame is shown; assessment overlay text appears only
 on frames where fresh assessment tensor output is present. Use
@@ -284,6 +313,57 @@ dropped instead of queued, and detection runs on the newest frames available.
 Override with `--rtsp-latency-ms` only if a stream needs extra buffering. RTSP
 streams are paced by the stream clock; late display frames are dropped instead
 of queued.
+
+## Model Training
+
+`training/` covers fine-tuning a detector and handing it to the export path
+this repo already uses. See [training/README.md](training/README.md).
+
+```bash
+python3 training/prepare_dataset.py --format coco \
+  --annotations data/instances.json --images data/images --out datasets/injury
+python3 training/finetune.py --weights yolo11n.pt --data datasets/injury/injury.yaml
+python3 training/export_to_deepstream.py runs/detect/train/weights/best.pt --long-side 640
+```
+
+Training runs in `.venv-yolo` (see `requirements/training.txt`), not the
+DeepStream interpreter. `export_to_deepstream.py` deliberately refuses when a
+fine-tuned model's class count disagrees with `labels/coco_labels.txt`: the
+export script installs the 80-class COCO labels unconditionally, so a custom
+model would otherwise deploy with the wrong labels and a wrong
+`num-detected-classes`.
+
+## Validation and Benchmarking
+
+`validation/` answers three separate questions. See
+[validation/README.md](validation/README.md).
+
+```bash
+python3 validation/smoke_pipeline.py --frames 60          # does the pipeline run at all
+python3 validation/accuracy/dump_detections.py --out dets.json
+python3 validation/accuracy/score_detections.py --detections dets.json --gt gt.json
+python3 validation/benchmark/benchmark_pipeline.py --frames 300
+```
+
+`smoke_pipeline.py` is headless (`display=False`) and bounded, so it works over
+SSH and in CI as a build gate: it fails if the parser library is missing, the
+engine cannot be built, or no frames arrive.
+
+Accuracy numbers are easy to misread. The deployed `nvinfer` thresholds
+(`pre-cluster-threshold=0.25`, `nms-iou-threshold=0.45`) are much stricter than
+the ultralytics `val` defaults (`conf=0.001`, `iou=0.7`), and the pipeline runs
+non-square (for example 640x384) while ultralytics only evaluates square. Both
+gaps make a correctly deployed model look worse than it is; the validation
+README explains how to compare like with like.
+
+## Motion Tracking
+
+`tracking/` is a placeholder work area for a custom motion tracker. Nothing
+there is implemented yet — the Python stubs raise `NotImplementedError` rather
+than return fake results. It records the integration surface: the `NvMOT` entry
+points a low-level tracker library must export, how `nvtracker` loads one via
+`ll-lib-file`, the six tracker configs DeepStream 7.1 ships, and how tracking
+would be scored. See [tracking/README.md](tracking/README.md).
 
 ## Local Artifacts
 

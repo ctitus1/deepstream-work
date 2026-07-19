@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .paths import PROJECT_DIR
+from .paths import PROJECT_DIR, missing_media_message
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,20 @@ class StreamSource:
             return str(self.path)
 
 
+def local_source(raw: str, path: Path) -> StreamSource:
+    """Build a file-backed source, failing early if the media is not here."""
+    if not path.is_file():
+        raise FileNotFoundError(missing_media_message(path))
+
+    return StreamSource(raw=raw, uri=path.resolve().as_uri(), path=path)
+
+
 def resolve_stream_source(stream: str | Path) -> StreamSource:
     raw = str(stream)
     parsed = urlparse(raw)
 
     if parsed.scheme == "file":
-        path = Path(unquote(parsed.path))
-        return StreamSource(raw=raw, uri=path.resolve().as_uri(), path=path)
+        return local_source(raw, Path(unquote(parsed.path)))
 
     if parsed.scheme:
         return StreamSource(raw=raw, uri=raw, path=None)
@@ -42,4 +49,4 @@ def resolve_stream_source(stream: str | Path) -> StreamSource:
     if not path.is_absolute():
         path = PROJECT_DIR / path
 
-    return StreamSource(raw=raw, uri=path.resolve().as_uri(), path=path)
+    return local_source(raw, path)

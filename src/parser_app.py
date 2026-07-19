@@ -256,10 +256,13 @@ def finish_recording(parts, tracker, timeout_s: float = 10.0) -> None:
 
 def main():
     args = parse_args()
-    stream = resolve_stream_source(args.stream)
 
-    # Discover source geometry before creating model-specific DeepStream configs.
+    # Resolve inside the filter's scope: the stderr pump swallows anything still
+    # in flight at exit, so a missing-stream error raised before the filter is
+    # stopped would never reach the terminal.
     try:
+        stream = resolve_stream_source(args.stream)
+        # Discover source geometry before creating model-specific DeepStream configs.
         Gst.init(None)
         src_w, src_h = discover_size(stream.uri)
     finally:

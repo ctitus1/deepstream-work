@@ -75,8 +75,17 @@ clone_deepstream_yolo() {
 }
 
 install_labels() {
+    # The DeepStream-Yolo exporter writes labels.txt from the class names baked
+    # into the checkpoint, so it is the only source that is right for a
+    # fine-tuned model. For a stock COCO checkpoint it is identical to the
+    # checked-in list, which stays the fallback when the exporter emits nothing.
+    if [ -s labels.txt ]; then
+        cp -f labels.txt models/coco_labels.txt
+        return
+    fi
+
     if [ ! -f labels/coco_labels.txt ]; then
-        echo "Missing labels/coco_labels.txt"
+        echo "Missing labels/coco_labels.txt and the exporter produced no labels.txt"
         exit 1
     fi
 
@@ -258,6 +267,8 @@ fi
 
 install_labels
 
+# install_labels has already consumed it; this only clears the stray copy the
+# exporter leaves in the repo root.
 rm -f labels.txt
 
 echo
@@ -291,6 +302,14 @@ ENGINE_ABS="$(absolute_path "$ENGINE")"
 LABELS_ABS="$(absolute_path "models/coco_labels.txt")"
 CUSTOM_LIB_ABS="$(absolute_path "lib/libnvdsinfer_custom_impl_Yolo.so")"
 
+# nvinfer's num-detected-classes has to match the labels just installed, or a
+# fine-tuned model announces a class count its own engine does not produce.
+NUM_CLASSES="$(grep -c '[^[:space:]]' models/coco_labels.txt || true)"
+if [ "$NUM_CLASSES" -lt 1 ]; then
+    echo "No class names in models/coco_labels.txt"
+    exit 1
+fi
+
 cat > "$INFER_CONFIG" <<EOF_INFER
 [property]
 gpu-id=0
@@ -301,7 +320,7 @@ model-engine-file=${ENGINE_ABS}
 labelfile-path=${LABELS_ABS}
 batch-size=1
 network-mode=2
-num-detected-classes=80
+num-detected-classes=${NUM_CLASSES}
 interval=0
 gie-unique-id=1
 process-mode=1
@@ -399,7 +418,7 @@ echo "ONNX:         $ONNX"
 echo "Engine:       $ENGINE"
 echo "Infer config: $INFER_CONFIG"
 echo "App config:   $APP_CONFIG"
-echo "Labels:       models/coco_labels.txt"
+echo "Labels:       models/coco_labels.txt (${NUM_CLASSES} classes)"
 echo
 echo "Run:"
 echo "  deepstream-app -c $APP_CONFIG"

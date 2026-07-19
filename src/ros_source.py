@@ -635,10 +635,13 @@ def print_runtime_info(
 
 def main() -> int:
     args = parse_args()
-    stream = resolve_stream_source(args.stream)
 
-    # Prepare source geometry and model configs before assembling the GStreamer graph.
+    # Resolve inside the filter's scope: the stderr pump swallows anything still
+    # in flight at exit, so a missing-stream error raised before the filter is
+    # stopped would never reach the terminal.
     try:
+        stream = resolve_stream_source(args.stream)
+        # Prepare source geometry and model configs before assembling the graph.
         Gst.init(None)
         src_w, src_h = discover_size(stream.uri)
     finally:

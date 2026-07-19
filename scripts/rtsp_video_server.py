@@ -16,6 +16,7 @@ from deepstream_yolo.gst_warnings import (  # noqa: E402
     maybe_start_gst_scan_warning_filter,
     stop_gst_scan_warning_filter,
 )
+from deepstream_yolo.paths import missing_media_message  # noqa: E402
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
@@ -147,8 +148,8 @@ class LoopingRtspServer:
 def main() -> int:
     args = parse_args()
     video = resolve_video(args.video)
-    if not video.exists():
-        print(f"Missing video: {video}", file=sys.stderr)
+    if not video.is_file():
+        print(missing_media_message(video), file=sys.stderr)
         return 1
 
     warning_filter = maybe_start_gst_scan_warning_filter(sys.argv)

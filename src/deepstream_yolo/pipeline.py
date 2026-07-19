@@ -175,23 +175,67 @@ def recording_branch(pipeline, tee, record_path) -> Gst.Element:
     return sink
 
 
-def on_file_pad_added(_demux, pad, parsers):
+def link_parser_to_decoder(parser, decoder) -> None:
+    """Give the decoder's single static sink pad to the codec actually in use.
+
+    ``nvv4l2decoder`` has one sink pad, so only one of the h264/h265 parser
+    branches can hold it. Linking both up front leaves whichever one loses the
+    race silently unlinked, so this runs from the pad-added callbacks instead,
+    once the source has told us which codec it carries.
+    """
+    sink = decoder.get_static_pad("sink")
+    if sink is None:
+        raise RuntimeError(f"No sink pad on {decoder.get_name()}")
+
+    peer = sink.get_peer()
+    if peer is not None:
+        holder = peer.get_parent_element()
+        if holder is not None and holder.get_name() == parser.get_name():
+            return
+        held_by = holder.get_name() if holder is not None else peer.get_name()
+        raise RuntimeError(
+            f"{decoder.get_name()} sink already linked to {held_by}; "
+            f"cannot also link {parser.get_name()}"
+        )
+
+    if not parser.link(decoder):
+        raise RuntimeError(f"Failed to link {parser.get_name()} to {decoder.get_name()}")
+
+
+def on_file_pad_added(_demux, pad, parsers, decoder):
     caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
 
     if "video/x-h265" in caps:
-        link_dynamic_pad(pad, parsers["h265"].get_static_pad("sink"))
+        codec = "h265"
     elif "video/x-h264" in caps:
-        link_dynamic_pad(pad, parsers["h264"].get_static_pad("sink"))
+        codec = "h264"
+    else:
+        return
+
+    parser = parsers[codec]
+    link_parser_to_decoder(parser, decoder)
+    link_dynamic_pad(pad, parser.get_static_pad("sink"))
 
 
-def on_rtsp_pad_added(_source, pad, depayloaders):
+def on_rtsp_pad_added(_source, pad, depayloaders, parsers=None, decoder=None):
+    """Link the depayloader for the negotiated codec, and its parser if given.
+
+    ``parsers``/``decoder`` are optional because callers that terminate each
+    codec branch in its own sink have no shared decoder pad to contend for.
+    """
     caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
     caps_lower = caps.lower()
 
     if "encoding-name=(string)h265" in caps_lower or "encoding-name=h265" in caps_lower:
-        link_dynamic_pad(pad, depayloaders["h265"].get_static_pad("sink"))
+        codec = "h265"
     elif "encoding-name=(string)h264" in caps_lower or "encoding-name=h264" in caps_lower:
-        link_dynamic_pad(pad, depayloaders["h264"].get_static_pad("sink"))
+        codec = "h264"
+    else:
+        return
+
+    if parsers is not None and decoder is not None:
+        link_parser_to_decoder(parsers[codec], decoder)
+    link_dynamic_pad(pad, depayloaders[codec].get_static_pad("sink"))
 
 
 def on_message(_bus, msg, loop):
@@ -315,20 +359,24 @@ def build_pipeline(
     for elem in elements:
         pipeline.add(elem)
 
+    # The parser-to-decoder link is deferred to the pad-added callbacks: the
+    # decoder has one sink pad, so only the codec the source actually carries
+    # may claim it.
+    parsers = {"h265": h265_parser, "h264": h264_parser}
     if stream.is_rtsp:
-        source.connect("pad-added", on_rtsp_pad_added, {"h265": h265_depay, "h264": h264_depay})
+        source.connect(
+            "pad-added",
+            on_rtsp_pad_added,
+            {"h265": h265_depay, "h264": h264_depay},
+            parsers,
+            decoder,
+        )
         h265_depay.link(h265_parser)
         h264_depay.link(h264_parser)
     else:
         source.link(demux)
-        demux.connect(
-            "pad-added",
-            on_file_pad_added,
-            {"h265": h265_parser, "h264": h264_parser},
-        )
+        demux.connect("pad-added", on_file_pad_added, parsers, decoder)
 
-    h265_parser.link(decoder)
-    h264_parser.link(decoder)
     decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
     raw_appsink = None

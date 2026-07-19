@@ -26,10 +26,31 @@ INJURY_CLASS_COUNTS = {
 }
 
 
+DEFAULT_NUM_DETECTED_CLASSES = 80
+
+
 def ensure_labels_file() -> None:
     LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LABELS_PATH.exists():
+        # scripts/setup_and_export_yolo.sh installs the exported model's own
+        # class names here. Re-copying the checked-in COCO list on every run
+        # would put 80 wrong names back on top of a fine-tuned model.
+        return
     if LABELS_SOURCE_PATH.exists():
         shutil.copy2(LABELS_SOURCE_PATH, LABELS_PATH)
+
+
+def num_detected_classes() -> int:
+    """Class count for nvinfer, read from the labels the export installed.
+
+    Hardcoding 80 makes ``num-detected-classes`` disagree with the engine's
+    real output tensor for any model that is not stock COCO.
+    """
+    if LABELS_PATH.is_file():
+        names = [line for line in LABELS_PATH.read_text().splitlines() if line.strip()]
+        if names:
+            return len(names)
+    return DEFAULT_NUM_DETECTED_CLASSES
 
 
 def write_infer_config(
@@ -53,7 +74,7 @@ model-engine-file={engine_path}
 labelfile-path={LABELS_PATH}
 batch-size=1
 network-mode=2
-num-detected-classes=80
+num-detected-classes={num_detected_classes()}
 interval=0
 gie-unique-id=1
 process-mode=1

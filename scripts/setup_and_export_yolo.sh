@@ -158,9 +158,28 @@ echo "YOLO size:     ${INFER_W}x${INFER_H}"
 
 ensure_export_venv
 
-"$PYTHON_BIN" -m pip install --upgrade 'pip' 'setuptools<82' wheel
+# Retried because torch pulls several 150-500 MB nvidia-*-cu12 wheels whose
+# downloads are intermittently corrupted on some networks; pip surfaces that as
+# a hash mismatch even though nothing here pins hashes. See the longer note in
+# scripts/setup_yolo_export_env.sh.
+pip_install_retry() {
+    local attempt=1
+    while true; do
+        if "$PYTHON_BIN" -m pip install --timeout 60 --retries 5 "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -ge "${PIP_ATTEMPTS:-4}" ]; then
+            echo "pip install failed after ${attempt} attempts: $*" >&2
+            return 1
+        fi
+        echo "pip install attempt ${attempt} failed; retrying..." >&2
+        attempt=$((attempt + 1))
+    done
+}
 
-"$PYTHON_BIN" -m pip install -r requirements/yolo-export.txt
+pip_install_retry --upgrade 'pip' 'setuptools<82' wheel
+
+pip_install_retry -r requirements/yolo-export.txt
 if [ ! -x "$YOLO_BIN" ]; then
     echo "Missing YOLO CLI after dependency install: $YOLO_BIN"
     exit 1

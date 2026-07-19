@@ -4,8 +4,44 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOT_DIR="$(pwd)"
-CUDA_VERSION="${CUDA_VERSION:-13.1}"
+
+# DeepStream-Yolo's Makefile interpolates CUDA_VER straight into
+# /usr/local/cuda-$(CUDA_VER)/{include,lib64}, so it must name a real directory
+# in this image, not just any installed CUDA. Each DeepStream release ships a
+# specific toolkit (see DeepStream-Yolo's README compatibility table).
+detect_cuda_version() {
+    local ds
+    ds="${DS_VERSION:-}"
+    if [ -z "$ds" ] && [ -r /opt/nvidia/deepstream/deepstream/version ]; then
+        ds="$(sed -n 's/^Version:[[:space:]]*//p' /opt/nvidia/deepstream/deepstream/version | head -1)"
+    fi
+
+    case "$ds" in
+        7.1*) echo "12.6" ; return ;;
+        8.0*) echo "12.8" ; return ;;
+        9.0*) echo "13.1" ; return ;;
+    esac
+
+    # Unknown release: prefer whatever /usr/local/cuda resolves to, else the
+    # highest versioned toolkit directory present.
+    local linked
+    linked="$(readlink -f /usr/local/cuda 2>/dev/null || true)"
+    if [ -n "$linked" ] && [ "${linked##*/cuda-}" != "$linked" ]; then
+        echo "${linked##*/cuda-}"
+        return
+    fi
+    ls -d /usr/local/cuda-*/ 2>/dev/null \
+        | sed 's|.*/cuda-||; s|/$||' \
+        | sort -V | tail -1
+}
+
+CUDA_VERSION="${CUDA_VERSION:-$(detect_cuda_version)}"
+if [ -z "$CUDA_VERSION" ]; then
+    echo "Could not determine a CUDA version; set CUDA_VERSION explicitly." >&2
+    exit 1
+fi
 CUDA_MAJOR_MINOR="$(printf '%s\n' "$CUDA_VERSION" | awk -F. '{print $1 "." $2}')"
+echo "Building YOLO parser against CUDA ${CUDA_MAJOR_MINOR}"
 CUDA_PACKAGE_VERSION="${CUDA_MAJOR_MINOR/./-}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-${CUDA_MAJOR_MINOR}}"
 DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"

@@ -1,5 +1,5 @@
 {
-  "name": "DeepStream 9.0 Dev",
+  "name": "DeepStream Dev",
   "dockerComposeFile": "../docker-compose.yml",
   "service": "deepstream-dev",
   "workspaceFolder": "/workspace/deepstream-work",

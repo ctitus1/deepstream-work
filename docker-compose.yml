@@ -2,13 +2,15 @@ services:
   deepstream-dev:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
       args:
+        DS_VERSION: ${DS_VERSION:-7.1}
+        DS_IMAGE_FLAVOR: ${DS_IMAGE_FLAVOR:-samples-multiarch}
         USERNAME: user
         USER_UID: ${HOST_UID:-1000}
         USER_GID: ${HOST_GID:-1000}
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
-    image: deepstream-work:9.0
+    image: deepstream-work:${DS_VERSION:-7.1}
     container_name: deepstream-dev
     hostname: docker
     extra_hosts:
@@ -42,13 +44,15 @@ services:
     profiles: ["ros"]
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
       args:
+        DS_VERSION: ${DS_VERSION:-7.1}
+        DS_IMAGE_FLAVOR: ${DS_IMAGE_FLAVOR:-samples-multiarch}
         USERNAME: user
         USER_UID: ${HOST_UID:-1000}
         USER_GID: ${HOST_GID:-1000}
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
-    image: deepstream-work:9.0
+    image: deepstream-work:${DS_VERSION:-7.1}
     container_name: deepstream-ros-source
     hostname: docker
     extra_hosts:
@@ -84,7 +88,7 @@ services:
     profiles: ["ros"]
     build:
       context: .
-      dockerfile: Dockerfile.ros-humble
+      dockerfile: docker/Dockerfile.ros-humble
       args:
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     image: deepstream-work:ros-humble
@@ -107,7 +111,7 @@ services:
     profiles: ["ros"]
     build:
       context: .
-      dockerfile: Dockerfile.ros-humble
+      dockerfile: docker/Dockerfile.ros-humble
       args:
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     image: deepstream-work:ros-humble

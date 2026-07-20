@@ -96,7 +96,7 @@ def load(run_paths: list[str], labels: list[str]):
     return panels
 
 
-def draw(tile, boxes, label: str, scale_x: float, scale_y: float, tile_h: int) -> None:
+def draw(tile, boxes, label: str, scale_x: float, scale_y: float) -> None:
     for box in boxes:
         x0 = int(round(box["left"] * scale_x))
         y0 = int(round(box["top"] * scale_y))
@@ -111,10 +111,6 @@ def draw(tile, boxes, label: str, scale_x: float, scale_y: float, tile_h: int) -
     cv2.rectangle(tile, (0, 0), (text_w + 28, text_h + 26), LABEL_BG, -1)
     cv2.putText(tile, label, (14, text_h + 12), font, font_scale, LABEL_FG, thickness, cv2.LINE_AA)
 
-    count = f"{len(boxes)} box" + ("" if len(boxes) == 1 else "es")
-    (cw, ch), _ = cv2.getTextSize(count, font, 0.9, 2)
-    cv2.rectangle(tile, (0, tile_h - ch - 22), (cw + 24, tile_h), LABEL_BG, -1)
-    cv2.putText(tile, count, (12, tile_h - 10), font, 0.9, LABEL_FG, 2, cv2.LINE_AA)
 
 
 def main() -> int:
@@ -164,7 +160,7 @@ def main() -> int:
         tiles = []
         for by_index, label in panels:
             tile = small.copy()
-            draw(tile, by_index.get(index, []), label, scale_x, scale_y, tile_h)
+            draw(tile, by_index.get(index, []), label, scale_x, scale_y)
             tiles.append(tile)
         while len(tiles) < rows * cols:
             tiles.append(blank)

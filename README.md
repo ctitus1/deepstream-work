@@ -481,6 +481,36 @@ with brightness divided out, so a target keeps its descriptor walking from sun
 into shade) plus aspect and extent. `--debug` prints the per-frame numbers
 behind every decision.
 
+## Comparing Motion Approaches
+
+Several motion detectors live side by side under
+`src/deepstream_yolo/approaches/`. To see what they each make of a video:
+
+```bash
+scripts/compare_motion.sh streams/other.mp4
+```
+
+Runs every approach over the file and writes a labelled grid to
+`outputs/<video>_comparison.mp4` — one panel per approach, same frame, same
+moment, so the differences are watchable rather than tabulated. Motion only: no
+detector and no assessment run, because this answers "what does each approach
+see", not "which one is right".
+
+```bash
+scripts/compare_motion.sh streams/other.mp4 --start 2160 --frames 150
+scripts/compare_motion.sh --approaches klt_homography,baseline
+```
+
+`--start`/`--frames` cut a segment out of a long video, `--approaches` picks
+which panels appear (two to four), and `--crf` trades file size against
+quality. Each approach's run is cached under `eval/runs/<video>/`, keyed by the
+video's name, so an interrupted comparison resumes and two videos never mix;
+`--force` redoes everything.
+
+For which approach is actually *better* — scored against the detector's own
+boxes rather than eyeballed — see [eval/README.md](eval/README.md) and
+[eval/RESULTS.md](eval/RESULTS.md).
+
 ## Verifying a Run
 
 ```bash

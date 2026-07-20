@@ -33,8 +33,23 @@ Per frame:
   5. Those are clustered by position -- union-find over a uniform grid, since
      sklearn is not in the image. A person's limbs move at different velocities
      but their corners are spatially adjacent, so position is the right key.
-  6. A cluster must be re-found for several consecutive frames before it is
-     reported. Sparse outliers flicker; a walking person does not.
+  6. A cluster must be re-found for several frames, and must have gone
+     somewhere, before it is reported. Sparse outliers flicker in place; a
+     walking person does neither.
+
+On ``streams/lorton-d4-rgb.mp4``, against the baseline it replaces:
+
+    approach          F1     prec   recall  cover  box/f  onstat  onbg   ms
+    klt-homography    0.937  0.936  0.937   0.934  0.65   80      141    8.3
+    baseline          0.422  0.713  0.300   0.297  0.27   18      401    8.3
+
+Recall is the headline -- the mover is found in 94% of the frames it
+appears in rather than 30% -- but background false positives fell as well,
+401 to 141, which is the textureless-region argument above coming true.
+The one axis it loses on is boxes landing on a stationary person, 18 to 80:
+the people the harness calls stationary still shift 1-4 branch px per frame,
+and a method sensitive enough to catch a distant walker will call that
+motion. That is the honest cost of the recall.
 """
 
 from __future__ import annotations
@@ -134,12 +149,12 @@ class Approach:
         "max_level": 3,
         "fb_threshold": 1.0,
         # temporal baseline the camera model is fitted over
-        "lag": 6,
+        "lag": 8,
         # camera model
         "ransac_threshold": 2.0,
         "min_correspondences": 30,
         # what counts as a moving point
-        "residual_floor": 9.0,
+        "residual_floor": 12.0,
         "residual_scale": 8.0,
         # clustering, and the evidence a cluster must carry
         "cluster_radius": 100.0,
@@ -151,7 +166,7 @@ class Approach:
         "min_hits": 3,
         "max_misses": 2,
         "smooth": 0.5,
-        "min_travel": 35.0,
+        "min_travel": 20.0,
         # reported box
         "box_trim": 0.12,
         "box_pad": 10.0,

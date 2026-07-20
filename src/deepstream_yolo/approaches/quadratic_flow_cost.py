@@ -63,6 +63,7 @@ from __future__ import annotations
 import ctypes
 import sys
 
+import cv2
 import numpy as np
 
 NAME = "quadratic-flow-cost"
@@ -330,10 +331,16 @@ def _background_flow(
 # ---------------------------------------------------------------------------
 
 
-def _block_sum(values: np.ndarray, block: int, rows: int, cols: int) -> np.ndarray:
-    """Sum each block x block tile, cropped to exactly rows x cols tiles."""
-    trimmed = values[: rows * block, : cols * block]
-    return trimmed.reshape(rows, block, cols, block).sum(axis=(1, 3))
+def _block_mean(values: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    """Mean of each tile, one tile per flow cell.
+
+    INTER_AREA at an exact integer downscale is precisely the per-tile mean, and
+    it is several times faster than reshaping to (rows, block, cols, block) and
+    reducing. Mean rather than sum only rescales the eigenvalues by a constant,
+    and the ramp below is placed by per-frame percentiles, so the constant
+    cancels.
+    """
+    return cv2.resize(values, (cols, rows), interpolation=cv2.INTER_AREA)
 
 
 def _texture_weight(
@@ -366,13 +373,20 @@ def _texture_weight(
 
     # Rec.601 luma. The flow engine works on luma, so the validity of its
     # result is a property of luma structure, not of colour.
-    rgb = rgba[: rows * block, : cols * block, :3].astype(np.float32)
-    luma = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+    #
+    # Via cv2 rather than numpy throughout, and that is not incidental: the
+    # numpy spelling of this function (astype + weighted sum + np.gradient +
+    # three reshape-reductions over half a million elements) measured 24 ms per
+    # frame, which on its own would have consumed most of the 33 ms budget. The
+    # same arithmetic through cvtColor, Sobel and INTER_AREA is 7 ms.
+    patch = rgba[: rows * block, : cols * block]
+    gray = cv2.cvtColor(np.ascontiguousarray(patch), cv2.COLOR_RGBA2GRAY)
 
-    iy, ix = np.gradient(luma)
-    jxx = _block_sum(ix * ix, block, rows, cols)
-    jyy = _block_sum(iy * iy, block, rows, cols)
-    jxy = _block_sum(ix * iy, block, rows, cols)
+    ix = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    iy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    jxx = _block_mean(ix * ix, rows, cols)
+    jyy = _block_mean(iy * iy, rows, cols)
+    jxy = _block_mean(ix * iy, rows, cols)
 
     # Closed-form eigenvalues of a symmetric 2x2; cheaper and better behaved
     # than np.linalg.eigvalsh over 30k tiny matrices.

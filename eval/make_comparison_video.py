@@ -55,6 +55,9 @@ import cv2
 import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from progress import Progress  # noqa: E402
 
 TILE_W, TILE_H = 960, 540
 BOX_COLOR = (170, 170, 170)
@@ -73,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", type=int, default=0, help="first frame index")
     parser.add_argument("--frames", type=int, default=0, help="0 = to end of video")
+    parser.add_argument("--cols", type=int, default=0, help="force grid width; 0 = auto")
     parser.add_argument("--quality", type=int, default=97, help="JPEG quality on the pipe")
     parser.add_argument(
         "--workers",
@@ -90,8 +94,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def grid_shape(count: int) -> tuple[int, int]:
-    """Rows and columns for ``count`` panels: two columns unless there are two."""
+def grid_shape(count: int, cols: int = 0) -> tuple[int, int]:
+    """Rows and columns for ``count`` panels.
+
+    ``cols`` forces a width -- a 16-panel sweep wants 4x4, not 8x2. Without it,
+    two columns, which is what reads best for a handful of approaches.
+    """
+    if cols > 0:
+        return (count + cols - 1) // cols, cols
     if count <= 1:
         return 1, 1
     if count == 2:
@@ -115,20 +125,28 @@ def load(run_paths: list[str], labels: list[str]):
     return panels
 
 
-def draw(tile, boxes, label: str, scale_x: float, scale_y: float) -> None:
+def draw(tile, boxes, label: str, scale_x: float, scale_y: float, tile_w: int) -> None:
     for box in boxes:
         x0 = int(round(box["left"] * scale_x))
         y0 = int(round(box["top"] * scale_y))
         x1 = int(round((box["left"] + box["width"]) * scale_x))
         y1 = int(round((box["top"] + box["height"]) * scale_y))
-        cv2.rectangle(tile, (x0, y0), (x1, y1), BOX_COLOR, 3)
+        cv2.rectangle(tile, (x0, y0), (x1, y1), BOX_COLOR, max(1, int(round(3 * tile_w / 960.0))))
 
     # Label bar across the top. Double the size that was legible uncompressed --
     # these tiles are a quarter of the frame and get re-encoded once more.
-    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3
+    # Scaled to the tile: a 4x4 sweep has quarter-width tiles, and a label sized
+    # for a 2x2 grid is illegible in one.
+    scale = tile_w / 960.0
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.45, 1.1 * scale)
+    thickness = max(1, int(round(3 * scale)))
     (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-    cv2.rectangle(tile, (0, 0), (text_w + 28, text_h + 26), LABEL_BG, -1)
-    cv2.putText(tile, label, (14, text_h + 12), font, font_scale, LABEL_FG, thickness, cv2.LINE_AA)
+    pad = max(6, int(14 * scale))
+    cv2.rectangle(tile, (0, 0), (text_w + 2 * pad, text_h + 2 * pad), LABEL_BG, -1)
+    cv2.putText(
+        tile, label, (pad, text_h + pad), font, font_scale, LABEL_FG, thickness, cv2.LINE_AA
+    )
 
 
 
@@ -136,7 +154,7 @@ def main() -> int:
     args = parse_args()
     run_paths = [r for r in args.runs.split(",") if r]
     labels = args.labels.split("|") if args.labels else []
-    rows, cols = grid_shape(len(run_paths))
+    rows, cols = grid_shape(len(run_paths), args.cols)
     tile_w, tile_h = args.tile_width, args.tile_height
 
     if args.geometry:
@@ -181,6 +199,7 @@ def main() -> int:
     # completion order is not.
     pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
     pending: list = []
+    bar = Progress(count, f"render {rows}x{cols}")
 
     def drain(limit: int) -> None:
         while len(pending) > limit:
@@ -196,7 +215,7 @@ def main() -> int:
         tiles = []
         for by_index, label in panels:
             tile = small.copy()
-            draw(tile, by_index.get(index, []), label, scale_x, scale_y)
+            draw(tile, by_index.get(index, []), label, scale_x, scale_y, tile_w)
             tiles.append(tile)
         while len(tiles) < rows * cols:
             tiles.append(blank)
@@ -207,10 +226,10 @@ def main() -> int:
         pending.append(pool.submit(encode, grid))
         # Bounded so the queue cannot grow into a copy of the whole video.
         drain(args.workers * 2)
-        if offset % 120 == 0:
-            print(f"  frame {index}", file=sys.stderr, flush=True)
+        bar.update()
 
     drain(0)
+    bar.close()
     pool.shutdown()
     capture.release()
     return 0

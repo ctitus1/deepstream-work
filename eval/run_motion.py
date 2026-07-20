@@ -50,6 +50,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gi  # noqa: E402
 
@@ -69,6 +70,8 @@ import pyds  # noqa: E402
 # MOTION_CV_THREADS on a machine with a different shape.
 cv_threads = int(os.environ.get("MOTION_CV_THREADS", "8"))
 cv2.setNumThreads(cv_threads)
+
+from progress import Progress, frame_count  # noqa: E402
 
 from deepstream_yolo.media import resolve_stream_source  # noqa: E402
 from deepstream_yolo.model_cache import discover_size  # noqa: E402
@@ -113,6 +116,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--grid-size", type=int, default=4, help="nvof block size")
     parser.add_argument("--cfg", default="{}", help="JSON dict passed to the approach")
+    parser.add_argument(
+        "--variants",
+        default="",
+        help='JSON list of {"name","label","cfg"} -- runs one approach under several '
+        "configurations in a single pass over the video",
+    )
     parser.add_argument("--max-frames", type=int, default=0, help="0 = whole video")
     parser.add_argument(
         "--sequential",
@@ -228,10 +237,24 @@ def main() -> int:
     # them together turns N decodes into one. They are independent -- each keeps
     # its own state and never sees another's output -- so this changes cost, not
     # results.
-    names = [n for n in args.approach.split(",") if n]
-    modules = [importlib.import_module(f"deepstream_yolo.approaches.{n}") for n in names]
-    cfg = json.loads(args.cfg)
-    approaches = [m.Approach(dict(cfg)) for m in modules]
+    base_cfg = json.loads(args.cfg)
+    if args.variants:
+        # One module, many configurations -- a parameter sweep. Every variant
+        # sees the same decoded frames, which is the point: differences in the
+        # output are differences in the parameters and nothing else.
+        spec = json.loads(args.variants)
+        module = importlib.import_module(f"deepstream_yolo.approaches.{args.approach}")
+        names = [v["name"] for v in spec]
+        labels = [v.get("label", v["name"]) for v in spec]
+        modules = [module] * len(spec)
+        approaches = [module.Approach({**base_cfg, **v.get("cfg", {})}) for v in spec]
+        configs = [{**base_cfg, **v.get("cfg", {})} for v in spec]
+    else:
+        names = [n for n in args.approach.split(",") if n]
+        modules = [importlib.import_module(f"deepstream_yolo.approaches.{n}") for n in names]
+        labels = [getattr(m, "NAME", n) for m, n in zip(modules, names)]
+        approaches = [m.Approach(dict(base_cfg)) for m in modules]
+        configs = [base_cfg] * len(names)
 
     # The pipeline has to satisfy every approach in the batch, so the inputs are
     # the union: one that wants flow means nvof runs for all of them.
@@ -287,6 +310,10 @@ def main() -> int:
 
     loop = GLib.MainLoop()
 
+    total = args.max_frames or frame_count(stream.path)
+    label = f"{len(approaches)} variant(s)" if len(approaches) > 1 else names[0]
+    bar = Progress(total, label)
+
     def probe(_pad, info, _data):
         buf = info.get_buffer()
         batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
@@ -334,8 +361,7 @@ def main() -> int:
                 frames[slot].append(
                     {"index": index, "pts": int(buf.pts), "boxes": boxes}
                 )
-            if len(frames[0]) % 500 == 0:
-                print(f"  {len(frames[0])} frames", flush=True)
+            bar.update()
             if args.max_frames and len(frames[0]) >= args.max_frames:
                 loop.quit()
                 return Gst.PadProbeReturn.OK
@@ -355,6 +381,7 @@ def main() -> int:
     finally:
         pipeline.set_state(Gst.State.NULL)
 
+    bar.close()
     if pool is not None:
         pool.shutdown()
 
@@ -372,9 +399,9 @@ def main() -> int:
         out.write_text(
             json.dumps(
                 {
-                    "approach": getattr(modules[slot], "NAME", name),
-                    "module": name,
-                    "cfg": cfg,
+                    "approach": labels[slot],
+                    "module": args.approach if args.variants else name,
+                    "cfg": configs[slot],
                     "source": str(stream.path.relative_to(PROJECT_DIR)),
                     "width": src_w,
                     "height": src_h,

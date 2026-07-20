@@ -52,7 +52,7 @@ class Approach:
     def __init__(self, cfg: dict):
         cfg = cfg or {}
         self.model_kind = str(cfg.get("model", "gauss"))
-        self.scale = float(cfg.get("scale", 0.5))
+        self.scale = float(cfg.get("scale", 0.75))
 
         # Registration
         self.max_corners = int(cfg.get("max_corners", 600))
@@ -80,11 +80,11 @@ class Approach:
         # Blobs
         self.open_k = int(cfg.get("open_k", 3))
         self.close_k = int(cfg.get("close_k", 17))
-        self.min_area = int(cfg.get("min_area", 20))
+        self.min_area = int(cfg.get("min_area", 70))
         self.max_area_frac = float(cfg.get("max_area_frac", 0.08))
         self.panic_frac = float(cfg.get("panic_frac", 0.25))
 
-        self.blur = int(cfg.get("blur", 3))
+        self.blur = int(cfg.get("blur", 5))
 
         self.prev_gray: np.ndarray | None = None
         self.mean: np.ndarray | None = None

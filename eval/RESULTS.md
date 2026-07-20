@@ -13,6 +13,7 @@ approach's own median cost per frame; the budget is 33 (30 fps).
 | branch | F1 | prec | recall | box/f | onstat | onbg | ms |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **`feature/klt-homography`** | **0.937** | 0.936 | 0.937 | 0.65 | 80 | 141 | **8.3** |
+| `feature/gradient-diff` | 0.925 | 0.920 | 0.930 | 0.81 | 165 | 185 | 14.8 |
 | `feature/fastmcd` | 0.773 | 0.733 | 0.817 | 0.78 | 140 | 980 | 23.1 |
 | `feature/trajectory-filter` | 0.752 | 0.797 | 0.711 | 0.58 | 40 | 593 | 12.8 |
 | `feature/quadratic-flow-cost` | 0.624 | 0.558 | 0.707 | 0.86 | 56 | 1975 | 23.4 |
@@ -22,8 +23,10 @@ approach's own median cost per frame; the budget is 33 (30 fps).
 Every number is from one scorer run over one `detections.json`, not from the
 branches' own reports.
 
-`feature/bgsub-compensated` and `feature/gradient-diff` are pushed but had not
-produced a scored whole-video run when this was written.
+`feature/bgsub-compensated` is pushed but had not produced a scored whole-video
+run when this was written. Its runs were probably lost: another agent, stopping
+its own eval container, filtered by image ancestor and killed every running
+`deepstream-work:7.1` container, including other agents' in-flight runs.
 
 ## The winner: sparse KLT tracks, homography over a rolling window
 
@@ -70,7 +73,35 @@ loosening three thresholds takes it 0.422 → 0.632 with no code change. Its
 shipped configuration was tuned for per-frame precision and paid recall 0.300
 for it.
 
-## Three negative results worth more than the wins
+**Registration was the whole job; the clever part was dead weight**
+(`gradient-diff`, 0.925 — second place, and its central premise is disproved
+below). Two independent approaches converged on ~0.93 by the same route: track
+sparse features, fit a homography, compare across a multi-frame lag. Whatever
+follows that matters far less than getting it right.
+
+## Four negative results worth more than the wins
+
+**Gradient normalisation makes it worse, monotonically.** `gradient-diff` was
+built to divide the frame difference by the local gradient, on the reasoning
+that misregistration residual is `ΔI ≈ ∇I·ε` and so scales with contrast.
+Holding the flat-region cut fixed and varying only how strongly the gradient
+participates:
+
+| normalisation | F1 | prec | recall |
+| --- | --- | --- | --- |
+| strong | 0.764 | 0.899 | 0.664 |
+| moderate | 0.902 | 0.885 | 0.920 |
+| weak | 0.915 | 0.904 | 0.925 |
+| **off** | **0.925** | 0.920 | 0.930 |
+
+The shape of the loss identifies the error: it costs almost no precision and
+takes *recall* apart, which is a signal attenuator, not a failed filter. The
+derivation treats `∇I` as a property of the static background, but a person is a
+high-contrast object, so `∇I` peaks exactly where the person is — the
+denominator is largest where the numerator is signal. And the artefact it
+corrects for was mostly absent: FB-checked KLT into a MAGSAC homography
+registers this scene well enough that edge residual never dominates. Full price,
+no problem to solve.
 
 **The `nvof` cost plane is the wrong signal.** DeepStream exposes `output-cost`
 and pyds does not bind it, but it is reachable via `pyds.get_ptr` + ctypes.
@@ -93,6 +124,13 @@ affine. It had been paid for by throwing away the frame edge.
 thresholds reaches 0.616 — in 13.7 ms instead of 23.4, with half the errors on
 stationary people. Three principled repairs were worth +0.008.
 
+**Two coupled parameters cannot be swept separately.** `gradient-diff`'s lag `k`
+looked settled at 2 by recall alone, but lag also sets blob size, and blob area
+turned out to be the only feature separating true boxes from false ones (widths,
+heights, aspects and fill ratios all overlap; areas differ 50% at the median).
+Re-optimising the area floor per lag moved the optimum to k=3 and the score from
+0.650 to 0.925. Either parameter swept alone points somewhere wrong.
+
 ## Where the winner still fails
 
 - **`onstat` 80, against the baseline's 18.** The people labelled "stationary"
@@ -106,6 +144,13 @@ stationary people. Three principled repairs were worth +0.008.
   concentrated in the last ~600 frames.
 
 ## Combination: attempted, not concluded
+
+Both leading approaches now fail the same way — on the walker slowing or
+standing still (`gradient-diff` misses frames where the mover travels a median
+1.68 px/frame against 3.82 on hits) and on stationary people swaying. That is the
+honest floor of any motion-only method, and it is why the remaining headroom is
+in a different mechanism — persistence or appearance — rather than a better
+threshold.
 
 `fastmcd` (best recall) feeding `trajectory-filter`'s confirmation (best
 precision) is the combination the results argue for, and

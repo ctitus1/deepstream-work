@@ -52,3 +52,6 @@ env/
 
 # Setup stage stamps (scripts/setup.sh)
 .setup-state/
+
+# Agent worktrees (git metadata, not source)
+.claude/worktrees/

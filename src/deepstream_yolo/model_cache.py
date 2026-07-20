@@ -84,16 +84,28 @@ def read_meta(path: Path) -> dict:
 
 
 def meta_matches(meta: dict, long_side: int, src_w: int, src_h: int) -> bool:
-    requested = meta.get("requested_long_side")
-    if requested is not None and int(requested) != long_side:
+    # read_meta() reports a missing or unparseable file as {}. Every check here
+    # used to be guarded on "present and equal", so an empty meta matched every
+    # resolution. Ctrl-C between copying the ONNX and writing its meta was
+    # enough to leave that state behind, after which the model was a cache hit
+    # for any source and silently reused at the wrong aspect ratio.
+    if not meta:
         return False
 
-    source_width = meta.get("source_width")
-    source_height = meta.get("source_height")
-    if source_width is not None and int(source_width) != src_w:
+    # The policy tag exists so a change to config generation can invalidate
+    # previously cached artifacts. It was written but never compared, so
+    # bumping it invalidated nothing.
+    if meta.get("cache_policy") != CACHE_POLICY:
         return False
-    if source_height is not None and int(source_height) != src_h:
-        return False
+
+    for key, expected in (
+        ("requested_long_side", long_side),
+        ("source_width", src_w),
+        ("source_height", src_h),
+    ):
+        value = meta.get(key)
+        if value is None or int(value) != expected:
+            return False
 
     return True
 

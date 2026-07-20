@@ -30,7 +30,7 @@ from cdcl_umd_msgs.msg import (
 from sensor_msgs.msg import CompressedImage
 from vision_msgs.msg import BoundingBox2D
 
-from deepstream_yolo.frame_wire import recv_frame
+from deepstream_yolo.frame_wire import is_wall_clock_timestamp, recv_frame
 
 DEFAULT_DETECT_ENDPOINT = "0.0.0.0:5610"
 DEFAULT_ASSESS_ENDPOINT = "0.0.0.0:5611"
@@ -224,11 +224,19 @@ class FramePublisherNode(Node):
         return annotations
 
     def stamp(self, metadata: dict):
-        # Source metadata is preferred; node time is only a last-resort fallback.
+        # Source metadata is preferred, but only when it is actually wall clock.
+        # A stream-relative PTS written into a ROS header dates the message to
+        # 1970, which breaks TF lookups, message_filters sync and bag playback.
+        # RTSP hits this routinely: rtspsrc has ntp-sync, but ntp_timestamp is
+        # invalid until the first RTCP sender report, so the opening seconds of
+        # every run would otherwise publish 1970 and then jump ~56 years.
         timestamp_ns = metadata_timestamp_ns(metadata)
-        if timestamp_ns is None:
+        timestamp_source = metadata_timestamp_source(metadata)
+        if timestamp_ns is None or not is_wall_clock_timestamp(timestamp_source):
             self.get_logger().debug(
-                f"metadata timestamp missing; using node clock data_source_id={data_source_id(metadata)}"
+                "metadata timestamp unusable "
+                f"(source={timestamp_source or 'missing'}); using node clock "
+                f"data_source_id={data_source_id(metadata)}"
             )
             return self.get_clock().now().to_msg()
         msg = RosTime()
@@ -263,6 +271,14 @@ def data_source_id(metadata: dict) -> int:
 
     frame_num = int_value(metadata.get("frame"), 0)
     return frame_num % INT32_MAX
+
+
+def metadata_timestamp_source(metadata: dict) -> str | None:
+    for key in ("source_timestamp_source", "timestamp_source"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def metadata_timestamp_ns(metadata: dict) -> int | None:

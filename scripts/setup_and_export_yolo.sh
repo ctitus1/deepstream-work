@@ -13,8 +13,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640
 #   ./scripts/setup_and_export_yolo.sh yolo12x.pt 1920
 #
+# The long edge is rounded UP to the stride, so the result does not preserve
+# the source aspect exactly; nvstreammux letterboxes to make up the difference.
 # For a 1920x1080 stream:
-#   640  -> 640x352
+#   640  -> 640x384
 #   1920 -> 1920x1088
 MODEL_SIZE="${2:-1920}"
 
@@ -290,7 +292,11 @@ for x in m.graph.output:
     print("OUTPUT", x.name, dims)
 PY
 
-rm -f "models/${MODEL_STEM}"*.engine "models/${MODEL_STEM}.onnx"*.engine
+# Only the engine for the artifact being regenerated. A bare
+# "models/${MODEL_STEM}"*.engine also matches the resolution-tagged engines
+# model_cache builds (yolo12x_640_640x384...engine, yolo12x_1280_1280x736...),
+# so alternating --long-side values forced a full TensorRT rebuild every run.
+rm -f "models/${MODEL_STEM}.onnx"*.engine
 
 ENGINE="${ONNX}_b1_gpu0_fp16.engine"
 INFER_CONFIG="${GENERATED_CONFIG_DIR}/config_infer_primary_${MODEL_STEM}.txt"
@@ -372,7 +378,13 @@ batch-size=1
 batched-push-timeout=40000
 width=${INFER_W}
 height=${INFER_H}
-enable-padding=0
+# Letterbox instead of stretching. The model size is the long edge rounded UP
+# to the stride, so it does not keep the source aspect: a 3840x2160 source at
+# long-side 640 gives 640x384 (5:3), not 640x360 (16:9). With padding disabled
+# nvstreammux squeezed the frame ~6.7% vertically before inference, against a
+# model trained on letterboxed images. This matches the Python runtime path,
+# which letterboxes via maintain-aspect-ratio=1/symmetric-padding=1.
+enable-padding=1
 nvbuf-memory-type=0
 live-source=0
 

@@ -3,12 +3,14 @@
 consistency traps that silently break custom-class deployments.
 
 Checks performed:
-  1. The exporter writes correct per-class labels.txt, then install_labels()
-     overwrites models/coco_labels.txt with the 80-class COCO list and the next
-     line runs "rm -f labels.txt". A custom N-class model therefore deploys with
-     COCO names unless labels/coco_labels.txt already holds the trained names.
-  2. num-detected-classes is hardcoded to 80 in both the generated nvinfer
-     config and src/deepstream_yolo/configs.py.
+  1. Label agreement. install_labels() now prefers the exporter's own
+     labels.txt, which carries the class names baked into the checkpoint, and
+     falls back to labels/coco_labels.txt only when the exporter emits nothing.
+     A disagreement between the two is therefore no longer fatal, but it is
+     still worth surfacing: it usually means labels/coco_labels.txt is stale.
+  2. num-detected-classes in the generated nvinfer config must equal the
+     trained class count. configs.py derives it from the installed label file
+     rather than hardcoding 80.
   3. Training imgsz is square; the deployed ONNX shape is static and non-square.
   4. The model stem must match a family the setup script dispatches on.
 """
@@ -129,12 +131,13 @@ def check_labels(names: list[str], labels: list[str]) -> list[tuple[str, str]]:
     if len(labels) != len(names):
         return [
             (
-                "error",
+                "warn",
                 f"Class-count mismatch: model has {len(names)}, {LABELS_SOURCE_PATH} has {len(labels)}.\n"
-                f"    install_labels() copies that file over models/coco_labels.txt and the next line runs\n"
-                "    'rm -f labels.txt', deleting the correct labels the exporter just generated, so this\n"
-                f"    model would deploy with {len(labels)} wrong names.\n"
-                "    Fix with --install-labels (writes the trained names to labels/coco_labels.txt).",
+                "    Not fatal: install_labels() prefers the exporter's labels.txt, so the deployed\n"
+                f"    models/coco_labels.txt will hold the model's own {len(names)} names and\n"
+                "    num-detected-classes will match. It usually means the checked-in list is stale.\n"
+                "    Use --install-labels to also refresh it; the post-export check below confirms\n"
+                "    what actually landed.",
             )
         ]
 

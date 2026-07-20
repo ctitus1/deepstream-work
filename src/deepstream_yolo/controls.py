@@ -5,6 +5,8 @@
 the stream clock and late-frame dropping in the GStreamer pipeline.
 """
 
+import os
+import select
 import sys
 import termios
 import time
@@ -76,10 +78,37 @@ class KeyboardControls:
         if self.old_term is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_term)
 
+    def _read_key(self) -> str:
+        """Read one keypress without blocking the GLib main loop.
+
+        Arrow keys arrive as a three-byte escape sequence, but a lone Escape is
+        just the one byte. Blocking for the missing two froze the main loop
+        indefinitely, which also stopped bus dispatch: q, EOS and error handling
+        all became unresponsive. Reading the raw fd also avoids stranding bytes
+        in sys.stdin's buffer, which the fd-level io_add_watch cannot see.
+        """
+        fd = sys.stdin.fileno()
+        try:
+            key = os.read(fd, 1).decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+        if key != "\x1b":
+            return key
+
+        while len(key) < 3 and select.select([fd], [], [], 0.02)[0]:
+            try:
+                chunk = os.read(fd, 3 - len(key)).decode("utf-8", "replace")
+            except OSError:
+                break
+            if not chunk:
+                break
+            key += chunk
+
+        return key
+
     def on_key(self, _source, _condition):
-        key = sys.stdin.read(1)
-        if key == "\x1b":
-            key += sys.stdin.read(2)
+        key = self._read_key()
 
         if key == "q":
             self.loop.quit()

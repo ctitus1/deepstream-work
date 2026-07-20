@@ -8,6 +8,13 @@ from gi.repository import Gst
 import pyds
 
 
+# Frames that never reach the sink are never completed, so their entries would
+# otherwise accumulate for the life of the process. That is reachable in normal
+# operation: the RTSP display queue is leaky, and --show-assessed-only drops
+# frames at the SGIE source pad.
+MAX_PENDING_FRAMES = 512
+
+
 def compute_fps(seconds: float) -> float:
     if seconds <= 0:
         return 0.0
@@ -49,12 +56,23 @@ class TimeLog:
                     self.times.setdefault(int(frame_meta.frame_num), {})[stage] = now
                     frame_list = frame_list.next
 
+                self._trim()
+
             if stage == "sink":
                 self._print_timing(now)
 
             return Gst.PadProbeReturn.OK
 
         return _probe
+
+    def _trim(self) -> None:
+        # Frame numbers increase, so the lowest pending entries are the ones
+        # that were dropped upstream and will never complete.
+        excess = len(self.times) - MAX_PENDING_FRAMES
+        if excess <= 0:
+            return
+        for frame_num in sorted(self.times)[:excess]:
+            del self.times[frame_num]
 
     def _print_timing(self, now: float) -> None:
         if now - self.last_timing_time < self.timing_interval:
@@ -85,6 +103,14 @@ class TimeLog:
                     }
                 )
                 del self.times[frame_num]
+
+        if not rows:
+            # No frame completed the full mux..sink path in this window.
+            # avg_seconds() returns 0.0 for an empty set, so printing anyway
+            # emitted a plausible-looking "detect=0.00ms detect_fps=0.00" line
+            # that reads as a measurement rather than an absence of data.
+            self.last_timing_time = now
+            return
 
         def avg_seconds(name: str) -> float:
             values = [row[name] for row in rows if name in row]

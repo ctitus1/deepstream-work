@@ -8,7 +8,6 @@ TARGETS=(
   "configs/generated"
   "external"
   "lib"
-  "outputs"
   "bus.jpg"
   "labels.txt"
   "yolo12n.pt"
@@ -16,6 +15,15 @@ TARGETS=(
   "yolo12x.pt"
   "yolo26n.pt"
 )
+
+# outputs/ mixes generated run output with checked-in diagram sources, which
+# .gitignore deliberately whitelists (!outputs/diagrams/). Removing the whole
+# directory deleted tracked files, so queue its generated entries individually.
+if [ -d outputs ]; then
+  while IFS= read -r out_entry; do
+    TARGETS+=("$out_entry")
+  done < <(find outputs -mindepth 1 -maxdepth 1 -not -name diagrams)
+fi
 
 while IFS= read -r cache_dir; do
   TARGETS+=("$cache_dir")
@@ -72,9 +80,22 @@ if [ "$FORCE" -ne 1 ]; then
 fi
 
 for target in "${TARGETS[@]}"; do
-  if [ -e "$target" ]; then
-    rm -rf "$target"
+  if [ ! -e "$target" ]; then
+    continue
   fi
+
+  # Cleanup only ever removes generated artifacts. Anything git tracks is by
+  # definition source, so refuse rather than delete it. .gitkeep placeholders
+  # are excepted: they only mark otherwise-empty generated directories, and are
+  # recreated below.
+  tracked="$(git ls-files -- "$target" 2>/dev/null | grep -Ev '(^|/)\.gitkeep$' || true)"
+  if [ -n "$tracked" ]; then
+    echo "Refusing to remove $target: it contains git-tracked files:"
+    printf '  %s\n' $tracked
+    continue
+  fi
+
+  rm -rf "$target"
 done
 
 mkdir -p models configs/generated

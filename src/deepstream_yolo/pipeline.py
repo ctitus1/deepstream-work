@@ -77,7 +77,18 @@ def set_property_if_present(elem, name: str, value) -> None:
 def link_dynamic_pad(pad, sink) -> None:
     if sink.is_linked():
         return
-    pad.link(sink)
+    # Runs inside a pad-added callback, where raising would unwind into
+    # GStreamer's C code, so report instead of throwing. Discarding this result
+    # left the branch unlinked and the pipeline silently producing no frames.
+    result = pad.link(sink)
+    if result != Gst.PadLinkReturn.OK:
+        owner = sink.get_parent_element()
+        target = owner.get_name() if owner is not None else sink.get_name()
+        print(
+            f"ERROR: failed to link {pad.get_name()} to {target}: {result}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def link_tee_to_queue(tee, queue) -> None:

@@ -45,7 +45,7 @@ from deepstream_yolo.assessment_runtime import (
     label_log_text,
 )
 from deepstream_yolo.detection_overlay import PERSON_CLASS_ID, bbox_probe, get_detection_id
-from deepstream_yolo.frame_wire import send_frame
+from deepstream_yolo.frame_wire import is_wall_clock_timestamp, send_frame
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
 from deepstream_yolo.paths import DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
@@ -162,7 +162,10 @@ class FrameLog:
             "source_timestamp_ns": self.timestamp,
             "source_timestamp": format_timestamp(self.timestamp_source, self.timestamp),
             "source_timestamp_source": self.timestamp_source,
-            "timestamp_is_source": True,
+            # Whether source_timestamp_ns is real wall clock. buf_pts/pts are
+            # stream-relative, so claiming they are authoritative made the
+            # bridge stamp messages at the epoch.
+            "timestamp_is_source": is_wall_clock_timestamp(self.timestamp_source),
             "timing": list(self.timing_fields),
             "rows": self.rows,
             "objects": list(self.objects),

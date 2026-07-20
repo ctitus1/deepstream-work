@@ -1,74 +1,92 @@
-"""Homography registration + gradient-normalised three-frame differencing.
+"""Homography registration + three-frame differencing, with the gradient
+normalisation it was named for measured and switched off.
 
-The premise is a claim about what the baseline's false positives actually are.
-They are diffuse structures hugging high-contrast edges in a scene where
-nothing is moving, and that is the signature of sub-pixel *misregistration*,
-not of sensor noise. If the background model leaves a residual alignment error
-of ``eps`` pixels, the apparent intensity change is
+The premise. The baseline's remaining false positives are diffuse structures
+hugging high-contrast edges in a scene where nothing is moving, and that is the
+signature of sub-pixel *misregistration* rather than noise. If the background
+model leaves a residual alignment error of ``eps`` pixels, the apparent
+intensity change is
 
     dI(x) ~= grad I(x) . eps
 
--- proportional to the local image gradient. A high-contrast edge therefore
-produces a large residual for arbitrarily small ``eps``, so any detector that
-thresholds a raw frame difference lights up on edges first, and the threshold
-that finally silences the edges is far above what a real target needs.
-
-So divide by the gradient::
+-- proportional to the local image gradient, so a sharp edge produces a large
+residual for arbitrarily small ``eps`` and any detector thresholding a raw
+difference lights up on edges first. The fix follows immediately: divide by the
+gradient,
 
     S(x) = D(x) / (|grad I_N(x)| + |grad I_warp(x)| + c)
 
-The edge term is now bounded by ``eps`` itself -- a constant, independent of
-contrast -- while a genuinely displaced object produces a difference set by its
-contrast against the background it uncovered, which has nothing to do with the
-static scene's local gradient there. A contrast-dependent false-positive rate
-becomes a uniform one, thresholdable with a single global number. It is also
-intrinsically safe in textureless regions: where ``|grad I| ~= 0`` there is no
-signal and no noise, and ``c`` alone sets the scale.
+which bounds the edge term by ``eps`` itself -- a constant, independent of
+contrast -- turning a contrast-dependent false-positive rate into a uniform one
+that a single global number can threshold.
 
-Mechanically:
+The premise is sound and it is also, on this footage, wrong. Holding the
+flat-region behaviour fixed at an effective cut of 36 intensity units and
+varying only how strongly the gradient participates in the denominator, over
+the whole 5361-frame video:
 
-  1. ``goodFeaturesToTrack`` + pyramidal Lucas-Kanade, run forward and backward,
-     keeping only points whose round trip closes to under half a pixel. Points
-     are tracked *continuously* and their positions kept in a ring, so the
-     correspondence between frame N and frame N-L is read straight out of the
-     trace rather than composed from L pairwise homographies. Composition would
-     accumulate exactly the sub-pixel drift this approach exists to avoid.
-  2. ``findHomography`` with MAGSAC at a 1.5 px reprojection threshold. The
-     threshold is not a free parameter: at 960x540 the walker moves ~2.5 px per
-     frame, so a threshold much above 2 px admits the target as a background
-     inlier and the homography partially explains it away.
-  3. Warp, difference, normalise by the gradient, threshold ``S`` rather than
-     ``D``.
-  4. Two lags, not one. A two-frame difference fires at both the old and the new
-     position of the object. Differencing frame N against N-k and against N-2k
-     and intersecting the two leaves only the position at N, because that is the
-     only place both fire. This is the three-frame trick rearranged to be
-     causal: the textbook form brackets the current frame and needs a frame of
-     look-ahead, and a lagged box is a box on the wrong frame as far as the
-     scorer is concerned.
-  5. Morphological clean, connected components, boxes in source pixels.
+    c=22.5 t=1.6   strong      F1 0.764   prec 0.899   recall 0.664
+    c=45   t=0.8   moderate    F1 0.902   prec 0.885   recall 0.920
+    c=80   t=0.45  weak        F1 0.915   prec 0.904   recall 0.925
+    none   |D|>36  off         F1 0.925   prec 0.920   recall 0.930
 
-``k`` is the parameter that matters most, and measurement moved it twice. The
-walker is 63x110 px at branch resolution and moves ~3 px/frame relative to the
-registered background, so at k=1 the difference is a three-pixel rim around a
-sixty-three-pixel body: recall 0.508, the detector being asked to find a target
-by its outline. k=2 is enough to saturate recall at 0.957 and every larger lag
-holds it there.
+Monotone, and the direction is the interesting part: normalisation costs almost
+nothing in precision and takes recall apart. That is not what a failed
+false-positive filter looks like, it is what a signal attenuator looks like,
+and the reason is in the premise's one unstated assumption. The derivation
+treats ``grad I`` as a property of the static background, so that dividing by
+it removes a background artefact. But a person is a high-contrast object, and
+``grad I_N`` is largest precisely where the person now stands. The denominator
+is therefore biggest exactly where the numerator is signal, and the operation
+divides the target away along with the edges.
 
-Which makes ``k`` look settled at 2, and it is not. Lag also decides how big
-the blob is, and blob size is the only thing that separates a real target from
-a false positive -- their widths, heights, aspects and fill ratios all overlap,
-their areas do not. A longer lag uncovers more background, so it grows the true
-blobs faster than the false ones, and the area filter that follows cuts deeper
-for the same recall. At the area threshold each lag prefers, k=1 tops out at
-0.480, k=2 at 0.701, k=3 at 0.720, k=4 at 0.718, k=6 at 0.680. The two
-parameters have to be chosen together; either one alone points somewhere
-misleading.
+The other half of the answer is that the artefact being corrected for is not
+there to correct. Sub-pixel misregistration is what happens when alignment is
+mediocre; forward-backward-filtered KLT into a MAGSAC homography aligns this
+scene well enough that the edge residual never dominates, so normalisation was
+paying full price for a problem this registration does not have.
+
+So the pipeline is kept and the division is not. ``normalise: true`` restores
+it, because the argument for it is a good one and a scene with weaker
+registration or lower-contrast targets could well invert this result.
+
+What is actually doing the work, in order of how much:
+
+  1. **Registration.** ``goodFeaturesToTrack`` + pyramidal Lucas-Kanade run
+     forward and backward, keeping only points whose round trip closes to under
+     half a pixel, into ``findHomography`` with MAGSAC at a 1.5 px reprojection
+     threshold. That threshold is not free: the walker moves ~3 px/frame
+     relative to the background at 960x540, so a threshold much above 2 px
+     admits the target as a background inlier and the homography explains part
+     of it away. Points are tracked *continuously* and their positions kept in
+     a ring, so the correspondence between frame N and N-L is read straight out
+     of the trace rather than composed from L pairwise homographies --
+     composition accumulates exactly the drift that would put the edge artefact
+     back.
+  2. **Two lags, not one, and causal.** A two-frame difference fires at both
+     the old and the new position of the object. Differencing frame N against
+     N-k and against N-2k and intersecting leaves the position the two agree
+     on, which is the current one. The textbook three-frame form brackets the
+     current frame and needs look-ahead; a lagged box is a box on the wrong
+     frame as far as the scorer is concerned, so it is rearranged backwards.
+  3. **Lag and area floor together.** Recall is 0.508 at k=1 -- a body 63 px
+     wide moving 3 px/frame offers a three-pixel rim to difference -- and
+     saturates at 0.957 from k=2 on. On recall alone k=2 is the answer. But lag
+     also sets blob size, and blob area is the only feature separating a true
+     box from a false one; their widths, heights, aspects and fill ratios all
+     overlap. A longer lag grows true blobs faster than false ones, so the area
+     floor cuts deeper, and at each lag's preferred floor k=3 wins. Choosing
+     either parameter alone points somewhere misleading.
+  4. **Closing before labelling.** The intersection leaves a target as leading
+     edge, trailing edge and whatever body texture differed between -- three or
+     four fragments, individually under the area floor, collectively three
+     false positives instead of one hit. An 11 px closing makes them one
+     component.
 
 Known limit: a homography is exact only for a planar scene, so tall structures
-at low altitude keep a residual parallax that gradient normalisation does not
-remove -- it is real image motion, not misregistration. ``debug`` reports the
-median residual by image region so that can be seen rather than guessed at.
+at low altitude keep a residual parallax that no amount of thresholding
+distinguishes from a target, because it is real image motion. ``debug`` reports
+the median residual by image region so that can be seen rather than guessed at.
 """
 
 from __future__ import annotations
@@ -110,19 +128,16 @@ class Approach:
         self.ransac_px = float(cfg.get("ransac_px", 1.5))
         self.min_inliers = int(cfg.get("min_inliers", 60))
 
-        # Normalised significance.
+        # Deciding what counts as a difference.
         self.blur = int(cfg.get("blur", 3))  # pre-difference smoothing, 0 = off
-        # ``c`` is nominally the sensor noise sigma, and treating it as only
-        # that is what a first pass gets wrong. It is the floor of the
-        # denominator, so it is what decides the verdict everywhere the
-        # gradient is small -- and a low-texture region is exactly where a
-        # small honest residual divides into a large score. Measured on this
-        # footage the false positives cluster on the right of the frame, which
-        # the residual-by-region log shows is the *least* textured part of it,
-        # not the most. Raising c from 4 to 10 cut background false positives
-        # by 43% for 3 points of recall.
-        self.c = float(cfg.get("c", 10.0))  # denominator floor, intensity units
-        self.threshold = float(cfg.get("threshold", 1.2))
+        # Gradient normalisation, off by default because it was measured to
+        # cost F1 rather than earn it -- see the module docstring. ``c`` is the
+        # denominator floor and ``threshold`` the cut on S = D / (2|grad I|+c);
+        # ``level`` is the cut on the raw difference when normalisation is off.
+        self.normalise = bool(cfg.get("normalise", False))
+        self.c = float(cfg.get("c", 45.0))
+        self.threshold = float(cfg.get("threshold", 0.8))
+        self.level = float(cfg.get("level", 36.0))
 
         # Post-processing.
         self.open_px = int(cfg.get("open_px", 3))
@@ -254,9 +269,12 @@ class Approach:
 
         # Sobel scaled by 1/4 so the magnitude is a per-pixel intensity slope,
         # which makes S read directly as "equivalent registration error in px".
-        gx = cv2.Sobel(grayf, cv2.CV_32F, 1, 0, ksize=3, scale=0.25)
-        gy = cv2.Sobel(grayf, cv2.CV_32F, 0, 1, ksize=3, scale=0.25)
-        gmag = cv2.magnitude(gx, gy)
+        if self.normalise:
+            gx = cv2.Sobel(grayf, cv2.CV_32F, 1, 0, ksize=3, scale=0.25)
+            gy = cv2.Sobel(grayf, cv2.CV_32F, 0, 1, ksize=3, scale=0.25)
+            gmag = cv2.magnitude(gx, gy)
+        else:
+            gmag = None
 
         h, w = gray.shape[:2]
 
@@ -309,11 +327,13 @@ class Approach:
         for lag, hom in homographies.items():
             ref_gray, ref_gmag = self.ring[-1 - lag]
             warp_gray = cv2.warpPerspective(ref_gray, hom, (w, h), flags=cv2.INTER_LINEAR)
-            warp_gmag = cv2.warpPerspective(ref_gmag, hom, (w, h), flags=cv2.INTER_LINEAR)
             diff = cv2.absdiff(grayf, warp_gray)
-            denom = cv2.add(cv2.add(gmag, warp_gmag), self.c)
-            sig = cv2.divide(diff, denom)
-            hit = (sig > self.threshold).astype(np.uint8)
+            if self.normalise:
+                warp_gmag = cv2.warpPerspective(ref_gmag, hom, (w, h), flags=cv2.INTER_LINEAR)
+                sig = cv2.divide(diff, cv2.add(cv2.add(gmag, warp_gmag), self.c))
+                hit = (sig > self.threshold).astype(np.uint8)
+            else:
+                hit = (diff > self.level).astype(np.uint8)
             accept = hit if accept is None else cv2.bitwise_and(accept, hit)
             if self.debug:
                 residuals.append(diff)

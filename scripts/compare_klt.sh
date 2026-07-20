@@ -58,8 +58,8 @@ false positives.
   --height N          Branch resolution height. Default: 540
   --start N           First frame to render. Default: 0
   --frames N          Frames to render. Default: 0 (to the end)
-  --tile-width N      Panel width. Default: 480 (4 across = 1920)
-  --tile-height N     Panel height. Default: 270
+  --tile-width N      Panel width. Default: 960 alone, 480 in a sweep
+  --tile-height N     Panel height. Default: follows the source aspect ratio
   --crf N             x264 quality, lower is better. Default: 20
   --out PATH          Output video. Default names itself after what it swept.
   --force             Re-run variants that are already cached.
@@ -74,22 +74,24 @@ EOF
 }
 
 VIDEO=""
+# A sweep only happens if one is asked for; see below.
+SWEEP=0
 PARAM_A="lag";            VALUES_A="2,4,8,16"
 PARAM_B="residual_floor"; VALUES_B="24,12,6,3"
 EXTRA_CFG="{}"
 WIDTH=960; HEIGHT=540
 START=0; FRAMES=0
-TILE_W=480; TILE_H=270
+TILE_W=0; TILE_H=0
 CRF=28
 OUT=""
 FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --param-a)     PARAM_A="$2"; shift 2 ;;
-        --values-a)    VALUES_A="$2"; shift 2 ;;
-        --param-b)     PARAM_B="$2"; shift 2 ;;
-        --values-b)    VALUES_B="$2"; shift 2 ;;
+        --param-a)     PARAM_A="$2"; SWEEP=1; shift 2 ;;
+        --values-a)    VALUES_A="$2"; SWEEP=1; shift 2 ;;
+        --param-b)     PARAM_B="$2"; SWEEP=1; shift 2 ;;
+        --values-b)    VALUES_B="$2"; SWEEP=1; shift 2 ;;
         --cfg)         EXTRA_CFG="$2"; shift 2 ;;
         --width)       WIDTH="$2"; shift 2 ;;
         --height)      HEIGHT="$2"; shift 2 ;;
@@ -116,10 +118,34 @@ VIDEO="$(project_relative "${VIDEO:-$(default_media)}")"
 streams/ holds: $(ls streams/ 2>/dev/null | tr '\n' ' ')"
 
 SLUG="$(basename "${VIDEO%.*}")"
-SWEEP="${PARAM_A}-${PARAM_B}"
-RUN_DIR="eval/runs/${SLUG}/klt-${SWEEP}"
-OUT="${OUT:-outputs/${SLUG}_klt_${SWEEP}.mp4}"
+SWEEP_TAG="${PARAM_A}-${PARAM_B}"
+RUN_DIR="eval/runs/${SLUG}/klt-${SWEEP_TAG}"
+if [ "$SWEEP" -eq 0 ]; then
+    OUT="${OUT:-outputs/${SLUG}_klt.mp4}"
+else
+    OUT="${OUT:-outputs/${SLUG}_klt_${SWEEP_TAG}.mp4}"
+fi
+
+# Panels default to 960 wide alone and 480 in a sweep, with the height
+# following the source so a 5:4 thermal frame is not squeezed into a 16:9
+# tile. Rounded even, as encoders prefer.
+if [ "$TILE_W" -eq 0 ] || [ "$TILE_H" -eq 0 ]; then
+    SRC_WH="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+        -of csv=p=0 "$VIDEO" | head -1)"
+    SRC_W="${SRC_WH%%,*}"; SRC_H="${SRC_WH##*,}"
+    [ "$SWEEP" -eq 0 ] && BASE_W=960 || BASE_W=480
+    [ "$TILE_W" -eq 0 ] && TILE_W="$BASE_W"
+    [ "$TILE_H" -eq 0 ] && TILE_H="$(( ((TILE_W * SRC_H / SRC_W) + 1) / 2 * 2 ))"
+fi
 mkdir -p "$RUN_DIR" "$(dirname "$OUT")"
+
+# No sweep: collapse to one cell at the approach defaults. The machinery is
+# built around varying two parameters, so they are named but set to the
+# values they already have.
+if [ "$SWEEP" -eq 0 ]; then
+    PARAM_A="lag_s";          VALUES_A="0.2667"
+    PARAM_B="residual_floor"; VALUES_B="12"
+fi
 
 # Variant list, and the run files in the same order, so the grid reads
 # left-to-right as B varies and top-to-bottom as A varies.

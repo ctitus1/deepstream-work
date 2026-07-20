@@ -151,7 +151,11 @@ class Approach:
         "max_level": 3,
         "fb_threshold": 1.0,
         # temporal baseline the camera model is fitted over, in SECONDS
-        "lag_s": 0.2667,
+        "lag_s": 0.2,
+        # Explicit frame count, overriding lag_s when non-zero. 0 means "use
+        # the seconds value". Kept so a sweep can pin frames directly, and
+        # because a bare `lag` in a config should not be silently ignored.
+        "lag": 0,
         # camera model
         "ransac_threshold": 2.0,
         "min_correspondences": 30,
@@ -181,6 +185,7 @@ class Approach:
     }
 
     _INTS = (
+        "lag",
         "max_corners",
         "block_size",
         "max_level",
@@ -370,7 +375,7 @@ class Approach:
     REFERENCE_FPS = 30.0
     # (seconds-valued name, frames-valued attribute, minimum frames)
     _DURATIONS = (
-        ("lag_s", "lag", 1),
+        # lag is not here: it doubles as an explicit override, see below.
         ("refresh_every_s", "refresh_every", 1),
         ("min_hits_s", "min_hits", 1),
         ("max_misses_s", "max_misses", 0),
@@ -383,6 +388,8 @@ class Approach:
 
     def _calibrate_time(self, ctx) -> None:
         fps = float(getattr(ctx, "fps", 0.0) or self.REFERENCE_FPS)
+        # An explicit frame count wins; otherwise convert the seconds value.
+        self.lag = int(self.lag) or max(1, int(round(float(self.lag_s) * fps)))
         for seconds_name, frames_name, floor in self._DURATIONS:
             frames = int(round(float(getattr(self, seconds_name)) * fps))
             setattr(self, frames_name, max(floor, frames))

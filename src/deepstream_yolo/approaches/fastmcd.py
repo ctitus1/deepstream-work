@@ -92,6 +92,13 @@ class Approach:
         self.dilate = int(c.get("dilate", 3))
         self.min_area = int(c.get("min_area", 48))
         self.merge_gap = int(c.get("merge_gap", 16))
+        # Applied after merging, where the fragments of one target have been
+        # put back together. Measured on this footage: boxes that land on the
+        # mover have a median area of 706 branch px, boxes that land on a
+        # stationary person 121 and boxes that land on nothing 241. A floor
+        # here is the single most effective filter available, and it is a
+        # statement about how big a person is, not a cap on box count.
+        self.min_box_area = int(c.get("min_box_area", 300))
 
         self.mean: np.ndarray | None = None
         self.var: np.ndarray | None = None
@@ -374,7 +381,7 @@ class Approach:
                 continue
             raw.append([int(x), int(y), int(x + bw), int(y + bh), int(area)])
 
-        merged = _merge(raw, self.merge_gap)
+        merged = [m for m in _merge(raw, self.merge_gap) if m[4] >= self.min_box_area]
 
         sx = ctx.src_w / float(ctx.width)
         sy = ctx.src_h / float(ctx.height)

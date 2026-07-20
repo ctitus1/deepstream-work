@@ -30,9 +30,10 @@ from deepstream_yolo.assessment_runtime import AssessmentReporter, AssessmentTim
 from deepstream_yolo.controls import KeyboardControls, RateLimiter
 from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
-from deepstream_yolo.paths import DEFAULT_STREAM
+from deepstream_yolo.paths import DEFAULT_ASSESSMENT_MODEL, DEFAULT_MODEL, DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
 from deepstream_yolo.recording import resolve_record_path
+from deepstream_yolo.shutdown import install_shutdown_handlers
 from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 from deepstream_yolo.timing import TimeLog
 
@@ -45,7 +46,7 @@ class RuntimeArgumentParser(argparse.ArgumentParser):
 
 def parse_args() -> argparse.Namespace:
     parser = RuntimeArgumentParser()
-    parser.add_argument("--model", default="yolo12x-custom.pt")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable injury assessment.",
     )
-    parser.add_argument("--assessment-model", default="models/injury.pt")
+    parser.add_argument("--assessment-model", default=DEFAULT_ASSESSMENT_MODEL)
     parser.add_argument("--assessment-batch-size", type=int, default=8)
     parser.add_argument(
         "--assessment-log-interval",
@@ -317,6 +318,9 @@ def main():
         attach_debug_probes(parts)
 
     loop = GLib.MainLoop()
+    # Makes SIGTERM/SIGHUP take the same clean exit as Ctrl-C, so `docker stop`
+    # and a closed terminal still finalize an in-progress recording.
+    install_shutdown_handlers(loop)
     controls = KeyboardControls(parts.pipeline, loop, limiter) if sys.stdin.isatty() else None
     if controls:
         controls.start()

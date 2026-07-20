@@ -50,5 +50,8 @@ dist/
 venv/
 env/
 
+# Setup stage stamps (scripts/setup.sh)
+.setup-state/
+
 # VS Code local-only files
 .vscode/*.log

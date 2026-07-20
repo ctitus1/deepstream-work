@@ -36,6 +36,7 @@ from deepstream_yolo.assessment_runtime import frame_timestamp  # noqa: E402
 from deepstream_yolo.detection_overlay import bbox_probe, get_detection_id  # noqa: E402
 from deepstream_yolo.model_cache import discover_size, ensure_model  # noqa: E402
 from deepstream_yolo.paths import (  # noqa: E402
+    DEFAULT_MODEL,
     DEFAULT_STREAM,
     LABELS_PATH,
     LABELS_SOURCE_PATH,
@@ -247,7 +248,7 @@ def parse_class_ids(text: str) -> set | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dump DeepStream detections to COCO JSON.")
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
-    parser.add_argument("--model", default="yolo12x-custom.pt")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument(
         "--conf",

@@ -8,7 +8,7 @@ against COCO ground truth with pycocotools.
 ```bash
 # rung 3: what the deployed pipeline actually detects
 python3 validation/accuracy/dump_detections.py \
-  --stream streams/dtc-d4-trimmed.mp4 \
+  --stream streams/my-video.mp4 \
   --output outputs/validation/detections.json
 
 # score it (pycocotools lives in .venv-yolo, not the system interpreter)

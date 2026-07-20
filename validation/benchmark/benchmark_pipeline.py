@@ -32,7 +32,12 @@ from gi.repository import GLib, Gst  # noqa: E402
 from deepstream_yolo.assessment_runtime import AssessmentTiming, assessment_probe  # noqa: E402
 from deepstream_yolo.detection_overlay import bbox_probe  # noqa: E402
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model  # noqa: E402
-from deepstream_yolo.paths import DEFAULT_STREAM, resolve_project_path  # noqa: E402
+from deepstream_yolo.paths import (  # noqa: E402
+    DEFAULT_ASSESSMENT_MODEL,
+    DEFAULT_MODEL,
+    DEFAULT_STREAM,
+    resolve_project_path,
+)
 from deepstream_yolo.pipeline import build_pipeline, on_message  # noqa: E402
 from deepstream_yolo.stream_source import resolve_stream_source  # noqa: E402
 from deepstream_yolo.timing import TimeLog  # noqa: E402
@@ -222,13 +227,13 @@ def format_distribution(name: str, stats: dict) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark DeepStream FPS and per-stage latency.")
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
-    parser.add_argument("--model", default="yolo12x-custom.pt")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--duration", type=float, default=30.0, help="Seconds to run; 0 runs until EOS.")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N sink frames; 0 disables.")
     parser.add_argument("--warmup-frames", type=int, default=30, help="Frames dropped before measuring.")
-    parser.add_argument("--assessment-model", default="models/injury.pt")
+    parser.add_argument("--assessment-model", default=DEFAULT_ASSESSMENT_MODEL)
     parser.add_argument("--assessment-batch-size", type=int, default=8)
     assessment = parser.add_mutually_exclusive_group()
     assessment.add_argument("--enable-assessment", dest="enable_assessment", action="store_true", default=True)

@@ -22,6 +22,11 @@ services:
     environment:
       DISPLAY: ${DISPLAY}
       CUDA_CACHE_DISABLE: "0"
+      # GIO consults a proxy resolver on every network connection, and
+      # libproxy in this base image segfaults during unwinding when it does.
+      # rtspsrc opens such a connection, so any RTSP run died instantly with
+      # no message. Nothing here needs a proxy to reach an RTSP source.
+      GIO_USE_PROXY_RESOLVER: dummy
       NVIDIA_DRIVER_CAPABILITIES: all
       QT_X11_NO_MITSHM: "1"
       TERM: xterm-256color
@@ -64,6 +69,11 @@ services:
     environment:
       DISPLAY: ${DISPLAY}
       CUDA_CACHE_DISABLE: "0"
+      # GIO consults a proxy resolver on every network connection, and
+      # libproxy in this base image segfaults during unwinding when it does.
+      # rtspsrc opens such a connection, so any RTSP run died instantly with
+      # no message. Nothing here needs a proxy to reach an RTSP source.
+      GIO_USE_PROXY_RESOLVER: dummy
       NVIDIA_DRIVER_CAPABILITIES: all
       QT_X11_NO_MITSHM: "1"
       TERM: xterm-256color
@@ -71,9 +81,10 @@ services:
       - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
       - /tmp/.X11-unix:/tmp/.X11-unix
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    # No --model override: the app default (deepstream_yolo.paths.DEFAULT_MODEL)
+    # is a checkpoint that actually ships, so this works on a fresh checkout.
     command: >
       bash -lc "scripts/run_source.sh
-      --model yolo12x-custom.pt
       --long-side 640"
     devices:
       - /dev/dri:/dev/dri
@@ -103,7 +114,11 @@ services:
       TERM: xterm-256color
     volumes:
       - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
-      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:/ros2_ws:ro
+      # Mounted at the path it was BUILT at, not a fixed one: a
+      # --symlink-install workspace has absolute symlinks into its own
+      # build/ tree, so any other mount point breaks sourcing silently.
+      # scripts/ros.sh derives CDCL_ROS_WS_MOUNT; see require_ros_workspace.
+      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:${CDCL_ROS_WS_MOUNT:-/ros2_ws}:ro
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
       bash -lc "scripts/run_bridge.sh"
@@ -127,7 +142,11 @@ services:
       TERM: xterm-256color
     volumes:
       - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
-      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:/ros2_ws:ro
+      # Mounted at the path it was BUILT at, not a fixed one: a
+      # --symlink-install workspace has absolute symlinks into its own
+      # build/ tree, so any other mount point breaks sourcing silently.
+      # scripts/ros.sh derives CDCL_ROS_WS_MOUNT; see require_ros_workspace.
+      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:${CDCL_ROS_WS_MOUNT:-/ros2_ws}:ro
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
       bash -lc "scripts/run_foxglove_bridge.sh"

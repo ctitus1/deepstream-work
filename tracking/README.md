@@ -115,7 +115,7 @@ by watching the display sink.
   this; it defines the MOT txt format both ground truth and predictions must be
   written in.
 - **Ground truth.** We have none yet. A few hundred frames of
-  `streams/dtc-d4-trimmed.mp4` hand-labelled with persistent ids is the minimum
+  a clip from `streams/` hand-labelled with persistent ids is the minimum
   useful set; that labelling effort is the real prerequisite for this whole
   directory.
 - **Predictions.** Need an exporter: a pad probe on the tracker src pad walking

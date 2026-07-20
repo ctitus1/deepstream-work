@@ -16,7 +16,11 @@ from deepstream_yolo.gst_warnings import (  # noqa: E402
     maybe_start_gst_scan_warning_filter,
     stop_gst_scan_warning_filter,
 )
-from deepstream_yolo.paths import missing_media_message  # noqa: E402
+from deepstream_yolo.paths import (  # noqa: E402
+    DEFAULT_RTSP_PORT,
+    default_media,
+    missing_media_message,
+)
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
@@ -26,13 +30,25 @@ from gi.repository import GLib, Gst, GstPbutils, GstRtspServer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("video", nargs="?", default="streams/dtc-d4-trimmed.mp4")
+    parser.add_argument("video", nargs="?", default=None)
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8555)
-    parser.add_argument("--mount", default="dtc-d4-trimmed")
+    parser.add_argument("--port", type=int, default=DEFAULT_RTSP_PORT)
+    parser.add_argument(
+        "--mount",
+        default=None,
+        help="Mount name; defaults to the video's basename so clients can derive it.",
+    )
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--show-gst-scan-warnings", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Both defaults come from the media itself, so the server and the client
+    # defaults in paths.py always agree on the mount without either being told.
+    if args.video is None:
+        args.video = str(default_media())
+    if args.mount is None:
+        args.mount = Path(args.video).stem
+    return args
 
 
 def resolve_video(path: str) -> Path:

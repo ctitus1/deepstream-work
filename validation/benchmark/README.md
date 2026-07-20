@@ -6,7 +6,7 @@ per-stage latency percentiles for detect / assess / convert / osd / sink.
 ```bash
 # maximum throughput: a local file is not clock-paced
 python3 validation/benchmark/benchmark_pipeline.py \
-  --stream streams/dtc-d4-trimmed.mp4 --duration 30 --json outputs/validation/bench.json
+  --stream streams/my-video.mp4 --duration 30 --json outputs/validation/bench.json
 
 # what the live system actually sustains
 python3 validation/benchmark/benchmark_pipeline.py --duration 60

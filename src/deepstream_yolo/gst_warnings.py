@@ -71,7 +71,29 @@ class StderrLineFilter:
 
 
 def is_gst_plugin_scan_warning(line: bytes) -> bool:
-    return b"gst-plugin-scanner" in line and b"Failed to load plugin" in line
+    """Startup noise that is expected in this image and means nothing is wrong.
+
+    Both of these are printed before a single frame moves and look like errors
+    to anyone reading the first screenful of output, which is exactly where
+    real failures also appear. Suppressing them by default keeps that screenful
+    meaningful; --show-gst-scan-warnings brings them back.
+
+    Deliberately narrow: each pattern is a specific known-benign message, not a
+    category. Anything unrecognized still reaches the terminal.
+    """
+    # One per plugin whose optional codec libraries this image does not ship
+    # (libFLAC, libmpg123, libtritonserver, ...). None are used by this pipeline.
+    if b"gst-plugin-scanner" in line and b"Failed to load plugin" in line:
+        return True
+
+    # nvv4l2decoder asking the NVIDIA decoder device for *capture* capabilities
+    # it does not advertise. Emitted once per decoder created, including the one
+    # gst-discoverer builds, which is why it usually appears twice. Decoding is
+    # unaffected -- the 4K H.265 stream decodes normally right after it.
+    if b"Failed to query video capabilities" in line:
+        return True
+
+    return False
 
 
 def maybe_start_gst_scan_warning_filter(argv: list[str]):

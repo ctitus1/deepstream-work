@@ -30,7 +30,12 @@ import pyds  # noqa: E402
 
 from deepstream_yolo.assessment_runtime import frame_timestamp  # noqa: E402
 from deepstream_yolo.model_cache import discover_size  # noqa: E402
-from deepstream_yolo.paths import DEFAULT_RTSP_URL, GENERATED_CONFIG_DIR, SETUP_SCRIPT  # noqa: E402
+from deepstream_yolo.paths import (  # noqa: E402
+    DEFAULT_MODEL,
+    DEFAULT_RTSP_URL,
+    GENERATED_CONFIG_DIR,
+    SETUP_SCRIPT,
+)
 from deepstream_yolo.pipeline import element, on_message  # noqa: E402
 from print_rtsp_timestamps import StageStats, reference_unix_ns, rtsp_protocol_flags  # noqa: E402
 
@@ -47,7 +52,7 @@ def find_infer_config() -> Path:
     if not matches:
         raise FileNotFoundError(
             f"No generated primary nvinfer config in {GENERATED_CONFIG_DIR}. "
-            f"Generate one with: {SETUP_SCRIPT} yolo12x-custom.pt 640 streams/dtc-d4-trimmed.mp4 "
+            f"Generate one with: {SETUP_SCRIPT} {DEFAULT_MODEL} 640 "
             "(or run src/parser_app.py once), then retry, or pass --infer-config explicitly."
         )
     return matches[0]

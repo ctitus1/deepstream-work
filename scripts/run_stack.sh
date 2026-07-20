@@ -16,9 +16,9 @@ DeepStream ROS source. Press Ctrl-C to stop and remove the containers started by
 this script.
 
 Options:
-  --video PATH          Video served by RTSP. Default: streams/dtc-d4-trimmed.mp4
+  --video PATH          Video served by RTSP. Default: the video in streams/
   --rtsp-port PORT     RTSP server port. Default: 8555
-  --rtsp-mount NAME    RTSP mount name. Default: dtc-d4-trimmed
+  --rtsp-mount NAME    RTSP mount name. Default: the video's basename
   --foxglove-port PORT Foxglove Bridge websocket port. Default: 8765
   --bag                Record all ROS topics to an MCAP bag under outputs/rosbags.
   --build              Build ROS profile images before starting.
@@ -40,9 +40,21 @@ EOF
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VIDEO="${RTSP_VIDEO:-streams/dtc-d4-trimmed.mp4}"
+source "$ROOT_DIR/scripts/lib/common.sh"
+
+# Resolve and export the cdcl_umd_msgs workspace for the compose services. The
+# old hardcoded ~/ros2_ws default is wrong on any host where the workspace was
+# built elsewhere, which is the norm on Ubuntu 24.04 (no Humble packages, so it
+# gets built inside a container).
+require_ros_workspace >/dev/null
+
+# Defaults resolve to whatever media this checkout has: streams/ is gitignored,
+# so a hardcoded filename is wrong on every machine but the author's.
+VIDEO="${RTSP_VIDEO:-$(PYTHONPATH="$ROOT_DIR/src" python3 -c \
+    'from deepstream_yolo.paths import DEFAULT_MEDIA, PROJECT_DIR
+print(DEFAULT_MEDIA.relative_to(PROJECT_DIR))' 2>/dev/null)}"
 RTSP_PORT="${RTSP_PORT:-8555}"
-RTSP_MOUNT="${RTSP_MOUNT:-dtc-d4-trimmed}"
+RTSP_MOUNT="${RTSP_MOUNT:-$(basename "${VIDEO%.*}")}"
 FOXGLOVE_PORT="${FOXGLOVE_PORT:-8765}"
 BUILD=0
 BAG=0

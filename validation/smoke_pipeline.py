@@ -32,7 +32,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
 from deepstream_yolo.model_cache import discover_size, ensure_model  # noqa: E402
-from deepstream_yolo.paths import DEFAULT_STREAM  # noqa: E402
+from deepstream_yolo.paths import DEFAULT_MODEL, DEFAULT_STREAM  # noqa: E402
 from deepstream_yolo.pipeline import build_pipeline, on_message  # noqa: E402
 from deepstream_yolo.recording import resolve_record_path  # noqa: E402
 from deepstream_yolo.stream_source import resolve_stream_source  # noqa: E402
@@ -72,7 +72,7 @@ def counting_probe(state, limit, loop):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
-    parser.add_argument("--model", default="yolo12x.pt")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--frames", type=int, default=60)

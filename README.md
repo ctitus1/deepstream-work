@@ -4,16 +4,82 @@ Development container and scripts for running YOLO detections, injury
 assessment, RTSP video input, and ROS Humble publishing through NVIDIA
 DeepStream.
 
+## Quickstart
+
+Put a video in `streams/`, then run these from the host. Nothing else is
+required — no container shell, no manual export step.
+
+```bash
+scripts/setup.sh      # build, compile, export, verify. Safe to re-run.
+scripts/parser.sh     # detections + assessment in a window
+scripts/ros.sh        # RTSP + ROS Humble + Foxglove stack
+```
+
+That is the whole workflow. `setup.sh` is the only one you need before either
+run command, and both run commands are self-contained: they start the RTSP
+server themselves and shut everything down on Ctrl-C.
+
+Common variations:
+
+```bash
+scripts/parser.sh --record                  # also write an annotated mp4
+scripts/parser.sh --video streams/other.mp4 # a different video
+scripts/ros.sh --bag                        # also record an MCAP bag
+```
+
+To use a new detector checkpoint, point `--model` at it. Only that model is
+rebuilt; the image, parser library, and every other export are left alone:
+
+```bash
+scripts/setup.sh --model runs/detect/train/weights/best.pt
+scripts/parser.sh --model runs/detect/train/weights/best.pt
+```
+
+Each command takes `--help`. `setup.sh` also takes `--only`, `--skip`, and
+`--force` to run or redo one stage at a time:
+
+```bash
+scripts/setup.sh --only verify      # re-check the pipeline, nothing else
+scripts/setup.sh --force parser     # rebuild just the parser library
+```
+
+### What setup does
+
+Every stage is stamped against its real inputs, so a second run is close to a
+no-op and only genuinely changed work is redone.
+
+| Stage | Produces | Redone when |
+| --- | --- | --- |
+| `image` | `deepstream-work:<DS_VERSION>` | Dockerfile or compose file changes |
+| `parser` | `lib/libnvdsinfer_custom_impl_Yolo.so` | CUDA version or DeepStream-Yolo ref changes |
+| `models` | `models/*.onnx`, `configs/generated/*` | the model, resolution, or source geometry changes |
+| `verify` | TensorRT engine, plus a pass/fail | always (it is the proof it still runs) |
+
+`env` (the `.venv-yolo-<pyver>/` export environment, several GB of torch and
+CUDA wheels) is not in the default sequence. The `models` stage builds it
+automatically the moment a model actually needs exporting, so runs that only
+use already-exported models never pay for it. Pre-warm it with
+`scripts/setup.sh --only env` if you want to.
+
+### Defaults
+
+With no arguments the commands use the `yolo12n.pt` detector and, when
+`streams/` holds exactly one video, that video. `streams/` is gitignored, so
+nothing is hardcoded to one machine's media; pass `--video`/`--stream` when the
+directory holds more than one file.
+
 The container targets **DeepStream 7.1 by default**. The release is a build
 argument, so 8.0 and 9.0 build from the same Dockerfile:
 
 ```bash
-scripts/build.sh                      # DeepStream 7.1
-DS_VERSION=9.0 scripts/build.sh       # DeepStream 9.0
+scripts/setup.sh                      # DeepStream 7.1
+DS_VERSION=9.0 scripts/setup.sh       # DeepStream 9.0
 ```
 
 The image is tagged `deepstream-work:<DS_VERSION>`, so several releases can
 coexist. See [docker/README.md](docker/README.md) for what changes per release.
+
+## Layout
 
 Work in this repo is organized into four areas:
 
@@ -26,23 +92,36 @@ Work in this repo is organized into four areas:
 
 The two normal runtime workflows are:
 
-- Parser app: run `src/parser_app.py` directly with a display window and
-  console logs.
-- ROS publisher: run `scripts/run_stack.sh` to start the RTSP server,
-  DeepStream frame source, ROS publisher, and Foxglove Bridge together.
-
-The main entrypoints are intentionally short:
-
-- `src/parser_app.py`: display-oriented DeepStream app.
-- `src/ros_source.py`: DeepStream frame source for ROS publishing.
-- `src/ros_bridge.py`: ROS Humble publisher bridge.
-- `scripts/run_stack.sh`: full RTSP/ROS/Foxglove workflow helper.
+- Parser app: `scripts/parser.sh` for a display window and console logs.
+- ROS publisher: `scripts/ros.sh` for the RTSP server, DeepStream frame source,
+  ROS publisher, and Foxglove Bridge together.
 
 The ROS publisher workflow publishes detections as `TargetBoxArray` messages
 and assessments as `CasualtyImageCompressed` messages from a ROS Humble
 container.
 
-## Shared Setup
+### Entrypoints
+
+The three commands in the quickstart are the intended interface:
+
+- `scripts/setup.sh`: staged, idempotent setup.
+- `scripts/parser.sh`: RTSP server plus the display app.
+- `scripts/ros.sh`: the full RTSP/ROS/Foxglove stack.
+
+They orchestrate the underlying pieces, each of which still works on its own:
+
+- `src/parser_app.py`: display-oriented DeepStream app.
+- `src/ros_source.py`: DeepStream frame source for ROS publishing.
+- `src/ros_bridge.py`: ROS Humble publisher bridge.
+- `scripts/run_stack.sh`: the original RTSP/ROS/Foxglove helper.
+- `scripts/build_yolo_parser.sh`, `scripts/setup_and_export_yolo.sh`,
+  `scripts/setup_injury_model.sh`: the individual setup steps.
+
+## Manual Setup
+
+`scripts/setup.sh` runs all of this for you; the steps are here for when you
+want one of them on its own. Each is individually idempotent, so running one
+directly costs no more than the stage would.
 
 Build the DeepStream development image from the host:
 
@@ -56,9 +135,26 @@ For the ROS publisher workflow, also build the ROS Humble image:
 docker compose --profile ros build
 ```
 
-The ROS Humble image includes Foxglove Bridge for visualization and expects the
-`cdcl_umd_msgs` workspace at `/home/user/ros2_ws` by default. Override that path
-with `CDCL_ROS_WS=/path/to/ros2_ws` if needed.
+The ROS Humble image includes Foxglove Bridge for visualization and needs a
+colcon-built `cdcl_umd_msgs` workspace. `scripts/ros.sh` finds it automatically,
+searching `~/ros2_ws`, `~/*/ros2_ws`, and `~/*/*/ros2_ws` for a workspace that is
+actually built (`install/setup.bash` and `install/cdcl_umd_msgs` both present).
+Set `CDCL_ROS_WS=/path/to/ros2_ws` to override. It is checked up front rather
+than letting the bridge fail on the import several seconds in.
+
+The workspace is mounted **at the path it was built at**, not at a fixed one.
+`colcon build --symlink-install` writes absolute symlinks into the workspace's
+own `build/` tree, so mounting it anywhere else leaves them dangling — and that
+failure is quiet: sourcing `setup.bash` prints `not found` per symlink, still
+exits 0, and leaves `PYTHONPATH` unset, so the bridge dies on
+`import cdcl_umd_msgs` with nothing pointing at the mount path as the cause.
+`ros.sh` recovers the original prefix from those symlinks and reproduces it, so
+a workspace built inside some other container still works unchanged.
+
+This matters on Ubuntu 24.04, where there are no ROS 2 Humble packages at all
+(Humble is Jammy-only; Noble's distro is Jazzy). The workspace is normally built
+inside a Humble container there, which is exactly the case that leaves a
+container-specific path baked into `install/`.
 
 Enter the DeepStream development container:
 
@@ -69,13 +165,14 @@ scripts/run.sh
 Inside the container, build the custom YOLO parser library:
 
 ```bash
-scripts/build_yolo_parser.sh
+scripts/build_yolo_parser.sh          # skipped if already current
+scripts/build_yolo_parser.sh --force  # rebuild regardless
 ```
 
-Export the default YOLO model and generate DeepStream configs:
+Export a YOLO model and generate DeepStream configs:
 
 ```bash
-scripts/setup_and_export_yolo.sh yolo12x-custom.pt 640 streams/dtc-d4-trimmed.mp4
+scripts/setup_and_export_yolo.sh yolo12n.pt 640
 ```
 
 Export the injury assessment model:
@@ -84,26 +181,42 @@ Export the injury assessment model:
 scripts/setup_injury_model.sh models/injury.pt 8
 ```
 
+Or do both through the same cache the apps use at startup:
+
+```bash
+python3 scripts/prepare_models.py --model yolo12n.pt --long-side 640
+```
+
 Generated configs are written to `configs/generated/`. The export scripts manage
-`.venv-yolo/` automatically and do not require activating a virtual environment.
+the virtualenv automatically and do not require activating one.
+
+That environment lives in `.venv-yolo-<pyver>/`, keyed by Python version. The
+host and the container see the same bind-mounted directory but run different
+interpreters (3.12 and 3.10 for DeepStream 7.1), and a virtualenv only works
+with the version that built it — sharing one path made each side delete and
+rebuild the other's, re-downloading torch every time.
 
 ## Video Input
 
-RTSP is the default and preferred input path for both workflows. Start a local
-RTSP stream from a DeepStream container shell:
+RTSP is the default and preferred input path for both workflows.
+`scripts/parser.sh` and `scripts/ros.sh` start the server themselves, so this
+section only matters when running the pieces separately.
+
+Start a local RTSP stream from a DeepStream container shell:
 
 ```bash
-scripts/start_rtsp_stream.sh streams/dtc-d4-trimmed.mp4
+scripts/start_rtsp_stream.sh                     # the video in streams/
+scripts/start_rtsp_stream.sh streams/my-video.mp4
 ```
 
-By default this serves:
+The mount name is the video's basename, so serving `streams/my-video.mp4` gives:
 
 ```text
-rtsp://127.0.0.1:8555/dtc-d4-trimmed
+rtsp://127.0.0.1:8555/my-video
 ```
 
-Both the parser app and the ROS DeepStream source use that URL by default. To
-serve a different local video or mount:
+The server and the app defaults derive that URL from the same file, so neither
+has to be told. Override the port or mount explicitly:
 
 ```bash
 RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
@@ -120,9 +233,9 @@ docker compose --profile ros run --rm deepstream-ros-source \
 For quick debugging, both DeepStream apps can also read a local file directly:
 
 ```bash
-python3 src/parser_app.py --stream streams/dtc-d4-trimmed.mp4
+python3 src/parser_app.py --stream streams/my-video.mp4
 docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_source.sh --stream streams/dtc-d4-trimmed.mp4
+  scripts/run_source.sh --stream streams/my-video.mp4
 ```
 
 Local-file input is useful for development, but RTSP better matches the live
@@ -133,7 +246,9 @@ them, and can expose network/reference timestamp metadata.
 
 ![DeepStream parser app flow](outputs/diagrams/parser_flow.svg)
 
-Run the parser app from another DeepStream container shell:
+`scripts/parser.sh` is the one-command form: it serves the video over RTSP,
+starts this app against it, and stops both together. To run the app alone,
+from a DeepStream container shell with an RTSP server already up:
 
 ```bash
 python3 src/parser_app.py
@@ -143,10 +258,12 @@ The plain command defaults to:
 
 ```bash
 python3 src/parser_app.py \
-  --model yolo12x-custom.pt \
+  --model yolo12n.pt \
   --long-side 640 \
   --enable-assessment
 ```
+
+`--stream` defaults to the RTSP URL for whatever video is in `streams/`.
 
 Useful parser options:
 
@@ -163,9 +280,14 @@ python3 src/parser_app.py --help
 `--record` writes the annotated video (detection boxes and assessment text
 burned in) to an mp4. With no path it auto-names one under `outputs/`. The
 recording branch taps the frame after `nvdsosd` and stays on the GPU, so it
-costs a hardware encode rather than a readback. Recording needs a clean
-shutdown to finalize the mp4 container: quit with `q` or Ctrl-C rather than
-killing the process, otherwise the file has no moov atom and will not play.
+costs a hardware encode rather than a readback.
+
+Recording needs a clean shutdown to finalize the mp4 container, or the file has
+no moov atom and will not play. Quitting with `q`, Ctrl-C, `kill`, `docker
+stop`, or closing the terminal all take that path: the app handles SIGINT,
+SIGTERM, and SIGHUP from inside the GLib loop and drains the pipeline before
+exiting. `kill -9` still cannot be caught, so it still truncates the file. A
+second Ctrl-C during shutdown exits immediately if teardown is itself stuck.
 
 By default, every display frame is shown; assessment overlay text appears only
 on frames where fresh assessment tensor output is present. Use
@@ -203,29 +325,38 @@ The ROS publishing workflow uses two containers:
   `src/ros_bridge.py`. It receives those frames and publishes ROS Humble
   `cdcl_umd_msgs` messages with the JPEG image embedded in each message.
 
-`scripts/run_stack.sh` starts those containers plus the RTSP server and
-Foxglove Bridge. With `--bag`, it also runs `scripts/record_bag.sh` to record
-all ROS topics to MCAP.
+`scripts/ros.sh` starts those containers plus the RTSP server and Foxglove
+Bridge. With `--bag`, it also runs `scripts/record_bag.sh` to record all ROS
+topics to MCAP.
 
 From a host shell, start the full RTSP, ROS publisher, Foxglove, and DeepStream
 source stack:
 
 ```bash
-scripts/run_stack.sh
+scripts/ros.sh
 ```
 
-Press Ctrl-C in that shell to stop and remove the containers started by the
-script. To also record all ROS topics to an MCAP bag under `outputs/rosbags/`:
+Press Ctrl-C in that shell to stop and remove everything it started. To also
+record all ROS topics to an MCAP bag under `outputs/rosbags/`:
 
 ```bash
-scripts/run_stack.sh --bag
+scripts/ros.sh --bag
 ```
 
-To serve a different video:
+To serve a different video (the mount name follows the filename):
 
 ```bash
-scripts/run_stack.sh --video streams/my-video.mp4 --rtsp-mount my-video
+scripts/ros.sh --video streams/my-video.mp4
 ```
+
+Before starting anything, `ros.sh` checks that the `cdcl_umd_msgs` workspace
+exists and that every port it needs is free, so a missing workspace or a
+leftover container is reported up front instead of part-way through bring-up.
+If any component then exits, the rest are torn down rather than left running as
+a half-working stack.
+
+`scripts/run_stack.sh` is the original version of this workflow and still
+works.
 
 Connect Foxglove Studio to:
 

@@ -4,6 +4,8 @@ set -euo pipefail
 MODEL="${1:-}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+source "$ROOT_DIR/scripts/lib/common.sh"
+
 # Single model size parameter.
 # The script detects the input stream aspect ratio and converts this one dimension
 # into a stride-safe WIDTH x HEIGHT for YOLO/DeepStream.
@@ -20,15 +22,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   1920 -> 1920x1088
 MODEL_SIZE="${2:-1920}"
 
-# Stream used to derive aspect ratio.
+# Stream used to derive aspect ratio. Defaults to whatever media this checkout
+# has, since streams/ is gitignored and its contents differ per machine.
 # Override as third arg if needed:
 #   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.mp4
-STREAM="${3:-streams/dtc-d4-trimmed.mp4}"
+STREAM="${3:-$(PYTHONPATH="$ROOT_DIR/src" python3 -c \
+    'from deepstream_yolo.paths import DEFAULT_MEDIA; print(DEFAULT_MEDIA)')}"
 
 STRIDE=32
 DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
 GENERATED_CONFIG_DIR="${GENERATED_CONFIG_DIR:-configs/generated}"
-VENV_DIR=".venv-yolo"
+VENV_DIR="$(yolo_venv_dir)"
 
 if [ -z "$MODEL" ]; then
     echo "Usage:"
@@ -36,8 +40,8 @@ if [ -z "$MODEL" ]; then
     echo
     echo "Examples:"
     echo "  $0 yolo11n.pt 640"
-    echo "  $0 yolo12x.pt 640 streams/dtc-d4-trimmed.mp4"
-    echo "  $0 yolo12x.pt 1920 streams/dtc-d4-trimmed.mp4"
+    echo "  $0 yolo12x.pt 640 streams/my-video.mp4"
+    echo "  $0 yolo12x.pt 1920 streams/my-video.mp4"
     exit 1
 fi
 
@@ -94,12 +98,10 @@ install_labels() {
     cp -f labels/coco_labels.txt models/coco_labels.txt
 }
 
+# Delegates to the stamped setup script, so a warm environment costs nothing.
+# This runs on every model export via model_cache.ensure_model().
 ensure_export_venv() {
-    if [ ! -x "$VENV_DIR/bin/python3" ] || ! "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
-        echo "Creating YOLO export virtual environment..."
-        rm -rf "$VENV_DIR"
-        python3 -m venv "$VENV_DIR"
-    fi
+    scripts/setup_yolo_export_env.sh
 
     PYTHON_BIN="$VENV_DIR/bin/python3"
     YOLO_BIN="$VENV_DIR/bin/yolo"
@@ -168,33 +170,6 @@ echo "Source size:   ${SRC_W}x${SRC_H}"
 echo "YOLO size:     ${INFER_W}x${INFER_H}"
 
 ensure_export_venv
-
-# Retried because torch pulls several 150-500 MB nvidia-*-cu12 wheels whose
-# downloads are intermittently corrupted on some networks; pip surfaces that as
-# a hash mismatch even though nothing here pins hashes. See the longer note in
-# scripts/setup_yolo_export_env.sh.
-pip_install_retry() {
-    local attempt=1
-    while true; do
-        if "$PYTHON_BIN" -m pip install --timeout 60 --retries 5 "$@"; then
-            return 0
-        fi
-        if [ "$attempt" -ge "${PIP_ATTEMPTS:-4}" ]; then
-            echo "pip install failed after ${attempt} attempts: $*" >&2
-            return 1
-        fi
-        echo "pip install attempt ${attempt} failed; retrying..." >&2
-        attempt=$((attempt + 1))
-    done
-}
-
-pip_install_retry --upgrade 'pip' 'setuptools<82' wheel
-
-pip_install_retry -r requirements/yolo-export.txt
-if [ ! -x "$YOLO_BIN" ]; then
-    echo "Missing YOLO CLI after dependency install: $YOLO_BIN"
-    exit 1
-fi
 
 clone_deepstream_yolo
 

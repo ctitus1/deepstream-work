@@ -38,7 +38,7 @@ is empty it says to run `scripts/setup_and_export_yolo.sh` first. Pass
 Both default to `paths.DEFAULT_RTSP_URL`, so start the stream first:
 
 ```bash
-scripts/start_rtsp_stream.sh streams/dtc-d4-trimmed.mp4
+scripts/start_rtsp_stream.sh streams/my-video.mp4
 ```
 
 ## Interpreters

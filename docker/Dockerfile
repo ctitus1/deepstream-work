@@ -170,6 +170,16 @@ sys.exit('pyds did not install') if spec is None else print('pyds installed:', s
 # present and locatable without dlopening CUDA; the actual import is exercised
 # by the smoke test, which runs with the GPU attached.
 
+# GIO asks a proxy resolver which proxy to use for every network connection it
+# opens. libproxy in this base image faults while unwinding when it is asked,
+# taking the process down with SIGSEGV and no message at all. rtspsrc opens
+# exactly such a connection, so every RTSP run died on startup while local-file
+# input was unaffected. Selecting GIO's dummy resolver skips libproxy entirely;
+# nothing in this pipeline reaches an RTSP source through a proxy.
+#
+# Kept last so it is a cheap layer that does not invalidate anything above.
+ENV GIO_USE_PROXY_RESOLVER=dummy
+
 USER ${USERNAME}
 
 CMD ["/bin/bash"]

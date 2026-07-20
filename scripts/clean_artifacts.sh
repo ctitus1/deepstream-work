@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TARGETS=(
-  ".venv-yolo"
+  ".setup-state"
   "configs/generated"
   "external"
   "lib"
@@ -15,6 +15,13 @@ TARGETS=(
   "yolo12x.pt"
   "yolo26n.pt"
 )
+
+# The export environment is version-keyed (.venv-yolo-3.10, .venv-yolo-3.12) so
+# the host and the container can each keep their own; a bare .venv-yolo may also
+# exist from an older checkout. Collect whichever are present.
+while IFS= read -r venv_dir; do
+  TARGETS+=("$venv_dir")
+done < <(find . -maxdepth 1 -type d -name '.venv-yolo*' -printf '%P\n')
 
 # outputs/ mixes generated run output with checked-in diagram sources, which
 # .gitignore deliberately whitelists (!outputs/diagrams/). Removing the whole
@@ -29,7 +36,7 @@ while IFS= read -r cache_dir; do
   TARGETS+=("$cache_dir")
 done < <(
   find . \
-    \( -path './.git' -o -path './.venv-yolo' -o -path './external' \) -prune \
+    \( -path './.git' -o -path './.venv-yolo*' -o -path './external' \) -prune \
     -o -type d -name __pycache__ -print
 )
 

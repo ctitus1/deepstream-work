@@ -47,8 +47,9 @@ from deepstream_yolo.assessment_runtime import (
 from deepstream_yolo.detection_overlay import PERSON_CLASS_ID, bbox_probe, get_detection_id
 from deepstream_yolo.frame_wire import is_wall_clock_timestamp, send_frame
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
-from deepstream_yolo.paths import DEFAULT_STREAM
+from deepstream_yolo.paths import DEFAULT_ASSESSMENT_MODEL, DEFAULT_MODEL, DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
+from deepstream_yolo.shutdown import install_shutdown_handlers
 from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
 
 DEFAULT_DETECT_ENDPOINT = "127.0.0.1:5610"
@@ -56,6 +57,26 @@ DEFAULT_ASSESS_ENDPOINT = "127.0.0.1:5611"
 DEFAULT_IMAGE_ENDPOINT = "127.0.0.1:5609"
 OUTPUT_WIDTH = 640
 OUTPUT_HEIGHT = 368
+
+# Bounds only the connect attempt, so a bridge that is not listening does not
+# stall the GStreamer callback that calls this.
+CONNECT_TIMEOUT = 0.2
+
+# Bounds a send once connected, and must be far larger than CONNECT_TIMEOUT.
+# socket.create_connection() leaves its connect timeout on the socket it
+# returns, so the 0.2s above silently became the sendall() timeout too: any
+# moment the bridge was slow enough to fill the kernel send buffer, sendall
+# raised "timed out" part-way through a frame and the connection was torn down
+# and rebuilt on a 1s backoff. The assess stage hit it constantly, sending one
+# JPEG per casualty (several per frame) into the slowest consumer. Waiting a
+# couple of seconds for backpressure to clear is always better than dropping
+# the connection; a genuinely dead peer is still caught well inside the
+# receiver's 30s mid-frame stall limit.
+SEND_TIMEOUT = 2.0
+
+# One frame is a JPEG plus a small JSON header. Sizing the send buffer to hold
+# a few of them keeps ordinary bursts from ever reaching the timeout path.
+SEND_BUFFER_BYTES = 1 << 20
 INT32_MAX = 2_147_483_647
 BBox = tuple[float, float, float, float]
 
@@ -291,11 +312,19 @@ class FrameSocketSender:
 
         self.next_connect_time = now + 1.0
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=0.2)
+            sock = socket.create_connection((self.host, self.port), timeout=CONNECT_TIMEOUT)
         except OSError:
             return None
 
+        # Replace the inherited connect timeout before any frame goes out; see
+        # SEND_TIMEOUT for what this was costing.
+        sock.settimeout(SEND_TIMEOUT)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUFFER_BYTES)
+        except OSError:
+            # Not fatal: the kernel default still works, just with less headroom.
+            pass
         self.sock = sock
         print(f"{self.stage} connected endpoint={self.host}:{self.port}", flush=True)
         return sock
@@ -318,7 +347,7 @@ def parse_endpoint(endpoint: str) -> tuple[str, int]:
 
 def parse_args() -> argparse.Namespace:
     parser = RuntimeArgumentParser()
-    parser.add_argument("--model", default="yolo12x-custom.pt")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--long-side", type=int, default=640)
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
@@ -328,7 +357,7 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="RTSP jitterbuffer latency before old network packets are dropped; default 0.",
     )
-    parser.add_argument("--assessment-model", default="models/injury.pt")
+    parser.add_argument("--assessment-model", default=DEFAULT_ASSESSMENT_MODEL)
     parser.add_argument("--assessment-batch-size", type=int, default=8)
     parser.add_argument("--output-width", type=int, default=OUTPUT_WIDTH)
     parser.add_argument("--output-height", type=int, default=OUTPUT_HEIGHT)
@@ -727,6 +756,9 @@ def main() -> int:
     parts.assess_appsink.connect("new-sample", assess_sender.on_sample)
 
     loop = GLib.MainLoop()
+    # Without this, `docker stop` kills the process outright and the TCP frame
+    # senders never close, leaving the bridge waiting on a half-open socket.
+    install_shutdown_handlers(loop)
     bus = parts.pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", on_message, loop)

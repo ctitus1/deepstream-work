@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
+# Build the DeepStream-Yolo custom bbox parser into lib/.
+#
+# Skipped entirely when the existing .so was built from the same toolchain and
+# upstream ref, since nothing here changes between runs of the pipeline.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/lib/common.sh
 
 ROOT_DIR="$(pwd)"
+FORCE="${FORCE:-0}"
+
+[ "${1:-}" = "--force" ] && FORCE=1
 
 # DeepStream-Yolo's Makefile interpolates CUDA_VER straight into
 # /usr/local/cuda-$(CUDA_VER)/{include,lib64}, so it must name a real directory
@@ -41,21 +49,35 @@ if [ -z "$CUDA_VERSION" ]; then
     exit 1
 fi
 CUDA_MAJOR_MINOR="$(printf '%s\n' "$CUDA_VERSION" | awk -F. '{print $1 "." $2}')"
-echo "Building YOLO parser against CUDA ${CUDA_MAJOR_MINOR}"
 CUDA_PACKAGE_VERSION="${CUDA_MAJOR_MINOR/./-}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-${CUDA_MAJOR_MINOR}}"
 DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
 
-sudo apt update
+# The build inputs are the CUDA toolchain and the upstream source revision;
+# neither changes between pipeline runs, so a matching stamp means the existing
+# .so is already correct. This skips an apt transaction and a full nvcc rebuild.
+SIGNATURE="cuda=${CUDA_MAJOR_MINOR} ref=${DEEPSTREAM_YOLO_REF}"
+TARGET_LIB="$ROOT_DIR/lib/libnvdsinfer_custom_impl_Yolo.so"
 
-sudo apt install -y \
-  git \
-  build-essential \
-  make \
-  g++ \
-  "cuda-cudart-dev-${CUDA_PACKAGE_VERSION}" \
-  "cuda-compiler-${CUDA_PACKAGE_VERSION}" \
-  "cuda-nvcc-${CUDA_PACKAGE_VERSION}"
+if [ "$FORCE" -eq 0 ] && stamp_valid yolo-parser "$SIGNATURE" "$TARGET_LIB"; then
+    skip "YOLO parser library"
+    exit 0
+fi
+
+# nvcc is the one tool the Makefile cannot do without, so its presence stands in
+# for the whole toolchain: apt is an expensive no-op once it is installed.
+if [ "$FORCE" -eq 1 ] || ! command -v nvcc >/dev/null 2>&1; then
+    step "Installing build toolchain for CUDA ${CUDA_MAJOR_MINOR}"
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends \
+      git \
+      build-essential \
+      make \
+      g++ \
+      "cuda-cudart-dev-${CUDA_PACKAGE_VERSION}" \
+      "cuda-compiler-${CUDA_PACKAGE_VERSION}" \
+      "cuda-nvcc-${CUDA_PACKAGE_VERSION}"
+fi
 
 # DeepStream-Yolo Makefile expects /usr/local/cuda-$CUDA_MAJOR_MINOR/lib64.
 # CUDA packages in this image place libraries under targets/x86_64-linux/lib.
@@ -86,11 +108,16 @@ git -C external/DeepStream-Yolo checkout "$DEEPSTREAM_YOLO_REF" >/dev/null
 
 cd external/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo
 
-rm -f *.o *.so layers/*.o
+# Reaching this point means the stamp did not match, so the inputs really did
+# change. A clean build is what guarantees the .so matches the checked-out ref.
+rm -f ./*.o ./*.so layers/*.o
 
+step "Compiling the parser against CUDA ${CUDA_MAJOR_MINOR}"
 CUDA_VER="$CUDA_MAJOR_MINOR" make
 
-cp libnvdsinfer_custom_impl_Yolo.so "$ROOT_DIR/lib/"
+cp libnvdsinfer_custom_impl_Yolo.so "$TARGET_LIB"
 
-echo "Built:"
-ls -lh "$ROOT_DIR/lib/libnvdsinfer_custom_impl_Yolo.so"
+cd "$ROOT_DIR"
+stamp_write yolo-parser "$SIGNATURE"
+
+log "Built: $(ls -lh "$TARGET_LIB" | awk '{print $9, $5}')"

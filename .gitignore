@@ -52,3 +52,7 @@ env/
 
 # Setup stage stamps (scripts/setup.sh)
 .setup-state/
+
+# Eval ground truth and run outputs (regenerated, not source)
+eval/detections.json
+eval/runs/

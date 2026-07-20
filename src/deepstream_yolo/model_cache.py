@@ -13,7 +13,14 @@ from gi.repository import Gst, GstPbutils
 
 from .configs import generated_config_path, write_assessment_config, write_infer_config
 from .injury import assessment_stem, default_engine_path, default_meta_path, default_onnx_path
-from .paths import INJURY_SETUP_SCRIPT, MODELS_DIR, PROJECT_DIR, SETUP_SCRIPT, YOLO_PYTHON
+from .paths import (
+    INJURY_SETUP_SCRIPT,
+    LABELS_PATH,
+    MODELS_DIR,
+    PROJECT_DIR,
+    SETUP_SCRIPT,
+    YOLO_PYTHON,
+)
 from .stream_source import StreamSource
 
 
@@ -26,6 +33,10 @@ class ModelArtifacts:
     meta: Path
     engine: Path
     config: Path
+    # Per-model snapshot of the class names, taken at export time. Configs point
+    # here rather than at the shared models/coco_labels.txt, which only ever
+    # reflects the most recent export.
+    labels: Path
 
 
 @dataclass(frozen=True)
@@ -66,7 +77,33 @@ def artifacts_for_onnx(onnx: Path) -> ModelArtifacts:
         meta=onnx.with_suffix(".meta.json"),
         engine=Path(f"{onnx}_b1_gpu0_fp16.engine"),
         config=generated_config_path(f"config_infer_primary_{onnx.stem}.txt"),
+        labels=onnx.with_suffix(".labels.txt"),
     )
+
+
+def snapshot_model_labels(artifacts: ModelArtifacts) -> Path:
+    """Copy the labels the export just installed into this model's own file.
+
+    Always overwrites: re-exporting an existing tag with a different class set
+    must replace the snapshot, not keep the previous one.
+    """
+    if not LABELS_PATH.is_file():
+        return LABELS_PATH
+    artifacts.labels.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(LABELS_PATH, artifacts.labels)
+    return artifacts.labels
+
+
+def ensure_model_labels(artifacts: ModelArtifacts) -> Path:
+    """Return this model's own labels without disturbing an existing snapshot.
+
+    LABELS_PATH is shared and holds whatever the last export installed, so a
+    config pointing at it can end up describing a different model. Entries
+    cached before per-model labels existed are migrated from it once.
+    """
+    if artifacts.labels.is_file():
+        return artifacts.labels
+    return snapshot_model_labels(artifacts)
 
 
 def tagged_artifacts(stem: str, long_side: int, width: int, height: int) -> ModelArtifacts:
@@ -144,7 +181,13 @@ def ensure_model(
         if not meta_matches(meta, long_side, src_w, src_h):
             continue
         width, height = size_from_meta(meta) or onnx_size(candidate)
-        write_infer_config(artifacts.config, artifacts.onnx, artifacts.engine, conf)
+        write_infer_config(
+            artifacts.config,
+            artifacts.onnx,
+            artifacts.engine,
+            conf,
+            labels_path=ensure_model_labels(artifacts),
+        )
         return width, height, artifacts.config
 
     env = os.environ.copy()
@@ -176,14 +219,20 @@ def ensure_model(
                 "model_height": height,
                 "onnx": str(artifacts.onnx.relative_to(PROJECT_DIR)),
                 "engine": str(artifacts.engine.relative_to(PROJECT_DIR)),
-                "labels": "models/coco_labels.txt",
+                "labels": str(artifacts.labels.relative_to(PROJECT_DIR)),
                 "cache_policy": CACHE_POLICY,
             },
             indent=2,
         )
         + "\n"
     )
-    write_infer_config(artifacts.config, artifacts.onnx, artifacts.engine, conf)
+    write_infer_config(
+        artifacts.config,
+        artifacts.onnx,
+        artifacts.engine,
+        conf,
+        labels_path=snapshot_model_labels(artifacts),
+    )
     return width, height, artifacts.config
 
 

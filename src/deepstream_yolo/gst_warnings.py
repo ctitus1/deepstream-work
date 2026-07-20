@@ -1,3 +1,4 @@
+import atexit
 import os
 import sys
 import threading
@@ -19,17 +20,27 @@ class StderrLineFilter:
         self.thread.start()
         os.dup2(write_fd, 2)
         os.close(write_fd)
+        # While the filter is running, fd 2 is a pipe drained by a daemon
+        # thread. If the process exits without stop() -- an uncaught exception
+        # before the usual teardown, for instance -- fd 2 is never restored and
+        # the daemon thread dies at interpreter shutdown with the traceback
+        # still sitting in the pipe, so the error vanishes. atexit runs while
+        # daemon threads can still be joined, so it guarantees a drain.
+        atexit.register(self.stop)
 
     def stop(self) -> None:
         if self.saved_stderr_fd is None:
             return
 
         sys.stderr.flush()
+        # Restoring fd 2 drops the last reference to the pipe's write end, so
+        # the pump sees EOF, flushes what is buffered and exits.
         os.dup2(self.saved_stderr_fd, 2)
         if self.thread:
             self.thread.join(timeout=1.0)
         os.close(self.saved_stderr_fd)
         self.saved_stderr_fd = None
+        atexit.unregister(self.stop)
 
     def _emit(self, line: bytes) -> None:
         if self.suppress(line):

@@ -305,14 +305,20 @@ INFER_CONFIG_ABS="$(absolute_path "$INFER_CONFIG")"
 STREAM_ABS="$(absolute_path "$STREAM")"
 ONNX_ABS="$(absolute_path "$ONNX")"
 ENGINE_ABS="$(absolute_path "$ENGINE")"
-LABELS_ABS="$(absolute_path "models/coco_labels.txt")"
+# models/coco_labels.txt always holds the most recent export, so a config that
+# points at it starts describing a different model as soon as another one is
+# exported. Keep a per-model copy and point this config at that instead.
+MODEL_LABELS="models/${MODEL_STEM}.labels.txt"
+cp -f models/coco_labels.txt "$MODEL_LABELS"
+
+LABELS_ABS="$(absolute_path "$MODEL_LABELS")"
 CUSTOM_LIB_ABS="$(absolute_path "lib/libnvdsinfer_custom_impl_Yolo.so")"
 
 # nvinfer's num-detected-classes has to match the labels just installed, or a
 # fine-tuned model announces a class count its own engine does not produce.
-NUM_CLASSES="$(grep -c '[^[:space:]]' models/coco_labels.txt || true)"
+NUM_CLASSES="$(grep -c '[^[:space:]]' "$MODEL_LABELS" || true)"
 if [ "$NUM_CLASSES" -lt 1 ]; then
-    echo "No class names in models/coco_labels.txt"
+    echo "No class names in $MODEL_LABELS"
     exit 1
 fi
 
@@ -430,7 +436,7 @@ echo "ONNX:         $ONNX"
 echo "Engine:       $ENGINE"
 echo "Infer config: $INFER_CONFIG"
 echo "App config:   $APP_CONFIG"
-echo "Labels:       models/coco_labels.txt (${NUM_CLASSES} classes)"
+echo "Labels:       ${MODEL_LABELS} (${NUM_CLASSES} classes)"
 echo
 echo "Run:"
 echo "  deepstream-app -c $APP_CONFIG"

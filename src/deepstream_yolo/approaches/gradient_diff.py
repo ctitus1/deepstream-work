@@ -83,10 +83,28 @@ What is actually doing the work, in order of how much:
      false positives instead of one hit. An 11 px closing makes them one
      component.
 
-Known limit: a homography is exact only for a planar scene, so tall structures
-at low altitude keep a residual parallax that no amount of thresholding
-distinguishes from a target, because it is real image motion. ``debug`` reports
-the median residual by image region so that can be seen rather than guessed at.
+Where it fails, measured on the final run. 243 of 3472 mover frames are missed,
+in 77 streaks of which 27 are a single frame and the longest is 21. They are
+not scattered: on missed frames the mover is moving at a median 1.68 branch
+px/frame against 3.82 on frames that hit, and 35% of them are under 1 px/frame
+against 3% of hits. The misses are the walker slowing down or standing still,
+which is the honest floor of any differencing method -- a person who stops
+moving stops producing a difference, and no threshold recovers them. The one
+long streak is at frames 38-58, before the tracker has accumulated enough
+history to hold a homography.
+
+Of the 350 false positives, 165 land on the three stationary people, who sway
+and shift weight; the same floor applies from the other side, since a
+differencing method cannot tell a small real movement from the beginning of a
+large one. The remaining 185 are spread thinly over the frame with a mild
+concentration bottom-right.
+
+Known limit not exercised by this footage: a homography is exact only for a
+planar scene, so tall structures at low altitude keep a residual parallax that
+no threshold distinguishes from a target, because it is real image motion.
+``debug`` reports the median residual by image region so that can be seen
+rather than guessed at; here it runs 2.0-6.3 intensity units with no region
+diverging, which is why parallax is not among the failures above.
 """
 
 from __future__ import annotations

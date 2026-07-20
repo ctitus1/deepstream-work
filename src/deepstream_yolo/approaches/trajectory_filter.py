@@ -143,6 +143,12 @@ class Config:
     # evidence of a mover.
     revalidate: bool = True
 
+    # Subtract the camera's own motion before association and before the
+    # trajectory gates. Off only to measure what it is worth -- the design
+    # assumes it, and every gate downstream is measuring the wrong quantity
+    # without it.
+    ego_compensate: bool = True
+
     # --- Kalman ------------------------------------------------------------
     q_pos: float = 0.25
     q_size: float = 1.0
@@ -650,11 +656,14 @@ class Approach:
 
         # --- ego motion, then predict, both before any association ---------
         for t in self.tracks:
-            img_x = t.x[0] + t.cam[0]
-            img_y = t.x[1] + t.cam[1]
-            dx, dy = self._camera_flow(coef_x, coef_y, img_x, img_y, rows, cols, grid)
-            t.cam[0] += dx
-            t.cam[1] += dy
+            if cfg.ego_compensate:
+                img_x = t.x[0] + t.cam[0]
+                img_y = t.x[1] + t.cam[1]
+                dx, dy = self._camera_flow(
+                    coef_x, coef_y, img_x, img_y, rows, cols, grid
+                )
+                t.cam[0] += dx
+                t.cam[1] += dy
             t.predict(cfg)
 
         # --- association ---------------------------------------------------

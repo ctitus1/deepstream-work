@@ -177,7 +177,7 @@ class Approach:
         # the characteristic length every pixel value above is measured
         # against -- see _scale_to_target. Set it for the camera and the range,
         # not for the resolution.
-        "target_height": 440.0,
+        "target_height": 440.0, # ref 440px at 3840x2160p
     }
 
     _INTS = (

@@ -113,7 +113,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stream", default=str(DEFAULT_MEDIA))
     parser.add_argument("--width", type=int, default=960, help="branch resolution width")
-    parser.add_argument("--height", type=int, default=540)
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=0,
+        help="branch resolution height; 0 derives it from the source aspect ratio",
+    )
     parser.add_argument("--grid-size", type=int, default=4, help="nvof block size")
     parser.add_argument("--cfg", default="{}", help="JSON dict passed to the approach")
     parser.add_argument(
@@ -263,6 +268,29 @@ def main() -> int:
 
     Gst.init(None)
     src_w, src_h = discover_size(stream.uri)
+
+    # Derive the branch height from the source unless one was asked for.
+    #
+    # nvstreammux scales to exactly what it is told, so a branch pinned to a
+    # fixed height stretches any source of a different aspect ratio.
+    # streams/lorton-d4-thermal.mp4 is 640x512: forced into 960x540 it comes out
+    # 1.5x wider and only 1.055x taller. Everything downstream compares
+    # Euclidean distances -- residual magnitudes, cluster radii, match radii --
+    # and those assume both axes share a scale, so the stretch silently makes
+    # horizontal motion worth 1.42x vertical. Nothing errors; the numbers just
+    # quietly mean something different in x than in y.
+    #
+    # Rounded to an even height because encoders and several DeepStream
+    # elements dislike odd dimensions.
+    height = args.height or max(2, int(round(args.width * src_h / src_w / 2)) * 2)
+    if not args.height:
+        print(
+            f"  branch {args.width}x{height} from {src_w}x{src_h} (aspect preserved)",
+            file=sys.stderr,
+            flush=True,
+        )
+    args.height = height
+
     pipeline, tail = build(stream, args.width, args.height, needs_flow)
 
     scale_x = args.grid_size * (src_w / float(args.width))

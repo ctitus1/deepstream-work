@@ -86,12 +86,14 @@ class Approach:
         self.single = bool(cfg.get("single", False))  # skip the 2k lag, for A/B
 
         # Feature tracking.
-        self.max_corners = int(cfg.get("max_corners", 1200))
+        self.max_corners = int(cfg.get("max_corners", 800))
         self.quality = float(cfg.get("quality", 0.01))
         self.min_distance = int(cfg.get("min_distance", 8))
         self.block_size = int(cfg.get("block_size", 7))
         self.fb_tolerance = float(cfg.get("fb_tolerance", 0.5))
-        self.redetect_below = int(cfg.get("redetect_below", 600))
+        self.redetect_below = int(cfg.get("redetect_below", 500))
+        self.lk_win = int(cfg.get("lk_win", 21))
+        self.lk_levels = int(cfg.get("lk_levels", 3))
 
         # Homography.
         self.ransac_px = float(cfg.get("ransac_px", 1.5))
@@ -115,9 +117,11 @@ class Approach:
         self.lags = lags
         self.max_lag = max(lags)
 
-        # Ring of past frames as 2-channel float32 (luma, gradient magnitude),
-        # so one warpPerspective call carries both.
-        self.ring: deque[np.ndarray] = deque(maxlen=self.max_lag + 1)
+        # Ring of past frames as separate contiguous (luma, gradient magnitude)
+        # planes. Interleaving them into one 2-channel image halves the warp
+        # calls but leaves every downstream operand a strided view, and the
+        # copies that forces cost several times what the extra warp saves.
+        self.ring: deque[tuple[np.ndarray, np.ndarray]] = deque(maxlen=self.max_lag + 1)
         # Point traces, aligned index-for-index across the ring.
         self.trace: deque[np.ndarray] = deque(maxlen=self.max_lag + 1)
         self.age: np.ndarray = np.zeros(0, np.int32)
@@ -125,24 +129,34 @@ class Approach:
         self.frames_since_detect = 0
         self.stats: list[tuple] = []
 
+        # A one-frame step displaces a feature by ~2-3 px here, so three
+        # pyramid levels is already generous; the fourth costs time and buys
+        # nothing. The window stays wide, because it is the window that sets
+        # how well the sub-pixel term is conditioned.
         self._lk = dict(
-            winSize=(21, 21),
-            maxLevel=4,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+            winSize=(self.lk_win, self.lk_win),
+            maxLevel=self.lk_levels,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01),
         )
 
     # ---------------------------------------------------------------- helpers
 
     def _detect(self, gray: np.ndarray, existing: np.ndarray | None) -> np.ndarray:
         """New corners, kept away from the ones already being tracked."""
-        mask = None
-        if existing is not None and len(existing):
-            mask = np.full(gray.shape, 255, np.uint8)
-            for x, y in existing.astype(np.int32):
-                cv2.circle(mask, (int(x), int(y)), self.min_distance, 0, -1)
         want = self.max_corners - (0 if existing is None else len(existing))
         if want <= 0:
             return np.zeros((0, 2), np.float32)
+        mask = None
+        if existing is not None and len(existing):
+            # Stamp the occupied pixels and grow them, rather than drawing a
+            # circle per point: one dilation beats a thousand draw calls.
+            mask = np.zeros(gray.shape, np.uint8)
+            xy = np.round(existing).astype(np.int32)
+            np.clip(xy[:, 0], 0, gray.shape[1] - 1, out=xy[:, 0])
+            np.clip(xy[:, 1], 0, gray.shape[0] - 1, out=xy[:, 1])
+            mask[xy[:, 1], xy[:, 0]] = 255
+            r = self.min_distance
+            mask = cv2.bitwise_not(cv2.dilate(mask, np.ones((2 * r + 1, 2 * r + 1), np.uint8)))
         pts = cv2.goodFeaturesToTrack(
             gray,
             maxCorners=want,
@@ -223,7 +237,6 @@ class Approach:
         gx = cv2.Sobel(grayf, cv2.CV_32F, 1, 0, ksize=3, scale=0.25)
         gy = cv2.Sobel(grayf, cv2.CV_32F, 0, 1, ksize=3, scale=0.25)
         gmag = cv2.magnitude(gx, gy)
-        plane = np.dstack([grayf, gmag])
 
         h, w = gray.shape[:2]
 
@@ -233,7 +246,7 @@ class Approach:
             self.trace.append(pts)
             self.age = np.zeros(len(pts), np.int32)
             self.prev_gray = gray
-            self.ring.append(plane)
+            self.ring.append((grayf, gmag))
             return []
 
         prev_pts = self.trace[-1]
@@ -248,7 +261,7 @@ class Approach:
             self.frames_since_detect = 0
 
         self.prev_gray = gray
-        self.ring.append(plane)
+        self.ring.append((grayf, gmag))
 
         # --- homography per lag ---------------------------------------------
         boxes: list[dict] = []
@@ -274,11 +287,11 @@ class Approach:
         accept: np.ndarray | None = None
         residuals: list[np.ndarray] = []
         for lag, hom in homographies.items():
-            warped = cv2.warpPerspective(
-                self.ring[-1 - lag], hom, (w, h), flags=cv2.INTER_LINEAR
-            )
-            diff = cv2.absdiff(grayf, warped[:, :, 0])
-            denom = gmag + warped[:, :, 1] + self.c
+            ref_gray, ref_gmag = self.ring[-1 - lag]
+            warp_gray = cv2.warpPerspective(ref_gray, hom, (w, h), flags=cv2.INTER_LINEAR)
+            warp_gmag = cv2.warpPerspective(ref_gmag, hom, (w, h), flags=cv2.INTER_LINEAR)
+            diff = cv2.absdiff(grayf, warp_gray)
+            denom = cv2.add(cv2.add(gmag, warp_gmag), self.c)
             sig = cv2.divide(diff, denom)
             hit = (sig > self.threshold).astype(np.uint8)
             accept = hit if accept is None else cv2.bitwise_and(accept, hit)

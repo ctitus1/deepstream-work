@@ -48,11 +48,22 @@ Mechanically:
      scorer is concerned.
   5. Morphological clean, connected components, boxes in source pixels.
 
-``k`` is the parameter that matters most. A person moving 2.5 px/frame against
-a body 25-40 px wide uncovers almost no background at k=1; the difference is a
-thin rim and the detector is being asked to find a target by its outline. At
-k=4 the displacement is 10 px and a real fraction of the body sits over ground
-it did not cover before.
+``k`` is the parameter that matters most, and measurement moved it twice. The
+walker is 63x110 px at branch resolution and moves ~3 px/frame relative to the
+registered background, so at k=1 the difference is a three-pixel rim around a
+sixty-three-pixel body: recall 0.508, the detector being asked to find a target
+by its outline. k=2 is enough to saturate recall at 0.957 and every larger lag
+holds it there.
+
+Which makes ``k`` look settled at 2, and it is not. Lag also decides how big
+the blob is, and blob size is the only thing that separates a real target from
+a false positive -- their widths, heights, aspects and fill ratios all overlap,
+their areas do not. A longer lag uncovers more background, so it grows the true
+blobs faster than the false ones, and the area filter that follows cuts deeper
+for the same recall. At the area threshold each lag prefers, k=1 tops out at
+0.480, k=2 at 0.701, k=3 at 0.720, k=4 at 0.718, k=6 at 0.680. The two
+parameters have to be chosen together; either one alone points somewhere
+misleading.
 
 Known limit: a homography is exact only for a planar scene, so tall structures
 at low altitude keep a residual parallax that gradient normalisation does not
@@ -107,7 +118,7 @@ class Approach:
         # Post-processing.
         self.open_px = int(cfg.get("open_px", 3))
         self.close_px = int(cfg.get("close_px", 7))
-        self.min_area = int(cfg.get("min_area", 90))
+        self.min_area = int(cfg.get("min_area", 400))
         self.border = int(cfg.get("border", 0))  # 0 = derive from the homography
         self.pad = float(cfg.get("pad", 0.0))  # box padding, fraction of size
 

@@ -55,3 +55,7 @@ env/
 
 # Agent worktrees (git metadata, not source)
 .claude/worktrees/
+
+# Per-video comparison artifacts
+eval/runs/
+eval/detections*.json

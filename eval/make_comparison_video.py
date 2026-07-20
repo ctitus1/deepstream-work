@@ -44,14 +44,6 @@ import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
-# (run file, label). Order is the grid: top-left, top-right, bottom-left, bottom-right.
-PANELS = [
-    ("klt_homography.json", "klt-homography   F1 0.937"),
-    ("gradient_diff.json", "gradient-diff    F1 0.925"),
-    ("bgsub_compensated.json", "bgsub-compensated  F1 0.920"),
-    ("baseline.json", "baseline (shipped)  F1 0.422"),
-]
-
 TILE_W, TILE_H = 960, 540
 BOX_COLOR = (170, 170, 170)
 LABEL_BG = (0, 0, 0)
@@ -60,27 +52,51 @@ LABEL_FG = (255, 255, 255)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--video", default="streams/lorton-d4-rgb.mp4")
-    parser.add_argument("--start", type=int, default=3000, help="first frame index")
-    parser.add_argument("--frames", type=int, default=540, help="how many frames (30fps)")
-    parser.add_argument("--runs", default="eval/runs")
+    parser.add_argument("--video", required=True)
+    parser.add_argument("--runs", required=True, help="comma-separated run JSON paths")
+    parser.add_argument(
+        "--labels",
+        default="",
+        help="comma-separated panel labels; defaults to each run's approach name",
+    )
+    parser.add_argument("--start", type=int, default=0, help="first frame index")
+    parser.add_argument("--frames", type=int, default=0, help="0 = to end of video")
+    parser.add_argument("--tile-width", type=int, default=TILE_W)
+    parser.add_argument("--tile-height", type=int, default=TILE_H)
+    parser.add_argument(
+        "--geometry",
+        action="store_true",
+        help="print the output WIDTHxHEIGHT and exit, so the caller can tell ffmpeg",
+    )
     return parser.parse_args()
 
 
-def load(runs_dir: Path):
+def grid_shape(count: int) -> tuple[int, int]:
+    """Rows and columns for ``count`` panels: two columns unless there are two."""
+    if count <= 1:
+        return 1, 1
+    if count == 2:
+        return 1, 2
+    return (count + 1) // 2, 2
+
+
+def load(run_paths: list[str], labels: list[str]):
     panels = []
-    for name, label in PANELS:
-        path = runs_dir / name
+    for i, raw in enumerate(run_paths):
+        path = Path(raw)
+        if not path.is_absolute():
+            path = PROJECT_DIR / path
         if not path.is_file():
-            print(f"missing {path}", file=sys.stderr)
+            print(f"missing run: {path}", file=sys.stderr)
             raise SystemExit(2)
         data = json.loads(path.read_text())
+        label = labels[i] if i < len(labels) and labels[i] else data.get("approach", path.stem)
         by_index = {f["index"]: f["boxes"] for f in data["frames"]}
         panels.append((by_index, label))
     return panels
 
 
-def draw(tile: np.ndarray, boxes, label: str, scale_x: float, scale_y: float) -> None:
+def draw(tile, boxes, label: str, scale_x: float, scale_y: float, tile_h: int) -> None:
     for box in boxes:
         x0 = int(round(box["left"] * scale_x))
         y0 = int(round(box["top"] * scale_y))
@@ -97,40 +113,64 @@ def draw(tile: np.ndarray, boxes, label: str, scale_x: float, scale_y: float) ->
 
     count = f"{len(boxes)} box" + ("" if len(boxes) == 1 else "es")
     (cw, ch), _ = cv2.getTextSize(count, font, 0.9, 2)
-    cv2.rectangle(tile, (0, TILE_H - ch - 22), (cw + 24, TILE_H), LABEL_BG, -1)
-    cv2.putText(tile, count, (12, TILE_H - 10), font, 0.9, LABEL_FG, 2, cv2.LINE_AA)
+    cv2.rectangle(tile, (0, tile_h - ch - 22), (cw + 24, tile_h), LABEL_BG, -1)
+    cv2.putText(tile, count, (12, tile_h - 10), font, 0.9, LABEL_FG, 2, cv2.LINE_AA)
 
 
 def main() -> int:
     args = parse_args()
-    panels = load(PROJECT_DIR / args.runs)
+    run_paths = [r for r in args.runs.split(",") if r]
+    labels = args.labels.split("|") if args.labels else []
+    rows, cols = grid_shape(len(run_paths))
+    tile_w, tile_h = args.tile_width, args.tile_height
 
-    capture = cv2.VideoCapture(str(PROJECT_DIR / args.video))
+    if args.geometry:
+        # The caller has to tell ffmpeg the raw frame size before a byte is
+        # written, and only this script knows the grid layout.
+        print(f"{cols * tile_w}x{rows * tile_h}")
+        return 0
+
+    panels = load(run_paths, labels)
+
+    video = Path(args.video)
+    if not video.is_absolute():
+        video = PROJECT_DIR / video
+    capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
         print("cannot open video", file=sys.stderr)
         return 2
 
     src_w = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
     src_h = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    scale_x, scale_y = TILE_W / src_w, TILE_H / src_h
-    capture.set(cv2.CAP_PROP_POS_FRAMES, args.start)
+    scale_x, scale_y = tile_w / src_w, tile_h / src_h
+    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    count = args.frames if args.frames > 0 else max(total - args.start, 0)
+    if args.start:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, args.start)
+
+    # A blank tile pads the grid when the panel count is odd, so the frame size
+    # stays constant -- ffmpeg is told one size up front and every frame must
+    # match it exactly.
+    blank = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
 
     out = sys.stdout.buffer
-    for offset in range(args.frames):
+    for offset in range(count):
         ok, frame = capture.read()
         if not ok:
             break
         index = args.start + offset
-        small = cv2.resize(frame, (TILE_W, TILE_H), interpolation=cv2.INTER_AREA)
+        small = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
 
         tiles = []
         for by_index, label in panels:
             tile = small.copy()
-            draw(tile, by_index.get(index, []), label, scale_x, scale_y)
+            draw(tile, by_index.get(index, []), label, scale_x, scale_y, tile_h)
             tiles.append(tile)
+        while len(tiles) < rows * cols:
+            tiles.append(blank)
 
         grid = np.vstack(
-            [np.hstack([tiles[0], tiles[1]]), np.hstack([tiles[2], tiles[3]])]
+            [np.hstack(tiles[r * cols : (r + 1) * cols]) for r in range(rows)]
         )
         out.write(grid.tobytes())
         if offset % 120 == 0:

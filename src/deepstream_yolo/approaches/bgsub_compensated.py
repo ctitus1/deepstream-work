@@ -61,12 +61,12 @@ class Approach:
         self.min_inliers = int(cfg.get("min_inliers", 25))
 
         # Gaussian model
-        self.alpha = float(cfg.get("alpha", 0.02))
+        self.alpha = float(cfg.get("alpha", 0.005))
         self.alpha_fg = float(cfg.get("alpha_fg", 0.002))
-        self.k = float(cfg.get("k", 3.5))
+        self.k = float(cfg.get("k", 4.5))
         self.min_diff = float(cfg.get("min_diff", 12.0))
         self.init_var = float(cfg.get("init_var", 400.0))
-        self.min_var = float(cfg.get("min_var", 25.0))
+        self.min_var = float(cfg.get("min_var", 100.0))
         self.max_var = float(cfg.get("max_var", 4000.0))
         self.age_min = float(cfg.get("age_min", 0.25))
 
@@ -80,7 +80,7 @@ class Approach:
         # Blobs
         self.open_k = int(cfg.get("open_k", 3))
         self.close_k = int(cfg.get("close_k", 9))
-        self.min_area = int(cfg.get("min_area", 40))
+        self.min_area = int(cfg.get("min_area", 20))
         self.max_area_frac = float(cfg.get("max_area_frac", 0.08))
         self.panic_frac = float(cfg.get("panic_frac", 0.25))
 

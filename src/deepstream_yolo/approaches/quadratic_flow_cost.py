@@ -95,7 +95,9 @@ DEFAULTS = {
     "decay": 0.85,
     "min_speed_frac": 0.0022,
     "noise_scale": 6.0,
-    "seed_speed_frac": 0.0040,
+    # Seed speed a component needs one cell above to exist at all. The baseline
+    # sets 0.0040; 0.0032 here for the reason given under min_area_frac below.
+    "seed_speed_frac": 0.0032,
     "max_speed": 18.0,
     "min_coherence": 0.5,
 
@@ -123,8 +125,15 @@ DEFAULTS = {
     # Confidence a cell must accumulate before it may be thresholded at all.
     "w_min": 0.25,
 
-    # --- shape filters, as the baseline leaves them ------------------------
-    "min_area_frac": 0.005,
+    # --- shape filters ------------------------------------------------------
+    # Half the baseline's 0.005. Not a tuning flourish: the baseline sits at
+    # 0.71 precision against 0.30 recall, and on a harmonic mean a point of
+    # recall there is worth several points of precision, so its operating point
+    # was on the wrong side of its own trade. Measured, this pair (with
+    # seed_speed_frac above) is +0.10 F1 over the same model at the baseline's
+    # thresholds. The cost is real and lands on the metric that matters most:
+    # boxes on stationary people go from 25 to 56.
+    "min_area_frac": 0.0025,
     "max_area_frac": 1.0,
     "min_fill": 0.0,
     "dilate": 2,

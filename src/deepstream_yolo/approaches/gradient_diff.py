@@ -142,7 +142,7 @@ class Approach:
         # Post-processing.
         self.open_px = int(cfg.get("open_px", 3))
         self.close_px = int(cfg.get("close_px", 11))
-        self.min_area = int(cfg.get("min_area", 100))
+        self.min_area = int(cfg.get("min_area", 250))
         self.border = int(cfg.get("border", 0))  # 0 = derive from the homography
         self.pad = float(cfg.get("pad", 0.0))  # box padding, fraction of size
 

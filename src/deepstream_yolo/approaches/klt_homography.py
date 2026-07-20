@@ -139,11 +139,11 @@ class Approach:
         "ransac_threshold": 2.0,
         "min_correspondences": 30,
         # what counts as a moving point
-        "residual_floor": 6.0,
+        "residual_floor": 9.0,
         "residual_scale": 8.0,
         # clustering, and the evidence a cluster must carry
-        "cluster_radius": 26.0,
-        "min_cluster_points": 3,
+        "cluster_radius": 100.0,
+        "min_cluster_points": 2,
         "min_cluster_energy": 0.0,
         "min_coherence": 0.0,
         # temporal persistence
@@ -151,9 +151,9 @@ class Approach:
         "min_hits": 3,
         "max_misses": 2,
         "smooth": 0.5,
-        "min_travel": 0.0,
+        "min_travel": 35.0,
         # reported box
-        "box_trim": 0.0,
+        "box_trim": 0.12,
         "box_pad": 10.0,
         "min_box": 30.0,
     }

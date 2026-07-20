@@ -32,9 +32,18 @@ enough to mean something; without it the leading edge of the frame is a
 permanent wall of false positives.
 
 MOG2 and KNN are available via ``model=mog2|knn``. They cannot be warped -- the
-mixture state is private -- so they instead run on frames warped into a
-keyframe's coordinates and are reset when the view has drifted too far. See the
-module notes on ``_reanchor`` for why that costs more than it buys here.
+mixture state is private -- so they have to run the other way round, on frames
+warped into a keyframe's coordinates, which compounds registration error over
+the whole sequence rather than over one frame. That is not a small difference:
+tuned as well as either could be, MOG2 reaches F1 0.574 and KNN 0.476 where the
+warped Gaussian reaches 0.920. They are kept because that comparison is the
+evidence for warping the model rather than the frames; see ``_mixture``.
+
+Measured over the whole clip, against the baseline in the same columns:
+
+    approach              F1   prec  recall  box/f  onstat  onbg    ms
+    bgsub-compensated  0.920  0.944   0.897   0.64      40   154   9.3
+    baseline           0.422  0.713   0.300   0.27      18   401   8.3
 """
 
 from __future__ import annotations
@@ -62,7 +71,6 @@ class Approach:
 
         # Gaussian model
         self.alpha = float(cfg.get("alpha", 0.005))
-        self.alpha_fg = float(cfg.get("alpha_fg", 0.002))
         self.k = float(cfg.get("k", 4.5))
         self.min_diff = float(cfg.get("min_diff", 12.0))
         self.init_var = float(cfg.get("init_var", 400.0))
@@ -163,7 +171,10 @@ class Approach:
         thresh = np.maximum(self.k * np.sqrt(self.var), self.min_diff)
         fg = (diff > thresh) & (self.age >= self.age_min)
 
-        rate = np.where(fg, np.float32(self.alpha_fg), np.float32(self.alpha))
+        # Every pixel updates at the same rate, foreground included. Holding the
+        # model back where it fired is the textbook move and it measures worse
+        # here -- see the commit that removed it.
+        rate = np.float32(self.alpha)
         self.mean += rate * (frame32 - self.mean)
         self.var += rate * (diff * diff - self.var)
         np.clip(self.var, self.min_var, self.max_var, out=self.var)
@@ -171,7 +182,7 @@ class Approach:
 
         return fg.astype(np.uint8) * 255
 
-    def _reanchor(self, gray: np.ndarray) -> None:
+    def _reanchor(self) -> None:
         if self.model_kind == "knn":
             self.sub = cv2.createBackgroundSubtractorKNN(
                 history=self.history,
@@ -211,18 +222,16 @@ class Approach:
         """
         height, width = gray.shape
         if self.sub is None:
-            self._reanchor(gray)
+            self._reanchor()
 
         if matrix is not None and self.anchor is not None:
             try:
                 self.anchor = self.anchor @ np.linalg.inv(matrix)
             except np.linalg.LinAlgError:
-                self._reanchor(gray)
-        elif matrix is None:
-            pass
+                self._reanchor()
 
         if self._drift(self.anchor, gray.shape) > self.reanchor_px:
-            self._reanchor(gray)
+            self._reanchor()
 
         warped = cv2.warpPerspective(gray, self.anchor, (width, height), flags=cv2.INTER_LINEAR)
         valid = cv2.warpPerspective(

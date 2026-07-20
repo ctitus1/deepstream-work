@@ -98,13 +98,18 @@ def _grid_clusters(points: np.ndarray, radius: float) -> list[np.ndarray]:
 class _Candidate:
     """A cluster followed across frames, so flicker can be rejected."""
 
-    __slots__ = ("cx", "cy", "box", "hits", "misses", "points")
+    __slots__ = ("cx", "cy", "box", "hits", "misses", "points", "born_at", "travelled")
 
     def __init__(self, cx, cy, box, points):
         self.cx, self.cy, self.box, self.points = cx, cy, box, points
         self.hits, self.misses = 1, 0
+        self.born_at = (cx, cy)
+        self.travelled = 0.0
 
     def update(self, cx, cy, box, points, smooth):
+        self.travelled = max(
+            self.travelled, float(np.hypot(cx - self.born_at[0], cy - self.born_at[1]))
+        )
         self.cx = smooth * self.cx + (1.0 - smooth) * cx
         self.cy = smooth * self.cy + (1.0 - smooth) * cy
         self.box = tuple(smooth * a + (1.0 - smooth) * b for a, b in zip(self.box, box))
@@ -146,6 +151,7 @@ class Approach:
         "min_hits": 3,
         "max_misses": 2,
         "smooth": 0.5,
+        "min_travel": 0.0,
         # reported box
         "box_pad": 10.0,
         "min_box": 30.0,
@@ -381,9 +387,16 @@ class Approach:
         scale_y = ctx.src_h / float(ctx.height)
         pad, floor = float(self.box_pad), float(self.min_box)
 
+        travel = float(self.min_travel)
         boxes = []
         for candidate in self.candidates:
             if candidate.hits < self.min_hits:
+                continue
+            # A source that never leaves the spot it appeared in is foliage, or
+            # a standing person shifting their weight -- not someone crossing
+            # the scene. The test latches once passed, so a walker who stops is
+            # still reported for as long as the cluster survives.
+            if travel > 0.0 and candidate.travelled < travel:
                 continue
             left, top, right, bottom = candidate.box
             left, top, right, bottom = left - pad, top - pad, right + pad, bottom + pad

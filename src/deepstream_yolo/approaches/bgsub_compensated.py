@@ -79,7 +79,7 @@ class Approach:
 
         # Blobs
         self.open_k = int(cfg.get("open_k", 3))
-        self.close_k = int(cfg.get("close_k", 9))
+        self.close_k = int(cfg.get("close_k", 17))
         self.min_area = int(cfg.get("min_area", 20))
         self.max_area_frac = float(cfg.get("max_area_frac", 0.08))
         self.panic_frac = float(cfg.get("panic_frac", 0.25))

@@ -23,6 +23,13 @@ def is_wall_clock_timestamp(source: str | None) -> bool:
     return source in WALL_CLOCK_TIMESTAMP_SOURCES
 
 
+def parse_endpoint(endpoint: str) -> tuple[str, int]:
+    host, _, port = endpoint.rpartition(":")
+    if not host or not port:
+        raise ValueError(f"Expected endpoint HOST:PORT, got {endpoint!r}")
+    return host, int(port)
+
+
 def send_frame(sock: socket.socket, metadata: dict, payload: bytes) -> None:
     header = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
     sock.sendall(HEADER.pack(len(header), len(payload)))

@@ -54,6 +54,9 @@ class RateLimiter:
 
 
 class KeyboardControls:
+    # Arrow keys nudge the playback rate; right/left coarse, up/down fine.
+    RATE_DELTAS = {"\x1b[C": 0.5, "\x1b[D": -0.5, "\x1b[A": 0.05, "\x1b[B": -0.05}
+
     def __init__(self, pipeline, loop, limiter: RateLimiter):
         self.pipeline = pipeline
         self.loop = loop
@@ -116,16 +119,11 @@ class KeyboardControls:
 
         if key == " ":
             self.toggle_pause()
-        elif key == "r" and self.limiter.enabled:
-            self.limiter.set_rate(1.0)
-        elif key == "\x1b[C" and self.limiter.enabled:
-            self.limiter.set_rate(self.limiter.rate + 0.5)
-        elif key == "\x1b[D" and self.limiter.enabled:
-            self.limiter.set_rate(self.limiter.rate - 0.5)
-        elif key == "\x1b[A" and self.limiter.enabled:
-            self.limiter.set_rate(self.limiter.rate + 0.05)
-        elif key == "\x1b[B" and self.limiter.enabled:
-            self.limiter.set_rate(self.limiter.rate - 0.05)
+        elif self.limiter.enabled:
+            if key == "r":
+                self.limiter.set_rate(1.0)
+            elif key in self.RATE_DELTAS:
+                self.limiter.set_rate(self.limiter.rate + self.RATE_DELTAS[key])
 
         return True
 

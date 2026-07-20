@@ -45,7 +45,7 @@ from deepstream_yolo.assessment_runtime import (
     label_log_text,
 )
 from deepstream_yolo.detection_overlay import PERSON_CLASS_ID, bbox_probe, get_detection_id
-from deepstream_yolo.frame_wire import is_wall_clock_timestamp, send_frame
+from deepstream_yolo.frame_wire import parse_endpoint, send_frame
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
 from deepstream_yolo.paths import DEFAULT_ASSESSMENT_MODEL, DEFAULT_MODEL, DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
@@ -88,11 +88,6 @@ class ImageSpace:
     image_width: int
     image_height: int
 
-    def __post_init__(self) -> None:
-        for name in ("source_width", "source_height", "image_width", "image_height"):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
-
     def scale_bbox(self, bbox: BBox) -> list[float]:
         left, top, width, height = bbox
         scale_x = self.image_width / self.source_width
@@ -123,9 +118,6 @@ class SourceTimestamp:
     source: str
     timestamp: int | None
 
-    def formatted(self) -> str:
-        return format_timestamp(self.source, self.timestamp)
-
 
 class SourceTimestampStore:
     """Immutable source timestamp lookup keyed by DeepStream frame number."""
@@ -142,7 +134,6 @@ class SourceTimestampStore:
 
         source_timestamp = SourceTimestamp(key, source, timestamp)
         self.timestamps[key] = source_timestamp
-        self.timestamps.move_to_end(key)
         while len(self.timestamps) > self.max_frames:
             self.timestamps.popitem(last=False)
         return source_timestamp
@@ -173,24 +164,16 @@ class FrameLog:
     image_size: tuple[int, int] | None = None
 
     def metadata(self) -> dict:
-        # The ROS bridge treats source_timestamp_ns as the authoritative stamp.
+        # The bridge treats source_timestamp_ns as the authoritative stamp, but
+        # only trusts it when source_timestamp_source names a wall clock: buf_pts
+        # and pts are stream-relative and would date every message to 1970.
         metadata = {
             "stage": self.stage,
             "frame": self.frame_num,
-            "timestamp_ns": self.timestamp,
-            "timestamp": format_timestamp(self.timestamp_source, self.timestamp),
-            "timestamp_source": self.timestamp_source,
             "source_timestamp_ns": self.timestamp,
             "source_timestamp": format_timestamp(self.timestamp_source, self.timestamp),
             "source_timestamp_source": self.timestamp_source,
-            # Whether source_timestamp_ns is real wall clock. buf_pts/pts are
-            # stream-relative, so claiming they are authoritative made the
-            # bridge stamp messages at the epoch.
-            "timestamp_is_source": is_wall_clock_timestamp(self.timestamp_source),
-            "timing": list(self.timing_fields),
-            "rows": self.rows,
             "objects": list(self.objects),
-            "object_count": len(self.objects),
             "data_source_id": frame_data_source_id(self.frame_num),
             "log_text": self.format(),
         }
@@ -198,7 +181,6 @@ class FrameLog:
             metadata["source_width"], metadata["source_height"] = self.source_size
         if self.image_size:
             metadata["image_width"], metadata["image_height"] = self.image_size
-            metadata["bbox_coordinate_space"] = "image"
         return metadata
 
     def format(self) -> str:
@@ -222,10 +204,8 @@ class FrameLogStore:
     def __init__(self, max_frames: int = 512):
         self.max_frames = max_frames
         self.logs: OrderedDict[int, FrameLog] = OrderedDict()
-        self.latest: FrameLog | None = None
 
     def put(self, key: int | None, log: FrameLog) -> None:
-        self.latest = log
         if key is None:
             return
         self.logs[key] = log
@@ -233,12 +213,10 @@ class FrameLogStore:
         while len(self.logs) > self.max_frames:
             self.logs.popitem(last=False)
 
-    def pop(self, key: int | None, allow_latest: bool = True) -> FrameLog | None:
-        if key is not None and key in self.logs:
-            return self.logs.pop(key)
-        if allow_latest:
-            return self.latest
-        return None
+    def pop(self, key: int | None) -> FrameLog | None:
+        if key is None:
+            return None
+        return self.logs.pop(key, None)
 
 
 def frame_data_source_id(frame_num: int) -> int:
@@ -246,17 +224,10 @@ def frame_data_source_id(frame_num: int) -> int:
 
 
 class FrameSocketSender:
-    def __init__(
-        self,
-        stage: str,
-        endpoint: str,
-        store: FrameLogStore,
-        require_fresh_metadata: bool = False,
-    ):
+    def __init__(self, stage: str, endpoint: str, store: FrameLogStore):
         self.stage = stage
         self.host, self.port = parse_endpoint(endpoint)
         self.store = store
-        self.require_fresh_metadata = require_fresh_metadata
         self.sock: socket.socket | None = None
         self.next_connect_time = 0.0
 
@@ -280,13 +251,11 @@ class FrameSocketSender:
         finally:
             buffer.unmap(mapped)
 
-        log = self.store.pop(
-            buffer_key(buffer),
-            allow_latest=not self.require_fresh_metadata,
-        )
-        if log is None and self.require_fresh_metadata:
+        log = self.store.pop(buffer_key(buffer))
+        if log is None:
             return Gst.FlowReturn.OK
-        metadata = log.metadata() if log else {"stage": self.stage, "log_text": f"{self.stage} metadata=missing"}
+
+        metadata = log.metadata()
         metadata["format"] = "jpeg"
         metadata["bytes"] = len(payload)
 
@@ -338,13 +307,6 @@ class FrameSocketSender:
         self.sock = None
 
 
-def parse_endpoint(endpoint: str) -> tuple[str, int]:
-    host, _, port = endpoint.rpartition(":")
-    if not host or not port:
-        raise ValueError(f"Expected endpoint HOST:PORT, got {endpoint!r}")
-    return host, int(port)
-
-
 def parse_args() -> argparse.Namespace:
     parser = RuntimeArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -371,9 +333,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def buffer_key(buffer) -> int | None:
-    for value in (getattr(buffer, "pts", None), getattr(buffer, "dts", None)):
-        if value is None:
-            continue
+    for value in (buffer.pts, buffer.dts):
         timestamp = int(value)
         if timestamp != Gst.CLOCK_TIME_NONE and timestamp >= 0:
             return timestamp
@@ -421,23 +381,28 @@ def serializable_predictions(predictions: dict[str, dict]) -> dict[str, dict]:
     return serialized
 
 
+def iter_frame_metas(info):
+    """Yield ``(buffer, frame_meta)`` for every frame in a probe's batch."""
+    buffer = info.get_buffer()
+    if not buffer:
+        return
+
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+    if not batch_meta:
+        return
+
+    frame_list = batch_meta.frame_meta_list
+    while frame_list:
+        yield buffer, pyds.NvDsFrameMeta.cast(frame_list.data)
+        frame_list = frame_list.next
+
+
 def source_timestamp_probe(timestamps: SourceTimestampStore):
     def _probe(_pad, info, _data):
-        buffer = info.get_buffer()
-        if not buffer:
-            return Gst.PadProbeReturn.OK
-
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
-        if not batch_meta:
-            return Gst.PadProbeReturn.OK
-
-        frame_list = batch_meta.frame_meta_list
-        while frame_list:
-            # Capture the network/source timestamp before branch-local buffers can diverge.
-            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
+        # Capture the network/source timestamp before branch-local buffers can diverge.
+        for buffer, frame_meta in iter_frame_metas(info):
             timestamp_source, timestamp = frame_timestamp(frame_meta, buffer)
             timestamps.put(int(frame_meta.frame_num), timestamp_source, timestamp)
-            frame_list = frame_list.next
 
         return Gst.PadProbeReturn.OK
 
@@ -450,37 +415,23 @@ def image_metadata_probe(
     timestamps: SourceTimestampStore,
 ):
     def _probe(_pad, info, _data):
-        buffer = info.get_buffer()
-        if not buffer:
-            return Gst.PadProbeReturn.OK
-
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
-        if not batch_meta:
-            return Gst.PadProbeReturn.OK
-
-        key = buffer_key(buffer)
-        frame_list = batch_meta.frame_meta_list
-        while frame_list:
+        for buffer, frame_meta in iter_frame_metas(info):
             # Raw images carry no object rows but still need source-frame identity.
-            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
             source_timestamp = timestamps.resolve(frame_num, fallback_source, fallback_timestamp)
             store.put(
-                key,
+                buffer_key(buffer),
                 FrameLog(
                     "IMAGE",
                     frame_num,
                     source_timestamp.source,
                     source_timestamp.timestamp,
                     [],
-                    (),
-                    [],
-                    image_space.source_size(),
-                    image_space.image_size(),
+                    source_size=image_space.source_size(),
+                    image_size=image_space.image_size(),
                 ),
             )
-            frame_list = frame_list.next
 
         return Gst.PadProbeReturn.OK
 
@@ -494,19 +445,8 @@ def detect_metadata_probe(
     timestamps: SourceTimestampStore,
 ):
     def _probe(_pad, info, _data):
-        buffer = info.get_buffer()
-        if not buffer:
-            return Gst.PadProbeReturn.OK
-
-        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
-        if not batch_meta:
-            return Gst.PadProbeReturn.OK
-
-        key = buffer_key(buffer)
-        frame_list = batch_meta.frame_meta_list
-        while frame_list:
+        for buffer, frame_meta in iter_frame_metas(info):
             # Detection metadata is emitted in the compressed image coordinate space.
-            frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
             fallback_source, fallback_timestamp = frame_timestamp(frame_meta, buffer)
             frame_num = int(frame_meta.frame_num)
             source_timestamp = timestamps.resolve(frame_num, fallback_source, fallback_timestamp)
@@ -518,13 +458,12 @@ def detect_metadata_probe(
             while obj_list:
                 obj = pyds.NvDsObjectMeta.cast(obj_list.data)
                 if obj.class_id == PERSON_CLASS_ID:
-                    object_index = len(objects)
-                    fallback_id = person_index
+                    # bbox_probe stamped this id into misc_obj_info; reading it
+                    # back here is what keeps object_id equal to the id the
+                    # assessment topic publishes for the same object.
+                    object_id = get_detection_id(obj, person_index)
                     person_index += 1
-                    object_id = get_detection_id(obj, fallback_id)
-                    rect = obj.rect_params
-                    source_bbox = bbox_values(rect)
-                    bbox = image_space.scale_bbox(source_bbox)
+                    bbox = image_space.scale_bbox(bbox_values(obj.rect_params))
                     confidence = float(obj.confidence)
                     rows.append(
                         "object="
@@ -534,38 +473,34 @@ def detect_metadata_probe(
                     )
                     objects.append(
                         {
-                            "object_index": object_index,
                             "object_id": int(object_id),
                             "bbox": bbox,
-                            "source_bbox": list(source_bbox),
                             "class_name": "person",
                             "confidence": confidence,
                         }
                     )
                 obj_list = obj_list.next
 
-            detect_ms = timing.detect_compute_ms(frame_num)
-            fields = []
-            detect_fps = compute_fps(detect_ms)
-            if detect_ms is not None:
-                fields.append(f"detect_ms={detect_ms:.2f}")
-            if detect_fps is not None:
-                fields.append(f"detect_fps={detect_fps:.2f}")
             store.put(
-                key,
+                buffer_key(buffer),
                 FrameLog(
                     "DETECT",
                     frame_num,
                     source_timestamp.source,
                     source_timestamp.timestamp,
                     rows,
-                    tuple(fields),
+                    # No assessment stage on this pad; timing_fields skips it.
+                    timing_fields(
+                        AssessmentComputeTimes(
+                            detect_ms=timing.detect_compute_ms(frame_num),
+                            assess_ms=None,
+                        )
+                    ),
                     objects,
-                    image_space.source_size(),
-                    image_space.image_size(),
+                    source_size=image_space.source_size(),
+                    image_size=image_space.image_size(),
                 ),
             )
-            frame_list = frame_list.next
 
         return Gst.PadProbeReturn.OK
 
@@ -590,9 +525,7 @@ def assessment_frame_sink(
         # Assessment rows inherit the immutable timestamp captured before inference.
         source_timestamp = timestamps.resolve(frame_num, timestamp_source, timestamp)
         for row in rows:
-            object_index = len(objects)
-            source_bbox = tuple(float(value) for value in row.bbox)
-            bbox = image_space.scale_bbox(source_bbox)
+            bbox = image_space.scale_bbox(tuple(float(value) for value in row.bbox))
             left, top, width, height = bbox
             log_rows.append(
                 "object="
@@ -602,12 +535,9 @@ def assessment_frame_sink(
             )
             objects.append(
                 {
-                    "object_index": object_index,
                     "object_id": int(row.object_id),
                     "bbox": bbox,
-                    "source_bbox": list(source_bbox),
                     "class_name": "person",
-                    "labels": list(row.lines),
                     "predictions": serializable_predictions(row.predictions),
                 }
             )
@@ -621,8 +551,8 @@ def assessment_frame_sink(
                 log_rows,
                 timing_fields(compute_times),
                 objects,
-                image_space.source_size(),
-                image_space.image_size(),
+                source_size=image_space.source_size(),
+                image_size=image_space.image_size(),
             ),
         )
 
@@ -630,22 +560,19 @@ def assessment_frame_sink(
 
 
 def print_runtime_info(
+    args: argparse.Namespace,
     stream: StreamSource,
-    src_w: int,
-    src_h: int,
-    model_w: int,
-    model_h: int,
-    conf: float,
+    src_size: tuple[int, int],
+    model_size: tuple[int, int],
     config,
     assessment_meta: dict,
     assessment_config,
-    args: argparse.Namespace,
 ) -> None:
     print(
         f"stream={stream.display} "
-        f"video={src_w}x{src_h} "
-        f"model={model_w}x{model_h} "
-        f"conf={conf} "
+        f"video={src_size[0]}x{src_size[1]} "
+        f"model={model_size[0]}x{model_size[1]} "
+        f"conf={args.conf} "
         f"config={config}"
     )
     print(
@@ -681,7 +608,9 @@ def main() -> int:
 
     model_w, model_h, config = ensure_model(args.model, stream, args.long_side, src_w, src_h, args.conf)
     assessment_meta, assessment_config = ensure_assessment_model(args.assessment_model, args.assessment_batch_size)
-    print_runtime_info(stream, src_w, src_h, model_w, model_h, args.conf, config, assessment_meta, assessment_config, args)
+    print_runtime_info(
+        args, stream, (src_w, src_h), (model_w, model_h), config, assessment_meta, assessment_config
+    )
     output_size = (args.output_width, args.output_height)
     image_space = ImageSpace(src_w, src_h, *output_size)
 
@@ -690,24 +619,9 @@ def main() -> int:
     assess_store = FrameLogStore()
     source_timestamps = SourceTimestampStore()
     # Each sender owns one compressed branch and one TCP endpoint.
-    image_sender = FrameSocketSender(
-        "IMAGE",
-        args.image_endpoint,
-        image_store,
-        require_fresh_metadata=True,
-    )
-    detect_sender = FrameSocketSender(
-        "DETECT",
-        args.detect_endpoint,
-        detect_store,
-        require_fresh_metadata=True,
-    )
-    assess_sender = FrameSocketSender(
-        "ASSESS",
-        args.assess_endpoint,
-        assess_store,
-        require_fresh_metadata=True,
-    )
+    image_sender = FrameSocketSender("IMAGE", args.image_endpoint, image_store)
+    detect_sender = FrameSocketSender("DETECT", args.detect_endpoint, detect_store)
+    assess_sender = FrameSocketSender("ASSESS", args.assess_endpoint, assess_store)
 
     parts = build_pipeline(
         stream,
@@ -735,9 +649,15 @@ def main() -> int:
         image_metadata_probe(image_store, image_space, source_timestamps),
         None,
     )
-    parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, timing.mark_detect_done, None)
-    parts.pgie.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, bbox_probe(args.conf), None)
-    parts.pgie.get_static_pad("src").add_probe(
+    # bbox_probe must run BEFORE detect_metadata_probe: it writes the detection
+    # id into misc_obj_info, which detect_metadata_probe and assessment_probe
+    # both read back. Nothing is drawn here (display=False), so it looks like
+    # pure overlay overhead -- dropping it silently decorrelates object_id
+    # between /uas4/target_detections and /casualty_image/compressed/annotated.
+    pgie_src = parts.pgie.get_static_pad("src")
+    pgie_src.add_probe(Gst.PadProbeType.BUFFER, timing.mark_detect_done, None)
+    pgie_src.add_probe(Gst.PadProbeType.BUFFER, bbox_probe(args.conf), None)
+    pgie_src.add_probe(
         Gst.PadProbeType.BUFFER,
         detect_metadata_probe(detect_store, timing, image_space, source_timestamps),
         None,

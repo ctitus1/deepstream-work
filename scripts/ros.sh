@@ -5,9 +5,6 @@
 # Foxglove Bridge, an optional bag recorder, and the DeepStream source. Every
 # container is labelled and tracked, so any exit -- Ctrl-C, SIGTERM, a crashed
 # component, or a closed terminal -- takes the whole stack down with it.
-#
-# This is the hardened front end to the same pieces scripts/run_stack.sh runs;
-# that script still works if you prefer it.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -76,13 +73,13 @@ export_host_ids
 
 # Kept project-relative: every container below resolves it against the mount.
 VIDEO="$(project_relative "${VIDEO:-$(default_media)}")"
-[ -n "$VIDEO" ] && [ -f "$VIDEO" ] || die "video not found: ${VIDEO:-<none>}
+[ -f "$VIDEO" ] || die "video not found: $VIDEO
 streams/ holds: $(ls streams/ 2>/dev/null | tr '\n' ' ')"
 
 MOUNT="$(basename "${VIDEO%.*}")"
 RTSP_URL="rtsp://127.0.0.1:${RTSP_PORT}/${MOUNT}"
-RUN_ID="$(date +%Y%m%d%H%M%S)-$$"
-BAG_OUTPUT="${BAG_OUTPUT:-outputs/rosbags/deepstream-${RUN_ID}}"
+# One id per run, shared with the container label so names and label agree.
+BAG_OUTPUT="${BAG_OUTPUT:-outputs/rosbags/deepstream-${DSW_RUN_ID}}"
 
 # The ROS workspace supplies the custom message types; without it the bridge
 # starts and then fails to import cdcl_umd_msgs several seconds later. Resolved
@@ -121,30 +118,30 @@ log "  ROS msgs:  $CDCL_ROS_WS"
 [ "$BAG" -eq 1 ] && log "  Bag:       $BAG_OUTPUT"
 log ""
 
-start_service "deepstream-rtsp-${RUN_ID}" "RTSP server" \
+start_service "deepstream-rtsp-${DSW_RUN_ID}" "RTSP server" \
     -e RTSP_PORT="$RTSP_PORT" -e RTSP_MOUNT="$MOUNT" \
     deepstream-dev scripts/start_rtsp_stream.sh "$VIDEO"
 wait_for_port "RTSP server" "$RTSP_PORT" 60
 
-start_service "ros-humble-publisher-${RUN_ID}" "ROS publisher" \
+start_service "ros-humble-publisher-${DSW_RUN_ID}" "ROS publisher" \
     ros-humble-publisher
 wait_for_port "ROS image endpoint" 5609 60
 wait_for_port "ROS detect endpoint" 5610 60
 wait_for_port "ROS assess endpoint" 5611 60
 
-start_service "ros-foxglove-bridge-${RUN_ID}" "Foxglove Bridge" \
+start_service "ros-foxglove-bridge-${DSW_RUN_ID}" "Foxglove Bridge" \
     -e FOXGLOVE_PORT="$FOXGLOVE_PORT" ros-foxglove-bridge
 wait_for_port "Foxglove Bridge" "$FOXGLOVE_PORT" 60
 
 if [ "$BAG" -eq 1 ]; then
     mkdir -p "$(dirname "$BAG_OUTPUT")"
-    start_service "rosbag-${RUN_ID}" "bag recorder" \
+    start_service "rosbag-${DSW_RUN_ID}" "bag recorder" \
         ros-humble-publisher scripts/record_bag.sh "$BAG_OUTPUT"
     # ros2 bag needs to have discovered the topics before frames start flowing.
     sleep 2
 fi
 
-start_service "deepstream-ros-source-${RUN_ID}" "DeepStream source" \
+start_service "deepstream-ros-source-${DSW_RUN_ID}" "DeepStream source" \
     deepstream-ros-source scripts/run_source.sh \
     --stream "$RTSP_URL" ${SOURCE_ARGS[@]+"${SOURCE_ARGS[@]}"}
 

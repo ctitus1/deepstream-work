@@ -21,6 +21,7 @@ from gi.repository import Gst
 from .paths import PROJECT_DIR, resolve_project_path
 
 OUTPUTS_DIR = PROJECT_DIR / "outputs"
+MAX_TAG_LEN = 24
 
 
 @dataclass(frozen=True)
@@ -30,11 +31,11 @@ class EncoderChoice:
     factory: str
     caps: str
     properties: dict = field(default_factory=dict)
-    software: bool = False
 
 
-# Ordered best-first: the NVMM encoder keeps the annotated frame on the GPU,
-# the rest are progressively cheaper fallbacks that pull it back to system memory.
+# Ordered best-first. Only nvv4l2h264enc ships in the DeepStream image, and it
+# keeps the annotated frame in NVMM; software fallbacks (nvh264enc, x264enc,
+# openh264enc) are all absent, so select_encoder's error is the real other path.
 ENCODER_PREFERENCES = (
     EncoderChoice(
         factory="nvv4l2h264enc",
@@ -45,23 +46,6 @@ ENCODER_PREFERENCES = (
             "idrinterval": 30,
             "insert-sps-pps": True,
         },
-    ),
-    EncoderChoice(
-        factory="nvh264enc",
-        caps="video/x-raw, format=NV12",
-        properties={"bitrate": 8000, "gop-size": 30, "zerolatency": True},
-    ),
-    EncoderChoice(
-        factory="x264enc",
-        caps="video/x-raw, format=I420",
-        properties={"bitrate": 8000, "key-int-max": 30, "speed-preset": "ultrafast"},
-        software=True,
-    ),
-    EncoderChoice(
-        factory="openh264enc",
-        caps="video/x-raw, format=I420",
-        properties={"bitrate": 8000000, "gop-size": 30},
-        software=True,
     ),
 )
 
@@ -76,7 +60,7 @@ def select_encoder() -> EncoderChoice:
     raise RuntimeError(f"No H.264 encoder available for recording; tried: {tried}")
 
 
-def stream_tag(uri: str, max_len: int = 24) -> str:
+def stream_tag(uri: str) -> str:
     """Filesystem-safe short name for a stream URI."""
     parsed = urlparse(uri)
     if parsed.scheme:
@@ -87,14 +71,13 @@ def stream_tag(uri: str, max_len: int = 24) -> str:
 
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
     safe = "_".join(part for part in safe.split("_") if part)
-    return (safe or "stream")[:max_len]
+    return (safe or "stream")[:MAX_TAG_LEN]
 
 
-def default_record_path(stream_uri: str, output_dir: Path | None = None) -> Path:
+def default_record_path(stream_uri: str) -> Path:
     """Timestamped ``record_<UTC>_<streamtag>.mp4`` under ``outputs/``."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-    directory = OUTPUTS_DIR if output_dir is None else output_dir
-    return directory / f"record_{stamp}_{stream_tag(stream_uri)}.mp4"
+    return OUTPUTS_DIR / f"record_{stamp}_{stream_tag(stream_uri)}.mp4"
 
 
 def resolve_record_path(path: str | Path | None, stream_uri: str) -> Path:

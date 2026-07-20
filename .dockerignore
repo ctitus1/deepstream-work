@@ -3,10 +3,13 @@
 # Without this, every build shipped ~2.6 GB of models, videos and venvs.
 
 .git/
-.venv-yolo/
+# Glob, not a bare name: the export venvs are version-keyed (.venv-yolo-3.10),
+# so ".venv-yolo/" alone let 5+ GB reach the daemon on every build.
+.venv-yolo*/
 .venv/
 venv/
 env/
+.setup-state/
 
 # Model weights, ONNX graphs and TensorRT engines
 models/
@@ -35,8 +38,9 @@ __pycache__/
 *.o
 *.so
 
-# Generated DeepStream configs
+# Generated DeepStream configs and the exporter's stray label drop
 configs/generated/
+labels.txt
 
 # Logs and editor state
 *.log

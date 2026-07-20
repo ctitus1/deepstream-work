@@ -30,7 +30,6 @@ STREAM="${3:-$(PYTHONPATH="$ROOT_DIR/src" python3 -c \
     'from deepstream_yolo.paths import DEFAULT_MEDIA; print(DEFAULT_MEDIA)')}"
 
 STRIDE=32
-DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
 GENERATED_CONFIG_DIR="${GENERATED_CONFIG_DIR:-configs/generated}"
 VENV_DIR="$(yolo_venv_dir)"
 
@@ -69,15 +68,6 @@ absolute_path() {
         /*) printf '%s\n' "$1" ;;
         *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
     esac
-}
-
-clone_deepstream_yolo() {
-    if [ ! -d external/DeepStream-Yolo ]; then
-        echo "Cloning DeepStream-Yolo..."
-        git clone https://github.com/marcoslucianops/DeepStream-Yolo.git external/DeepStream-Yolo
-    fi
-
-    git -C external/DeepStream-Yolo checkout "$DEEPSTREAM_YOLO_REF" >/dev/null
 }
 
 install_labels() {
@@ -171,7 +161,7 @@ echo "YOLO size:     ${INFER_W}x${INFER_H}"
 
 ensure_export_venv
 
-clone_deepstream_yolo
+ensure_deepstream_yolo
 
 MODEL_BASENAME="$(basename "$MODEL")"
 MODEL_STEM="${MODEL_BASENAME%.pt}"
@@ -274,10 +264,9 @@ PY
 rm -f "models/${MODEL_STEM}.onnx"*.engine
 
 ENGINE="${ONNX}_b1_gpu0_fp16.engine"
+# Untagged on purpose: training/export_to_deepstream.py reads and patches
+# exactly this filename, and validation/timestamps globs the family.
 INFER_CONFIG="${GENERATED_CONFIG_DIR}/config_infer_primary_${MODEL_STEM}.txt"
-APP_CONFIG="${GENERATED_CONFIG_DIR}/deepstream_${MODEL_STEM}.txt"
-INFER_CONFIG_ABS="$(absolute_path "$INFER_CONFIG")"
-STREAM_ABS="$(absolute_path "$STREAM")"
 ONNX_ABS="$(absolute_path "$ONNX")"
 ENGINE_ABS="$(absolute_path "$ENGINE")"
 # models/coco_labels.txt always holds the most recent export, so a config that
@@ -331,87 +320,10 @@ nms-iou-threshold=0.45
 topk=300
 EOF_INFER
 
-cat > "$APP_CONFIG" <<EOF_APP
-[application]
-enable-perf-measurement=1
-perf-measurement-interval-sec=5
-
-[tiled-display]
-enable=0
-rows=1
-columns=1
-width=${INFER_W}
-height=${INFER_H}
-gpu-id=0
-nvbuf-memory-type=0
-
-[source0]
-enable=1
-type=3
-uri=file://${STREAM_ABS}
-num-sources=1
-gpu-id=0
-cudadec-memtype=0
-
-[streammux]
-gpu-id=0
-batch-size=1
-batched-push-timeout=40000
-width=${INFER_W}
-height=${INFER_H}
-# Letterbox instead of stretching. The model size is the long edge rounded UP
-# to the stride, so it does not keep the source aspect: a 3840x2160 source at
-# long-side 640 gives 640x384 (5:3), not 640x360 (16:9). With padding disabled
-# nvstreammux squeezed the frame ~6.7% vertically before inference, against a
-# model trained on letterboxed images. This matches the Python runtime path,
-# which letterboxes via maintain-aspect-ratio=1/symmetric-padding=1.
-enable-padding=1
-nvbuf-memory-type=0
-live-source=0
-
-[primary-gie]
-enable=1
-gpu-id=0
-batch-size=1
-gie-unique-id=1
-nvbuf-memory-type=0
-config-file=${INFER_CONFIG_ABS}
-
-[osd]
-enable=1
-gpu-id=0
-border-width=3
-text-size=15
-text-color=1;1;1;1
-text-bg-color=0.3;0.3;0.3;1
-font=Serif
-show-clock=0
-nvbuf-memory-type=0
-
-[sink0]
-enable=1
-type=2
-sync=0
-gpu-id=0
-nvbuf-memory-type=0
-
-[sink1]
-enable=0
-type=1
-sync=0
-
-[tests]
-file-loop=0
-EOF_APP
-
 echo
 echo "Done."
 echo "PT:           models/$MODEL_BASENAME"
 echo "ONNX:         $ONNX"
 echo "Engine:       $ENGINE"
 echo "Infer config: $INFER_CONFIG"
-echo "App config:   $APP_CONFIG"
 echo "Labels:       ${MODEL_LABELS} (${NUM_CLASSES} classes)"
-echo
-echo "Run:"
-echo "  deepstream-app -c $APP_CONFIG"

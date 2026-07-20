@@ -1,5 +1,11 @@
+# The two DeepStream services and the two ROS Humble services are each a pair of
+# identical runtime environments differing only in name, profile and command, so
+# the second of each pair merges the first. A merge key replaces a whole mapping
+# rather than deep-merging it, which is why an overriding service restates every
+# key of `environment`, not just the one it changes.
+
 services:
-  deepstream-dev:
+  deepstream-dev: &deepstream-base
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -15,6 +21,8 @@ services:
     hostname: docker
     extra_hosts:
       - "docker:127.0.1.1"
+    # The whole frame fabric is 127.0.0.1 TCP (RTSP 8555, frame channels
+    # 5609/5610/5611), so every service on that path shares the host network.
     network_mode: host
     ipc: host
     stdin_open: true
@@ -45,57 +53,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # Same DeepStream environment as above, including GIO_USE_PROXY_RESOLVER:
+  # rtspsrc segfaults without it here exactly as it does in deepstream-dev.
   deepstream-ros-source:
+    <<: *deepstream-base
     profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      args:
-        DS_VERSION: ${DS_VERSION:-7.1}
-        DS_IMAGE_FLAVOR: ${DS_IMAGE_FLAVOR:-samples-multiarch}
-        USERNAME: user
-        USER_UID: ${HOST_UID:-1000}
-        USER_GID: ${HOST_GID:-1000}
-        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
-    image: deepstream-work:${DS_VERSION:-7.1}
     container_name: deepstream-ros-source
-    hostname: docker
-    extra_hosts:
-      - "docker:127.0.1.1"
-    network_mode: host
-    ipc: host
-    stdin_open: true
-    tty: true
-    environment:
-      DISPLAY: ${DISPLAY}
-      CUDA_CACHE_DISABLE: "0"
-      # GIO consults a proxy resolver on every network connection, and
-      # libproxy in this base image segfaults during unwinding when it does.
-      # rtspsrc opens such a connection, so any RTSP run died instantly with
-      # no message. Nothing here needs a proxy to reach an RTSP source.
-      GIO_USE_PROXY_RESOLVER: dummy
-      NVIDIA_DRIVER_CAPABILITIES: all
-      QT_X11_NO_MITSHM: "1"
-      TERM: xterm-256color
-    volumes:
-      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
-      - /tmp/.X11-unix:/tmp/.X11-unix
-    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     # No --model override: the app default (deepstream_yolo.paths.DEFAULT_MODEL)
     # is a checkpoint that actually ships, so this works on a fresh checkout.
+    # scripts/ros.sh replaces this command; it is the standalone debug path.
     command: >
       bash -lc "scripts/run_source.sh
       --long-side 640"
-    devices:
-      - /dev/dri:/dev/dri
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-  ros-humble-publisher:
+
+  ros-humble-publisher: &ros-humble-base
     profiles: ["ros"]
     build:
       context: .
@@ -122,31 +94,14 @@ services:
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
       bash -lc "scripts/run_bridge.sh"
+
   ros-foxglove-bridge:
-    profiles: ["ros"]
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.ros-humble
-      args:
-        WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
-    image: deepstream-work:ros-humble
+    <<: *ros-humble-base
     container_name: ros-foxglove-bridge
-    network_mode: host
-    ipc: host
-    stdin_open: true
-    tty: true
     environment:
       CDCL_ROS_SETUP: ${CDCL_ROS_SETUP:-/ros2_ws/install/setup.bash}
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       FOXGLOVE_PORT: ${FOXGLOVE_PORT:-8765}
       TERM: xterm-256color
-    volumes:
-      - .:${WORKSPACE_DIR:-/workspace/deepstream-work}
-      # Mounted at the path it was BUILT at, not a fixed one: a
-      # --symlink-install workspace has absolute symlinks into its own
-      # build/ tree, so any other mount point breaks sourcing silently.
-      # scripts/ros.sh derives CDCL_ROS_WS_MOUNT; see require_ros_workspace.
-      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:${CDCL_ROS_WS_MOUNT:-/ros2_ws}:ro
-    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
       bash -lc "scripts/run_foxglove_bridge.sh"

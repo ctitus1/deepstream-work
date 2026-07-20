@@ -5,18 +5,6 @@
 # sourced before it can publish the custom message types used by Foxglove.
 set -euo pipefail
 
-if [[ -f /opt/ros/humble/setup.bash ]]; then
-  # shellcheck disable=SC1091
-  set +u
-  source /opt/ros/humble/setup.bash
-  set -u
-fi
-
-if [[ -n "${CDCL_ROS_SETUP:-}" && -f "$CDCL_ROS_SETUP" ]]; then
-  # shellcheck disable=SC1090
-  set +u
-  source "$CDCL_ROS_SETUP"
-  set -u
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ros_env.sh"
 
 python3 src/ros_bridge.py "$@"

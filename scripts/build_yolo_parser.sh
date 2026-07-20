@@ -51,7 +51,6 @@ fi
 CUDA_MAJOR_MINOR="$(printf '%s\n' "$CUDA_VERSION" | awk -F. '{print $1 "." $2}')"
 CUDA_PACKAGE_VERSION="${CUDA_MAJOR_MINOR/./-}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-${CUDA_MAJOR_MINOR}}"
-DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
 
 # The build inputs are the CUDA toolchain and the upstream source revision;
 # neither changes between pipeline runs, so a matching stamp means the existing
@@ -98,13 +97,8 @@ fi
 sudo ln -sfn "$REAL_CUDART" "${CUDA_HOME}/lib64/libcudart.so"
 sudo ln -sfn "${CUDA_HOME}" /usr/local/cuda
 
-mkdir -p external lib
-
-if [ ! -d external/DeepStream-Yolo ]; then
-  git clone https://github.com/marcoslucianops/DeepStream-Yolo.git external/DeepStream-Yolo
-fi
-
-git -C external/DeepStream-Yolo checkout "$DEEPSTREAM_YOLO_REF" >/dev/null
+mkdir -p lib
+ensure_deepstream_yolo
 
 cd external/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo
 

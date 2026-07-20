@@ -22,22 +22,25 @@ from .stream_source import StreamSource
 
 @dataclass
 class PipelineParts:
+    """Elements callers attach probes or signal handlers to.
+
+    Tees and queues are deliberately absent: nothing outside this module reaches
+    for them, and ``pipeline.add()`` already holds the C reference that keeps
+    them alive. The three appsinks ARE needed here — ros_source.py connects
+    ``new-sample`` to each of them, and they are the only frame source for the
+    ROS topics.
+    """
+
     pipeline: Gst.Pipeline
     streammux: Gst.Element
-    raw_tee: Gst.Element | None
     raw_appsink: Gst.Element | None
     pgie: Gst.Element
-    detect_tee: Gst.Element | None
     detect_appsink: Gst.Element | None
-    assessment_queue: Gst.Element | None
     sgie: Gst.Element | None
-    assess_tee: Gst.Element | None
     assess_appsink: Gst.Element | None
     caps: Gst.Element
     osd: Gst.Element
-    display_queue: Gst.Element | None
     sink: Gst.Element
-    record_tee: Gst.Element | None = None
     record_sink: Gst.Element | None = None
 
 
@@ -169,11 +172,7 @@ def recording_branch(pipeline, tee, record_path) -> Gst.Element:
     sink.set_property("sync", False)
     set_property_if_present(sink, "async", False)
 
-    elements = [queue, convert, caps]
-    if choice.software:
-        elements.append(element("videoconvert", "record-videoconvert"))
-    elements.extend((encoder, parser, muxer, sink))
-
+    elements = [queue, convert, caps, encoder, parser, muxer, sink]
     for elem in elements:
         pipeline.add(elem)
 
@@ -237,9 +236,9 @@ def on_rtsp_pad_added(_source, pad, depayloaders, parsers=None, decoder=None):
     caps = (pad.get_current_caps() or pad.query_caps(None)).to_string()
     caps_lower = caps.lower()
 
-    if "encoding-name=(string)h265" in caps_lower or "encoding-name=h265" in caps_lower:
+    if "encoding-name=(string)h265" in caps_lower:
         codec = "h265"
-    elif "encoding-name=(string)h264" in caps_lower or "encoding-name=h264" in caps_lower:
+    elif "encoding-name=(string)h264" in caps_lower:
         codec = "h264"
     else:
         return
@@ -463,19 +462,13 @@ def build_pipeline(
     return PipelineParts(
         pipeline=pipeline,
         streammux=streammux,
-        raw_tee=raw_tee,
         raw_appsink=raw_appsink,
         pgie=pgie,
-        detect_tee=detect_tee,
         detect_appsink=detect_appsink,
-        assessment_queue=assessment_queue,
         sgie=sgie,
-        assess_tee=assess_tee,
         assess_appsink=assess_appsink,
         caps=caps,
         osd=osd,
-        display_queue=display_queue,
         sink=sink,
-        record_tee=record_tee,
         record_sink=record_sink,
     )

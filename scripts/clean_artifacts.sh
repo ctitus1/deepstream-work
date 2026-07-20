@@ -11,9 +11,7 @@ TARGETS=(
   "bus.jpg"
   "labels.txt"
   "yolo12n.pt"
-  "yolo12l.pt"
   "yolo12x.pt"
-  "yolo26n.pt"
 )
 
 # The export environment is version-keyed (.venv-yolo-3.10, .venv-yolo-3.12) so

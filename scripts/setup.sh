@@ -89,10 +89,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-is_stage() {
-    local candidate="$1" known
-    for known in "${ALL_STAGES[@]}"; do
-        [ "$candidate" = "$known" ] && return 0
+in_list() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
     done
     return 1
 }
@@ -103,22 +104,15 @@ validate_stages() {
     local list="$1" label="$2" name
     [ -z "$list" ] && return 0
     for name in ${list//,/ }; do
-        is_stage "$name" || die "$label: unknown stage '$name'. Valid: ${ALL_STAGES[*]}"
+        in_list "$name" "${ALL_STAGES[@]}" \
+            || die "$label: unknown stage '$name'. Valid: ${ALL_STAGES[*]}"
     done
 }
 
 validate_stages "$ONLY" "--only"
 validate_stages "$SKIP" "--skip"
-[ -n "$FORCE_STAGE" ] && { is_stage "$FORCE_STAGE" \
+[ -n "$FORCE_STAGE" ] && { in_list "$FORCE_STAGE" "${ALL_STAGES[@]}" \
     || die "--force: unknown stage '$FORCE_STAGE'. Valid: ${ALL_STAGES[*]}"; }
-
-is_default_stage() {
-    local candidate="$1" known
-    for known in "${DEFAULT_STAGES[@]}"; do
-        [ "$candidate" = "$known" ] && return 0
-    done
-    return 1
-}
 
 wants() {
     local stage="$1" name
@@ -133,13 +127,11 @@ wants() {
     # Naming a non-default stage with --force is a request to run it.
     [ "$FORCE_STAGE" = "$stage" ] && return 0
 
-    is_default_stage "$stage"
+    in_list "$stage" "${DEFAULT_STAGES[@]}"
 }
 
 forced() {
-    [ "$FORCE_ALL" -eq 1 ] && return 0
-    [ "$FORCE_STAGE" = "$1" ] && return 0
-    return 1
+    [ "$FORCE_ALL" -eq 1 ] || [ "$FORCE_STAGE" = "$1" ]
 }
 
 # Options are rebuilt rather than forwarded verbatim so the inner invocation is
@@ -192,23 +184,20 @@ setup_image() {
 # Stages that need the DeepStream runtime
 # ---------------------------------------------------------------------------
 
-setup_parser() {
-    wants parser || return 0
-    if forced parser; then
-        scripts/build_yolo_parser.sh --force
+# Both of these delegate to a script that keeps its own stamp, so the stage is
+# just "run it, and pass --force through".
+run_stamped_stage() {
+    local stage="$1" script="$2"
+    wants "$stage" || return 0
+    if forced "$stage"; then
+        "$script" --force
     else
-        scripts/build_yolo_parser.sh
+        "$script"
     fi
 }
 
-setup_env() {
-    wants env || return 0
-    if forced env; then
-        scripts/setup_yolo_export_env.sh --force
-    else
-        scripts/setup_yolo_export_env.sh
-    fi
-}
+setup_parser() { run_stamped_stage parser scripts/build_yolo_parser.sh; }
+setup_env()    { run_stamped_stage env scripts/setup_yolo_export_env.sh; }
 
 setup_models() {
     wants models || return 0

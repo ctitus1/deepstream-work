@@ -53,10 +53,6 @@ def discover_size(stream_uri: str) -> tuple[int, int]:
     return int(stream.get_width()), int(stream.get_height())
 
 
-def model_stem(model: str) -> str:
-    return Path(model).stem
-
-
 def onnx_size(path: Path) -> tuple[int, int]:
     if not YOLO_PYTHON.exists():
         raise FileNotFoundError(f"Missing YOLO export Python environment: {YOLO_PYTHON}")
@@ -173,7 +169,7 @@ def ensure_model(
     src_h: int,
     conf: float,
 ) -> tuple[int, int, Path]:
-    stem = model_stem(model)
+    stem = Path(model).stem
 
     for candidate in sorted(MODELS_DIR.glob(f"{stem}_{long_side}_*.onnx")):
         artifacts = artifacts_for_onnx(candidate)

@@ -113,26 +113,22 @@ They orchestrate the underlying pieces, each of which still works on its own:
 - `src/parser_app.py`: display-oriented DeepStream app.
 - `src/ros_source.py`: DeepStream frame source for ROS publishing.
 - `src/ros_bridge.py`: ROS Humble publisher bridge.
-- `scripts/run_stack.sh`: the original RTSP/ROS/Foxglove helper.
 - `scripts/build_yolo_parser.sh`, `scripts/setup_and_export_yolo.sh`,
   `scripts/setup_injury_model.sh`: the individual setup steps.
 
 ## Manual Setup
 
-`scripts/setup.sh` runs all of this for you; the steps are here for when you
-want one of them on its own. Each is individually idempotent, so running one
-directly costs no more than the stage would.
+`scripts/setup.sh` runs all of this for you (`scripts/setup.sh --help` lists the
+stages and their options); the steps below are here for when you want one of
+them on its own. Each is individually idempotent, so running one directly costs
+no more than the stage would.
 
-Build the DeepStream development image from the host:
-
-```bash
-scripts/build.sh
-```
-
-For the ROS publisher workflow, also build the ROS Humble image:
+Build the DeepStream development image from the host (this is setup's `image`
+stage); for the ROS publisher workflow, build the ROS Humble image too:
 
 ```bash
-docker compose --profile ros build
+docker compose build                  # deepstream-work:7.1
+docker compose --profile ros build    # adds the ROS Humble image
 ```
 
 The ROS Humble image includes Foxglove Bridge for visualization and needs a
@@ -159,7 +155,7 @@ container-specific path baked into `install/`.
 Enter the DeepStream development container:
 
 ```bash
-scripts/run.sh
+docker compose run --rm deepstream-dev bash
 ```
 
 Inside the container, build the custom YOLO parser library:
@@ -188,13 +184,8 @@ python3 scripts/prepare_models.py --model yolo12n.pt --long-side 640
 ```
 
 Generated configs are written to `configs/generated/`. The export scripts manage
-the virtualenv automatically and do not require activating one.
-
-That environment lives in `.venv-yolo-<pyver>/`, keyed by Python version. The
-host and the container see the same bind-mounted directory but run different
-interpreters (3.12 and 3.10 for DeepStream 7.1), and a virtualenv only works
-with the version that built it — sharing one path made each side delete and
-rebuild the other's, re-downloading torch every time.
+the virtualenv (`.venv-yolo-<pyver>/`, keyed by Python version) automatically
+and do not require activating one.
 
 ## Video Input
 
@@ -355,9 +346,6 @@ leftover container is reported up front instead of part-way through bring-up.
 If any component then exits, the rest are torn down rather than left running as
 a half-working stack.
 
-`scripts/run_stack.sh` is the original version of this workflow and still
-works.
-
 Connect Foxglove Studio to:
 
 ```text
@@ -408,7 +396,7 @@ the compressed `640x368` detect image, YOLO confidence, and `DETECTION_YOLO`.
 The assess node publishes one `CasualtyImageCompressed` per assessed bbox with
 bbox coordinates scaled to the compressed `640x368` assessment image, embedded
 image, and injury probabilities as `Annotation[]`. Wire metadata also includes
-`source_bbox` and source/image dimensions for debugging. Annotation field names
+the source and image dimensions for debugging. Annotation field names
 use the existing `clip_rgb_<injury_head>` convention, such as
 `clip_rgb_severe_hemorrhage`, and observations are probability vectors in the
 class-index order used by the injury model. Detect frames publish continuously;
@@ -499,7 +487,7 @@ would be scored. See [tracking/README.md](tracking/README.md).
 ## Local Artifacts
 
 Large runtime artifacts are intentionally ignored by Git, including
-`.venv-yolo/`, `external/`, `lib/*.so`, `models/*`, `configs/generated/`,
+`.venv-yolo*/`, `external/`, `lib/*.so`, `models/*`, `configs/generated/`,
 `outputs/`, and `__pycache__/`.
 
 `streams/` is ignored because videos are user-provided input media. Cleanup

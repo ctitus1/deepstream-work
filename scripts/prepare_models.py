@@ -38,7 +38,6 @@ GST_SCAN_WARNING_FILTER = maybe_start_gst_scan_warning_filter(sys.argv)
 import gi  # noqa: E402
 
 gi.require_version("Gst", "1.0")
-gi.require_version("GstPbutils", "1.0")
 from gi.repository import Gst  # noqa: E402
 
 from deepstream_yolo.model_cache import (  # noqa: E402

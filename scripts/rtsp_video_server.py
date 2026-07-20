@@ -27,18 +27,20 @@ gi.require_version("GstPbutils", "1.0")
 gi.require_version("GstRtspServer", "1.0")
 from gi.repository import GLib, Gst, GstPbutils, GstRtspServer
 
+# The parser/ROS clients reach the server across the container boundary, so it
+# binds every interface rather than loopback.
+LISTEN_ADDRESS = "0.0.0.0"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("video", nargs="?", default=None)
-    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_RTSP_PORT)
     parser.add_argument(
         "--mount",
         default=None,
         help="Mount name; defaults to the video's basename so clients can derive it.",
     )
-    parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--show-gst-scan-warnings", action="store_true")
     args = parser.parse_args()
 
@@ -117,7 +119,7 @@ class LoopingRtspServer:
         mount = self.args.mount.strip("/") or "stream"
 
         self.server = GstRtspServer.RTSPServer()
-        self.server.set_address(self.args.host)
+        self.server.set_address(LISTEN_ADDRESS)
         self.server.set_service(str(self.args.port))
 
         self.factory = GstRtspServer.RTSPMediaFactory()
@@ -131,18 +133,17 @@ class LoopingRtspServer:
         self.mounts.add_factory(f"/{mount}", self.factory)
         attach_id = self.server.attach(None)
         if attach_id == 0:
-            raise RuntimeError(f"Failed to attach RTSP server on {self.args.host}:{self.args.port}")
+            raise RuntimeError(f"Failed to attach RTSP server on {LISTEN_ADDRESS}:{self.args.port}")
 
         return f"rtsp://127.0.0.1:{self.args.port}/{mount}"
 
     def on_media_configure(self, _factory, media) -> None:
-        if self.args.no_loop:
-            return
-
         element = media.get_element()
         bus = element.get_bus()
         bus.add_signal_watch()
         bus.connect("message::eos", self.on_eos, element)
+        # Written and never read: holding the bus keeps its message::eos watch
+        # alive past this scope, which is what makes looping work.
         self.bus_refs.append(bus)
 
     def on_eos(self, _bus, _message, element) -> None:

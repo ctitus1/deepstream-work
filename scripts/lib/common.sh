@@ -196,6 +196,28 @@ Build it with colcon inside a ROS Humble container, then retry."
 }
 
 # ---------------------------------------------------------------------------
+# The pinned DeepStream-Yolo checkout
+# ---------------------------------------------------------------------------
+
+# The compiled bbox parser (build_yolo_parser.sh) and the ONNX exporter
+# (setup_and_export_yolo.sh) both come out of this one checkout, and a single
+# scripts/setup.sh run uses both. The ref lived in each script separately; if
+# the two ever drifted, the .so and the exporter would disagree about the model
+# output layout with no error anywhere. build_yolo_parser.sh also folds this
+# value into its stamp signature, so moving the pin retriggers a rebuild.
+DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
+
+ensure_deepstream_yolo() {
+    local dir="$PROJECT_DIR/external/DeepStream-Yolo"
+    if [ ! -d "$dir" ]; then
+        step "Cloning DeepStream-Yolo"
+        mkdir -p "$PROJECT_DIR/external"
+        git clone https://github.com/marcoslucianops/DeepStream-Yolo.git "$dir"
+    fi
+    git -C "$dir" checkout "$DEEPSTREAM_YOLO_REF" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # The YOLO export virtualenv
 # ---------------------------------------------------------------------------
 

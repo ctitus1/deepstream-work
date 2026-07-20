@@ -54,19 +54,10 @@ while [[ $# -gt 0 ]]; do
         --stream)     STREAM="$2"; shift 2 ;;
         --rtsp-port)  RTSP_PORT="$2"; shift 2 ;;
         --setup)      RUN_SETUP=1; shift ;;
-        --record)
-            # Optional argument, matching parser_app.py's own --record.
-            if [[ -n "${2:-}" && "$2" != -* ]]; then
-                APP_ARGS+=(--record "$2"); shift 2
-            else
-                APP_ARGS+=(--record); shift
-            fi
-            ;;
-        --no-assessment) APP_ARGS+=(--no-assessment); shift ;;
-        --model)      APP_ARGS+=(--model "$2"); shift 2 ;;
-        --long-side)  APP_ARGS+=(--long-side "$2"); shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         --)           shift; APP_ARGS+=("$@"); break ;;
+        # Everything else (--record, --no-assessment, --model, --long-side, ...)
+        # is forwarded to parser_app.py in order, which owns those options.
         *)            APP_ARGS+=("$1"); shift ;;
     esac
 done

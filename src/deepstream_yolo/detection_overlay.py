@@ -16,6 +16,8 @@ import pyds
 PERSON_CLASS_ID = 0
 DETECTION_ID_MISC_INDEX = 0
 DETECTION_ID_OFFSET = 1
+# Vertical room reserved above a box for its label, in source pixels.
+LABEL_HEIGHT = 18
 
 
 def set_detection_id(obj, detection_id: int) -> None:
@@ -57,7 +59,7 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     x1, y1 = round(left), round(top)
     x2, y2 = round(left + width), round(top + height)
 
-    frame_h = int(getattr(frame_meta, "source_frame_height", 0) or 1080)
+    frame_h = int(frame_meta.source_frame_height or 1080)
     font_size = max(1, round(frame_h * 0.001))
     line_width = 3
 
@@ -81,8 +83,7 @@ def add_line_box(batch_meta, frame_meta, left, top, width, height, label, color)
     text = meta.text_params[0]
     text.display_text = label
     text.x_offset = max(0, x1 - line_width // 2)
-    text_height = max(18, 2 * font_size + 8)
-    text.y_offset = max(0, y1 - text_height)
+    text.y_offset = max(0, y1 - LABEL_HEIGHT)
     text.font_params.font_name = "Serif"
     text.font_params.font_size = font_size
     text.font_params.font_color.set(*color)

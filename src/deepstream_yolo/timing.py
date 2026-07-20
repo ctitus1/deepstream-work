@@ -14,11 +14,38 @@ import pyds
 # frames at the SGIE source pad.
 MAX_PENDING_FRAMES = 512
 
+# Stage marks in pipeline order, each paired with the name of the interval that
+# ends at it. "assessment" is absent under --no-assessment, so the row is built
+# from whichever marks are present rather than from two hand-written variants.
+TIMED_STAGES = (
+    ("mux", None),
+    ("infer", "detect"),
+    ("assessment", "assess"),
+    ("convert", "convert"),
+    ("osd", "osd"),
+    ("sink", "sink"),
+)
+REQUIRED_STAGES = tuple(stage for stage, _ in TIMED_STAGES if stage != "assessment")
+
 
 def compute_fps(seconds: float) -> float:
     if seconds <= 0:
         return 0.0
     return 1.0 / seconds
+
+
+def stage_row(marks: dict) -> dict | None:
+    """Successive stage durations for one frame, or None if it never finished."""
+    if not all(stage in marks for stage in REQUIRED_STAGES):
+        return None
+
+    present = [(stage, name) for stage, name in TIMED_STAGES if stage in marks]
+    row = {
+        name: marks[stage] - marks[previous]
+        for (previous, _), (stage, name) in zip(present, present[1:])
+    }
+    row["total"] = marks["sink"] - marks["mux"]
+    return row
 
 
 class TimeLog:
@@ -79,29 +106,10 @@ class TimeLog:
             return
 
         rows = []
-        for frame_num, t in list(self.times.items()):
-            if all(k in t for k in ("mux", "infer", "assessment", "convert", "osd", "sink")):
-                rows.append(
-                    {
-                        "detect": t["infer"] - t["mux"],
-                        "assess": t["assessment"] - t["infer"],
-                        "convert": t["convert"] - t["assessment"],
-                        "osd": t["osd"] - t["convert"],
-                        "sink": t["sink"] - t["osd"],
-                        "total": t["sink"] - t["mux"],
-                    }
-                )
-                del self.times[frame_num]
-            elif all(k in t for k in ("mux", "infer", "convert", "osd", "sink")):
-                rows.append(
-                    {
-                        "detect": t["infer"] - t["mux"],
-                        "convert": t["convert"] - t["infer"],
-                        "osd": t["osd"] - t["convert"],
-                        "sink": t["sink"] - t["osd"],
-                        "total": t["sink"] - t["mux"],
-                    }
-                )
+        for frame_num, marks in list(self.times.items()):
+            row = stage_row(marks)
+            if row is not None:
+                rows.append(row)
                 del self.times[frame_num]
 
         if not rows:

@@ -3,10 +3,12 @@ set -euo pipefail
 
 MODEL="${1:-models/injury.pt}"
 BATCH_SIZE="${2:-8}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/lib/common.sh
+
 PYTHON_BIN="${PYTHON_BIN:-}"
 
-cd "$ROOT_DIR"
 mkdir -p models configs/generated outputs
 
 if [ ! -f "$MODEL" ]; then
@@ -27,7 +29,10 @@ if [ -z "$PYTHON_BIN" ]; then
         PYTHON_BIN="python3"
     else
         scripts/setup_yolo_export_env.sh
-        PYTHON_BIN="$ROOT_DIR/.venv-yolo/bin/python3"
+        # Must be the same version-keyed venv setup_yolo_export_env.sh just
+        # built. Hardcoding .venv-yolo pointed the DS container (3.10) at the
+        # host's 3.12 venv, so the dependency check below always failed.
+        PYTHON_BIN="$(yolo_venv_dir)/bin/python3"
     fi
 fi
 
@@ -39,6 +44,6 @@ then
     exit 1
 fi
 
-PYTHONPATH=src "$PYTHON_BIN" -m deepstream_yolo.injury export \
+PYTHONPATH=src "$PYTHON_BIN" -m deepstream_yolo.injury \
     --model "$MODEL" \
     --batch-size "$BATCH_SIZE"

@@ -79,18 +79,14 @@ def tensor_values(layer, tensor_meta, index: int) -> list[float]:
     if not address:
         return []
 
+    # configs.write_assessment_config pins the SGIE to network-mode=2 (FP16), so
+    # HALF is what actually arrives; FLOAT is the only other reachable type.
     if layer.dataType == pyds.NvDsInferDataType.FLOAT:
         ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_float))
         return [float(ptr[i]) for i in range(count)]
     if layer.dataType == pyds.NvDsInferDataType.HALF:
         ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_uint16))
         return [half_to_float(ptr[i]) for i in range(count)]
-    if layer.dataType == pyds.NvDsInferDataType.INT32:
-        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_int32))
-        return [float(ptr[i]) for i in range(count)]
-    if layer.dataType == pyds.NvDsInferDataType.INT8:
-        ptr = ctypes.cast(address, ctypes.POINTER(ctypes.c_int8))
-        return [float(ptr[i]) for i in range(count)]
 
     return []
 
@@ -195,10 +191,6 @@ def unix_ns_to_utc(timestamp: int) -> str:
         return f"{timestamp / NS_PER_SEC:.3f}s"
 
 
-def seconds(timestamp: int) -> str:
-    return f"{timestamp / NS_PER_SEC:.3f}s"
-
-
 def reference_timestamp(buffer) -> int | None:
     getter = getattr(buffer, "get_reference_timestamp_meta", None)
     if getter is None:
@@ -243,7 +235,7 @@ def format_timestamp(source: str, timestamp: int | None) -> str:
         return "NONE"
     if source in {"ntp", "ref"}:
         return unix_ns_to_utc(timestamp)
-    return seconds(timestamp)
+    return f"{timestamp / NS_PER_SEC:.3f}s"
 
 
 def set_assessment_text(obj, lines: list[str]) -> None:

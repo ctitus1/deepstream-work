@@ -23,7 +23,6 @@ GST_SCAN_WARNING_FILTER = maybe_start_gst_scan_warning_filter(sys.argv)
 import gi
 
 gi.require_version("Gst", "1.0")
-gi.require_version("GstPbutils", "1.0")
 from gi.repository import GLib, Gst
 
 from deepstream_yolo.assessment_runtime import AssessmentReporter, AssessmentTiming, assessment_probe
@@ -115,29 +114,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_runtime_info(
+    args: argparse.Namespace,
     stream: StreamSource,
-    src_w: int,
-    src_h: int,
-    model_w: int,
-    model_h: int,
-    conf: float,
+    src_size: tuple[int, int],
+    model_size: tuple[int, int],
     config,
     assessment_meta: dict | None,
     assessment_config,
-    assessment_batch_size: int,
 ) -> None:
     print(
         f"stream={stream.display} "
-        f"video={src_w}x{src_h} "
-        f"model={model_w}x{model_h} "
-        f"conf={conf} "
+        f"video={src_size[0]}x{src_size[1]} "
+        f"model={model_size[0]}x{model_size[1]} "
+        f"conf={args.conf} "
         f"config={config}"
     )
     if assessment_config:
         print(
             "assessment="
             f"{assessment_meta.get('architecture', 'injury model')} "
-            f"batch={assessment_batch_size} "
+            f"batch={args.assessment_batch_size} "
             f"config={assessment_config}",
             flush=True,
         )
@@ -165,7 +161,11 @@ def attach_runtime_probes(parts, args, stream: StreamSource) -> RateLimiter:
         bbox_probe(args.conf),
         None,
     )
-    if parts.sgie and assessment_timing:
+    # Deliberately a second `if parts.sgie` rather than one merged block: probes
+    # on the pgie src pad fire in attach order, so mark_detect_done must be
+    # attached above, before bbox_probe. Merging pushes it after the box drawing
+    # and every detect_ms measurement absorbs that work.
+    if parts.sgie:
         # Parse secondary tensor output, render assessment text, and optionally drop stale frames.
         reporter = AssessmentReporter(args.assessment_log_interval)
         parts.sgie.get_static_pad("src").add_probe(
@@ -287,16 +287,7 @@ def main():
         )
 
     print_runtime_info(
-        stream,
-        src_w,
-        src_h,
-        model_w,
-        model_h,
-        args.conf,
-        config,
-        assessment_meta,
-        assessment_config,
-        args.assessment_batch_size,
+        args, stream, (src_w, src_h), (model_w, model_h), config, assessment_meta, assessment_config
     )
 
     record_path = resolve_record_path(args.record, stream.uri) if args.record is not None else None

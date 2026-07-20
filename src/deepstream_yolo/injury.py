@@ -6,12 +6,19 @@ import re
 from collections import OrderedDict
 from pathlib import Path
 
-from .configs import CLIP_INPUT_SIZE, INJURY_CLASS_COUNTS, INJURY_HEADS, write_assessment_config
+from .configs import (
+    CLIP_INPUT_SIZE,
+    INJURY_CLASS_COUNTS,
+    INJURY_HEADS,
+    generated_config_path,
+    write_assessment_config,
+)
 from .paths import MODELS_DIR, PROJECT_DIR
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 ONNX_SUFFIX = "clip_vit_l14_336"
+ONNX_OPSET = 18
 
 
 def _import_torch():
@@ -186,7 +193,7 @@ def build_clip_model(clip_state: dict):
     return model.float().eval()
 
 
-def build_assessment_model(state: dict, *, normalize_features: bool = False):
+def build_assessment_model(state: dict):
     torch = _import_torch()
     clip_state, head_state = split_state_dict(state)
 
@@ -194,7 +201,6 @@ def build_assessment_model(state: dict, *, normalize_features: bool = False):
         def __init__(self):
             super().__init__()
             self.clip_model = build_clip_model(clip_state)
-            self.normalize_features = normalize_features
             self.head_names = tuple(INJURY_HEADS)
             self.heads = torch.nn.ModuleDict()
             self.register_buffer(
@@ -225,8 +231,6 @@ def build_assessment_model(state: dict, *, normalize_features: bool = False):
         def forward(self, images):
             images = (images - self.clip_mean) / self.clip_std
             features = self.clip_model.encode_image(images).float()
-            if self.normalize_features:
-                features = features / features.norm(dim=-1, keepdim=True).clamp_min(1e-6)
             return tuple(self.heads[name](features) for name in self.head_names)
 
     return InjuryAssessmentModel().eval()
@@ -238,8 +242,6 @@ def export_onnx(
     meta_path: Path,
     *,
     batch_size: int,
-    opset: int = 18,
-    normalize_features: bool = False,
 ) -> dict:
     torch = _import_torch()
     try:
@@ -261,7 +263,7 @@ def export_onnx(
             f"Expected injury model input {CLIP_INPUT_SIZE}, got {spec['image_resolution']}"
         )
 
-    model = build_assessment_model(state, normalize_features=normalize_features)
+    model = build_assessment_model(state)
     dummy = torch.zeros((1, 3, CLIP_INPUT_SIZE, CLIP_INPUT_SIZE), dtype=torch.float32)
     dynamic_axes = {"images": {0: "batch"}}
     for output_name in INJURY_HEADS:
@@ -271,7 +273,7 @@ def export_onnx(
         "input_names": ["images"],
         "output_names": list(INJURY_HEADS),
         "dynamic_axes": dynamic_axes,
-        "opset_version": opset,
+        "opset_version": ONNX_OPSET,
         "do_constant_folding": True,
         "dynamo": False,
     }
@@ -290,8 +292,7 @@ def export_onnx(
         "source_checkpoint": str(model_path.relative_to(PROJECT_DIR)),
         "onnx": str(onnx_path.relative_to(PROJECT_DIR)),
         "default_batch_size": batch_size,
-        "normalize_features": normalize_features,
-        "opset": opset,
+        "opset": ONNX_OPSET,
         "outputs": list(INJURY_HEADS),
         "runtime": "DeepStream secondary nvinfer, TensorRT fp16",
     }
@@ -299,52 +300,33 @@ def export_onnx(
     return meta
 
 
-def write_config_for_model(model_path: Path, batch_size: int) -> Path:
-    model_path = resolve_model_path(model_path)
-    onnx_path = default_onnx_path(model_path)
-    engine_path = default_engine_path(model_path, batch_size)
-    config_path = PROJECT_DIR / "configs" / "generated" / (
-        f"config_infer_secondary_{assessment_stem(model_path)}_b{batch_size}.txt"
-    )
-    write_assessment_config(config_path, onnx_path, engine_path, batch_size)
-    return config_path
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    inspect_parser = subparsers.add_parser("inspect")
-    inspect_parser.add_argument("--model", default="models/injury.pt")
-
-    export_parser = subparsers.add_parser("export")
-    export_parser.add_argument("--model", default="models/injury.pt")
-    export_parser.add_argument("--batch-size", type=int, default=8)
-    export_parser.add_argument("--opset", type=int, default=18)
-    export_parser.add_argument("--normalize-features", action="store_true")
-
+    parser = argparse.ArgumentParser(description="Export models/injury.pt to ONNX.")
+    parser.add_argument("--model", default="models/injury.pt")
+    parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
+
     model_path = resolve_model_path(args.model)
-
-    if args.command == "inspect":
-        print(json.dumps(infer_clip_spec(load_state_dict(model_path)), indent=2))
-        return 0
-
     onnx_path = default_onnx_path(model_path)
-    meta_path = default_meta_path(model_path)
+    engine_path = default_engine_path(model_path, args.batch_size)
     meta = export_onnx(
         model_path,
         onnx_path,
-        meta_path,
+        default_meta_path(model_path),
         batch_size=args.batch_size,
-        opset=args.opset,
-        normalize_features=args.normalize_features,
     )
-    config_path = write_config_for_model(model_path, args.batch_size)
+
+    # Same spelling model_cache.ensure_assessment_model looks the config up by,
+    # so the CLI and the runtime cannot drift on the filename.
+    config_path = generated_config_path(
+        f"config_infer_secondary_{assessment_stem(model_path)}_b{args.batch_size}.txt"
+    )
+    write_assessment_config(config_path, onnx_path, engine_path, args.batch_size)
+
     print("Injury model export complete.")
     print(f"PT:           {model_path.relative_to(PROJECT_DIR)}")
     print(f"ONNX:         {onnx_path.relative_to(PROJECT_DIR)}")
-    print(f"Engine:       {default_engine_path(model_path, args.batch_size).relative_to(PROJECT_DIR)}")
+    print(f"Engine:       {engine_path.relative_to(PROJECT_DIR)}")
     print(f"Config:       {config_path.relative_to(PROJECT_DIR)}")
     print(f"Input:        3x{CLIP_INPUT_SIZE}x{CLIP_INPUT_SIZE}")
     print(f"Outputs:      {', '.join(meta['outputs'])}")

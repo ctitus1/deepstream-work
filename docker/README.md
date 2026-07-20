@@ -10,9 +10,9 @@ inside them are written relative to the root (`COPY docker/.bashrc.container`).
 The release is a build argument defaulting to 7.1:
 
 ```bash
-scripts/build.sh                            # 7.1
-DS_VERSION=9.0 scripts/build.sh             # 9.0
-DS_VERSION=8.0 DS_IMAGE_FLAVOR=triton-multiarch scripts/build.sh
+docker compose build                            # 7.1
+DS_VERSION=9.0 docker compose build             # 9.0
+DS_VERSION=8.0 DS_IMAGE_FLAVOR=triton-multiarch docker compose build
 ```
 
 The image is tagged `deepstream-work:<DS_VERSION>` so releases do not overwrite

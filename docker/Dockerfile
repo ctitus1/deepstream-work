@@ -40,21 +40,21 @@ ARG DEEPSTREAM_PYTHON_APPS_REF=8ad0349ed7a496fae35ebb21c350641727070b89
 # ---------------------------------------------------------------------------
 # System packages. Verified present on both Ubuntu 22.04 (DS 7.1) and 24.04
 # (DS 8.0/9.0), so this layer is shared across every supported release.
+#
+# Two that look optional and are not: gdb backs the ready-to-run command
+# report_exit prints for a segfault inside a GStreamer/GIO plugin (the one
+# failure mode that emits nothing of its own), and cmake/pybind11-dev are what
+# the pyds source-build fallback below needs on releases with no wheel.
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash-completion \
     build-essential \
     ca-certificates \
     cmake \
     curl \
     gdb \
     git \
-    graphviz \
-    less \
-    nano \
     pkg-config \
     sudo \
-    vim \
     x11-apps \
     \
     python3-dev \

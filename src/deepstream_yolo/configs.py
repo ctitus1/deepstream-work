@@ -26,9 +26,6 @@ INJURY_CLASS_COUNTS = {
 }
 
 
-DEFAULT_NUM_DETECTED_CLASSES = 80
-
-
 def ensure_labels_file() -> None:
     LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if LABELS_PATH.exists():
@@ -40,18 +37,16 @@ def ensure_labels_file() -> None:
         shutil.copy2(LABELS_SOURCE_PATH, LABELS_PATH)
 
 
-def num_detected_classes(labels_path: Path | None = None) -> int:
+def num_detected_classes(labels_path: Path) -> int:
     """Class count for nvinfer, read from the labels this model will deploy with.
 
     Hardcoding 80 makes ``num-detected-classes`` disagree with the engine's
     real output tensor for any model that is not stock COCO.
     """
-    path = labels_path or LABELS_PATH
-    if path.is_file():
-        names = [line for line in path.read_text().splitlines() if line.strip()]
-        if names:
-            return len(names)
-    return DEFAULT_NUM_DETECTED_CLASSES
+    names = [line for line in labels_path.read_text().splitlines() if line.strip()]
+    if not names:
+        raise ValueError(f"No class names in {labels_path}; cannot size nvinfer.")
+    return len(names)
 
 
 def write_infer_config(
@@ -60,16 +55,13 @@ def write_infer_config(
     engine_path: Path,
     conf: float,
     *,
-    labels_path: Path | None = None,
-    maintain_aspect_ratio: int = 1,
-    symmetric_padding: int = 1,
+    labels_path: Path,
 ) -> None:
     # models/coco_labels.txt holds whatever the most recent export installed, so
     # it is not safe to point a config at it: exporting a 3-class model and then
     # running a stock 80-class one would give the second model the first one's
     # names and class count. Callers pass the per-model snapshot instead.
     ensure_labels_file()
-    labels = labels_path or LABELS_PATH
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         f"""[property]
@@ -78,10 +70,10 @@ net-scale-factor=0.00392156862745098
 model-color-format=0
 onnx-file={onnx_path}
 model-engine-file={engine_path}
-labelfile-path={labels}
+labelfile-path={labels_path}
 batch-size=1
 network-mode=2
-num-detected-classes={num_detected_classes(labels)}
+num-detected-classes={num_detected_classes(labels_path)}
 interval=0
 gie-unique-id=1
 process-mode=1
@@ -89,8 +81,12 @@ network-type=0
 parse-bbox-func-name=NvDsInferParseYolo
 custom-lib-path={CUSTOM_LIB_PATH}
 output-blob-names=output
-maintain-aspect-ratio={maintain_aspect_ratio}
-symmetric-padding={symmetric_padding}
+# Letterbox rather than stretch. The model size is the long edge rounded UP to
+# the stride, so it does not keep the source aspect (3840x2160 at long-side 640
+# gives 640x384, not 640x360); without padding the frame is squeezed ~6.7%
+# vertically before inference, against a model trained on letterboxed images.
+maintain-aspect-ratio=1
+symmetric-padding=1
 cluster-mode=2
 
 [class-attrs-all]

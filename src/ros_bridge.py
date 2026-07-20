@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import socket
 import threading
-import time
 
 import rclpy
 from builtin_interfaces.msg import Time as RosTime
@@ -30,12 +29,18 @@ from cdcl_umd_msgs.msg import (
 from sensor_msgs.msg import CompressedImage
 from vision_msgs.msg import BoundingBox2D
 
-from deepstream_yolo.frame_wire import is_wall_clock_timestamp, recv_frame
+from deepstream_yolo.frame_wire import is_wall_clock_timestamp, parse_endpoint, recv_frame
 
 DEFAULT_DETECT_ENDPOINT = "0.0.0.0:5610"
 DEFAULT_ASSESS_ENDPOINT = "0.0.0.0:5611"
 DEFAULT_IMAGE_ENDPOINT = "0.0.0.0:5609"
-INT32_MAX = 2_147_483_647
+
+# name, topic argument, endpoint argument, message kind
+PUBLISHERS = (
+    ("deepstream_image_publisher", "image_topic", "image_endpoint", "image"),
+    ("deepstream_detect_publisher", "detect_topic", "detect_endpoint", "detect"),
+    ("deepstream_assess_publisher", "assess_topic", "assess_endpoint", "assess"),
+)
 
 
 class FramePublisherNode(Node):
@@ -44,23 +49,17 @@ class FramePublisherNode(Node):
         name: str,
         topic: str,
         endpoint: str,
-        log_interval: float,
         message_kind: str,
-        frame_id: str,
-        system_id: int,
-        platform_name: str,
-        sensor_frame_id: str,
+        args: argparse.Namespace,
     ):
         super().__init__(name)
         self.topic = topic
         self.host, self.port = parse_endpoint(endpoint)
-        self.log_interval = log_interval
-        self.last_log_time = 0.0
         self.message_kind = message_kind
-        self.frame_id = frame_id
-        self.system_id = system_id
-        self.platform_name = platform_name
-        self.sensor_frame_id = sensor_frame_id
+        self.frame_id = args.frame_id
+        self.system_id = args.system_id
+        self.platform_name = args.platform_name
+        self.sensor_frame_id = args.sensor_frame_id
         self.seq = 0
         message_type = {
             "image": CompressedImage,
@@ -122,29 +121,26 @@ class FramePublisherNode(Node):
         if self.message_kind == "image":
             messages = [self.compressed_image(metadata, payload, stamp)]
         elif self.message_kind == "detect":
-            messages = self.target_box_array_messages(metadata, payload, stamp)
+            messages = [self.target_box_array(metadata, payload, stamp)]
         else:
             messages = self.casualty_image_messages(metadata, payload, stamp)
         for msg in messages:
             self.publisher.publish(msg)
 
-        if self.should_log():
-            log_text = metadata.get("log_text", "metadata=missing")
-            self.get_logger().debug(
-                f"published topic={self.topic} messages={len(messages)} bytes={len(payload)}\n{log_text}"
-            )
+        self.get_logger().debug(
+            f"published topic={self.topic} messages={len(messages)} "
+            f"bytes={len(payload)}\n{metadata.get('log_text', 'metadata=missing')}"
+        )
 
-    def compressed_image(self, metadata: dict, payload: bytes, stamp=None) -> CompressedImage:
+    def compressed_image(self, metadata: dict, payload: bytes, stamp) -> CompressedImage:
         msg = CompressedImage()
-        if stamp is None:
-            stamp = self.stamp(metadata)
         copy_stamp(msg.header.stamp, stamp)
         msg.header.frame_id = self.frame_id
         msg.format = str(metadata.get("format", "jpeg"))
         msg.data = payload
         return msg
 
-    def target_box_array_messages(self, metadata: dict, payload: bytes, stamp) -> list[TargetBoxArray]:
+    def target_box_array(self, metadata: dict, payload: bytes, stamp) -> TargetBoxArray:
         # TargetBoxArray carries the detection image plus one bbox entry per detected person.
         source_img = self.compressed_image(metadata, payload, stamp)
         msg = TargetBoxArray()
@@ -161,7 +157,7 @@ class FramePublisherNode(Node):
         ]
         msg.use_for_mosaic = False
         msg.detection_source = AerialDetectionSource.DETECTION_YOLO
-        return [msg]
+        return msg
 
     def casualty_image_messages(
         self,
@@ -211,15 +207,11 @@ class FramePublisherNode(Node):
     def annotations(self, predictions: dict) -> list[Annotation]:
         annotations = []
         for name, prediction in sorted(predictions.items()):
-            probabilities = prediction.get("probabilities", [])
-            if not probabilities:
-                probabilities = [
-                    float(prediction.get("class_id", -1)),
-                    float(prediction.get("confidence", 0.0)),
-                ]
             annotation = Annotation()
             annotation.field_name = f"clip_rgb_{name}"
-            annotation.observation = [float(value) for value in probabilities]
+            annotation.observation = [
+                float(value) for value in prediction["probabilities"]
+            ]
             annotations.append(annotation)
         return annotations
 
@@ -230,8 +222,8 @@ class FramePublisherNode(Node):
         # RTSP hits this routinely: rtspsrc has ntp-sync, but ntp_timestamp is
         # invalid until the first RTCP sender report, so the opening seconds of
         # every run would otherwise publish 1970 and then jump ~56 years.
-        timestamp_ns = metadata_timestamp_ns(metadata)
-        timestamp_source = metadata_timestamp_source(metadata)
+        timestamp_ns = metadata.get("source_timestamp_ns")
+        timestamp_source = metadata.get("source_timestamp_source")
         if timestamp_ns is None or not is_wall_clock_timestamp(timestamp_source):
             self.get_logger().debug(
                 "metadata timestamp unusable "
@@ -244,66 +236,14 @@ class FramePublisherNode(Node):
         msg.nanosec = int(timestamp_ns % 1_000_000_000)
         return msg
 
-    def should_log(self) -> bool:
-        if self.log_interval < 0:
-            return False
-        if self.log_interval == 0:
-            return True
-
-        now = time.perf_counter()
-        if now - self.last_log_time < self.log_interval:
-            return False
-        self.last_log_time = now
-        return True
-
-
-def parse_endpoint(endpoint: str) -> tuple[str, int]:
-    host, _, port = endpoint.rpartition(":")
-    if not host or not port:
-        raise ValueError(f"Expected endpoint HOST:PORT, got {endpoint!r}")
-    return host, int(port)
-
 
 def data_source_id(metadata: dict) -> int:
-    explicit_id = metadata.get("data_source_id")
-    if explicit_id is not None:
-        return int_value(explicit_id, 0)
-
-    frame_num = int_value(metadata.get("frame"), 0)
-    return frame_num % INT32_MAX
-
-
-def metadata_timestamp_source(metadata: dict) -> str | None:
-    for key in ("source_timestamp_source", "timestamp_source"):
-        value = metadata.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def metadata_timestamp_ns(metadata: dict) -> int | None:
-    for key in ("source_timestamp_ns", "timestamp_ns"):
-        value = metadata.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            try:
-                return int(value)
-            except ValueError:
-                continue
-    return None
+    return int(metadata["data_source_id"])
 
 
 def copy_stamp(target, source) -> None:
     target.sec = int(source.sec)
     target.nanosec = int(source.nanosec)
-
-
-def int_value(value, fallback: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(fallback)
 
 
 def parse_args() -> argparse.Namespace:
@@ -318,12 +258,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system-id", type=int, default=0)
     parser.add_argument("--platform-name", default="deepstream")
     parser.add_argument("--sensor-frame-id", default="deepstream_camera")
-    parser.add_argument(
-        "--metadata-log-interval",
-        type=float,
-        default=0.0,
-        help="Seconds between ROS metadata logs; 0 logs every published frame, negative disables.",
-    )
     return parser.parse_args()
 
 
@@ -331,62 +265,32 @@ def main() -> int:
     args = parse_args()
     rclpy.init(args=None)
 
-    # Each node owns one endpoint/topic pair; a shared executor handles ROS callbacks.
-    image_node = FramePublisherNode(
-        "deepstream_image_publisher",
-        args.image_topic,
-        args.image_endpoint,
-        args.metadata_log_interval,
-        "image",
-        args.frame_id,
-        args.system_id,
-        args.platform_name,
-        args.sensor_frame_id,
-    )
-    detect_node = FramePublisherNode(
-        "deepstream_detect_publisher",
-        args.detect_topic,
-        args.detect_endpoint,
-        args.metadata_log_interval,
-        "detect",
-        args.frame_id,
-        args.system_id,
-        args.platform_name,
-        args.sensor_frame_id,
-    )
-    assess_node = FramePublisherNode(
-        "deepstream_assess_publisher",
-        args.assess_topic,
-        args.assess_endpoint,
-        args.metadata_log_interval,
-        "assess",
-        args.frame_id,
-        args.system_id,
-        args.platform_name,
-        args.sensor_frame_id,
-    )
+    # Each node owns one endpoint/topic pair; a shared executor handles ROS
+    # callbacks. Start order does not matter: each serve thread binds its own port.
+    nodes = [
+        FramePublisherNode(
+            name,
+            getattr(args, topic_arg),
+            getattr(args, endpoint_arg),
+            message_kind,
+            args,
+        )
+        for name, topic_arg, endpoint_arg, message_kind in PUBLISHERS
+    ]
     executor = MultiThreadedExecutor()
-    executor.add_node(image_node)
-    executor.add_node(detect_node)
-    executor.add_node(assess_node)
+    for node in nodes:
+        executor.add_node(node)
+        node.start()
 
-    image_node.start()
-    detect_node.start()
-    assess_node.start()
     try:
         executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
-        image_node.stop()
-        detect_node.stop()
-        assess_node.stop()
-        executor.remove_node(image_node)
-        executor.remove_node(detect_node)
-        executor.remove_node(assess_node)
-        image_node.destroy_node()
-        detect_node.destroy_node()
-        assess_node.destroy_node()
+        for node in nodes:
+            node.stop()
+            executor.remove_node(node)
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

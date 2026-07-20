@@ -54,8 +54,6 @@ motion. That is the honest cost of the recall.
 
 from __future__ import annotations
 
-import math
-
 import cv2
 import numpy as np
 
@@ -139,8 +137,6 @@ class Approach:
     needs_flow = False
     needs_pixels = True
 
-    # Pixel-valued entries are quoted at REFERENCE_WIDTH (960) and rescaled to
-    # the branch width actually in use; see _scale_to_resolution.
     defaults = {
         # feature population, in branch pixels
         "max_corners": 1600,
@@ -320,58 +316,7 @@ class Approach:
 
     # -- contract --------------------------------------------------------
 
-    # Everything above is in pixels at the resolution the branch runs at, and
-    # those numbers were tuned with the branch 960 wide. Scaling them to
-    # whatever width is actually in use is what makes a configuration mean the
-    # same thing on a 640x512 thermal source as on 4K.
-    #
-    # Lengths scale linearly, feature *count* scales with area (it is a density,
-    # not a number), and pyramid depth scales logarithmically because each level
-    # halves the image. Everything not listed is already dimensionless -- frame
-    # counts, ratios, quality fractions -- and must not be touched.
-    REFERENCE_WIDTH = 960.0
-    _LENGTH_PARAMS = (
-        "min_distance",
-        "block_size",
-        "win_size",
-        "fb_threshold",
-        "ransac_threshold",
-        "residual_floor",
-        "cluster_radius",
-        "match_radius",
-        "min_travel",
-        "box_pad",
-        "min_box",
-    )
-    _AREA_PARAMS = ("max_corners",)
-    _ODD_INTS = ("block_size", "win_size")
-
-    def _scale_to_resolution(self, width: int) -> None:
-        """Re-express the pixel parameters at this branch width, once."""
-        scale = float(width) / self.REFERENCE_WIDTH
-        if abs(scale - 1.0) > 1e-6:
-            for key in self._LENGTH_PARAMS:
-                setattr(self, key, getattr(self, key) * scale)
-            for key in self._AREA_PARAMS:
-                setattr(self, key, max(1, int(round(getattr(self, key) * scale * scale))))
-            for key in self._ODD_INTS:
-                # OpenCV wants odd window sizes, and at least 3.
-                value = max(3, int(round(getattr(self, key))))
-                setattr(self, key, value + 1 - value % 2)
-            # Each pyramid level halves the image, so depth is logarithmic.
-            self.max_level = max(1, int(round(self.max_level + math.log2(max(scale, 1e-6)))))
-
-        self._lk = {
-            "winSize": (int(self.win_size), int(self.win_size)),
-            **{k: v for k, v in self._lk.items() if k not in ("winSize", "maxLevel")},
-            "maxLevel": int(self.max_level),
-        }
-        self._scaled = True
-
     def process(self, ctx) -> list[dict]:
-        if not getattr(self, "_scaled", False):
-            self._scale_to_resolution(ctx.width)
-
         gray = self._gray(ctx)
         if gray is None:
             return []

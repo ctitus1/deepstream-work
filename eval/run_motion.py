@@ -113,12 +113,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stream", default=str(DEFAULT_MEDIA))
     parser.add_argument("--width", type=int, default=960, help="branch resolution width")
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=0,
-        help="branch resolution height; 0 derives it from the source aspect ratio",
-    )
+    parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--grid-size", type=int, default=4, help="nvof block size")
     parser.add_argument("--cfg", default="{}", help="JSON dict passed to the approach")
     parser.add_argument(
@@ -268,22 +263,6 @@ def main() -> int:
 
     Gst.init(None)
     src_w, src_h = discover_size(stream.uri)
-
-    # Derive the branch height from the source unless one was asked for. The mux
-    # scales to exactly what it is told, so a fixed 16:9 branch stretches
-    # anything that is not 16:9 -- a 640x512 thermal source becomes 1.5x wider
-    # and only 1.055x taller. Every threshold downstream compares a Euclidean
-    # distance, which assumes the two axes have the same scale, so that stretch
-    # silently makes horizontal motion count for more than vertical.
-    height = args.height or max(2, int(round(args.width * src_h / src_w / 2)) * 2)
-    if not args.height and height != 540:
-        print(
-            f"  branch {args.width}x{height} from {src_w}x{src_h} (aspect preserved)",
-            file=sys.stderr,
-            flush=True,
-        )
-    args.height = height
-
     pipeline, tail = build(stream, args.width, args.height, needs_flow)
 
     scale_x = args.grid_size * (src_w / float(args.width))

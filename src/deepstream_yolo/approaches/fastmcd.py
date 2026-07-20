@@ -89,7 +89,7 @@ class Approach:
         self.redetect_every = int(c.get("redetect_every", 20))
 
         # Post-processing, in branch-resolution pixels.
-        self.dilate = int(c.get("dilate", 3))
+        self.dilate = int(c.get("dilate", 5))
         self.min_area = int(c.get("min_area", 48))
         self.merge_gap = int(c.get("merge_gap", 16))
         # Applied after merging, where the fragments of one target have been
@@ -98,7 +98,7 @@ class Approach:
         # stationary person 121 and boxes that land on nothing 241. A floor
         # here is the single most effective filter available, and it is a
         # statement about how big a person is, not a cap on box count.
-        self.min_box_area = int(c.get("min_box_area", 300))
+        self.min_box_area = int(c.get("min_box_area", 400))
 
         self.mean: np.ndarray | None = None
         self.var: np.ndarray | None = None
@@ -222,16 +222,18 @@ class Approach:
             (j0 + 1, i0 + 1, fx * fy),
         )
 
-        # Flat (2, N) views: one gather along a single axis rather than
-        # advanced indexing across two.
-        flat_mean = self.mean.reshape(2, -1)
-        flat_var = self.var.reshape(2, -1)
-        flat_age = self.age.reshape(2, -1)
+        # The three fields are gathered together out of one (6, N) block --
+        # mean, var and age for both models -- so each neighbour costs a single
+        # advanced-index pass instead of three. Gathering dominates this
+        # function, and the concatenate that sets it up is far cheaper than the
+        # eight extra gathers it removes.
         n = gh * gw
+        src = np.concatenate(
+            (self.mean.reshape(2, n), self.var.reshape(2, n), self.age.reshape(2, n))
+        )
 
         acc_w = np.zeros(n, dtype=np.float32)
-        acc_m = np.zeros((2, n), dtype=np.float32)
-        acc_a = np.zeros((2, n), dtype=np.float32)
+        acc_ma = np.zeros((4, n), dtype=np.float32)  # mixed mean (2), mixed age (2)
         top_w = np.zeros(n, dtype=np.float32)
         gathered = []
 
@@ -239,20 +241,19 @@ class Approach:
             valid = (iN >= 0) & (iN < gw) & (jn >= 0) & (jn < gh)
             wv = weight * valid
             idx = np.clip(jn, 0, gh - 1) * gw + np.clip(iN, 0, gw - 1)
-            means = flat_mean[:, idx]
-            acc_m += wv * means
-            acc_a += wv * flat_age[:, idx]
+            got = src[:, idx]
+            acc_ma += wv * got[[0, 1, 4, 5]]
             acc_w += wv
             np.maximum(top_w, wv, out=top_w)
-            gathered.append((wv, idx, means))
+            gathered.append((wv, got))
 
         safe = np.where(acc_w > 1e-6, acc_w, one)
-        mean = acc_m / safe
-        age = acc_a / safe
+        mixed = acc_ma / safe
+        mean, age = mixed[0:2], mixed[2:4]
 
         var = np.zeros((2, n), dtype=np.float32)
-        for wv, idx, means in gathered:
-            var += wv * (flat_var[:, idx] + (mean - means) ** 2)
+        for wv, got in gathered:
+            var += wv * (got[2:4] + (mean - got[0:2]) ** 2)
         var /= safe
 
         if self.mix_purity > 0.0:

@@ -149,15 +149,15 @@ class Approach:
         "max_level": 3,
         "fb_threshold": 1.0,
         # temporal baseline the camera model is fitted over
-        "lag": 4,
+        "lag": 8,
         # camera model
         "ransac_threshold": 2.0,
         "min_correspondences": 30,
         # what counts as a moving point
-        "residual_floor": 6.0, # was 12.0
-        "residual_scale": 4.0, # was 8.0
+        "residual_floor": 12.0,
+        "residual_scale": 8.0,
         # clustering, and the evidence a cluster must carry
-        "cluster_radius": 50.0,
+        "cluster_radius": 100.0,
         "min_cluster_points": 2,
         "min_cluster_energy": 0.0,
         "min_coherence": 0.0,
@@ -166,7 +166,7 @@ class Approach:
         "min_hits": 3,
         "max_misses": 2,
         "smooth": 0.5,
-        "min_travel": 10.0, # was 20.0
+        "min_travel": 20.0,
         # reported box
         "box_trim": 0.12,
         "box_pad": 10.0,

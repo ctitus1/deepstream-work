@@ -355,7 +355,9 @@ class Approach:
         spread = _block_max((gray - sel_mean) ** 2, b)
         new_var = (var * gain + (1.0 - gain) * spread).astype(np.float32)
         fresh = chosen & (age == 0.0)
-        new_var = np.where(fresh & (new_var < self.init_var), self.init_var, new_var)
+        new_var = np.where(
+            fresh & (new_var < self.init_var), np.float32(self.init_var), new_var
+        ).astype(np.float32)
         np.maximum(new_var, self.min_var, out=new_var)
 
         new_age = age.copy()

@@ -705,8 +705,11 @@ class Approach:
             if t.misses > cfg.max_coast_emit:
                 continue
 
-            cx = t.x[0] + t.cam[0] + offset
-            cy = t.x[1] + t.cam[1] + offset
+            # float() everywhere below, not just for tidiness: the state is
+            # float32 and json.dumps refuses numpy scalars, which fails only at
+            # the very end of a whole-video run.
+            cx = float(t.x[0] + t.cam[0]) + offset
+            cy = float(t.x[1] + t.cam[1]) + offset
             w = max(float(t.x[2]), 1.0)
             h = max(float(t.x[3]), 1.0)
 
@@ -717,21 +720,21 @@ class Approach:
 
             out.append(
                 {
-                    "left": (cx - w / 2.0) * ctx.scale_x,
-                    "top": (cy - h / 2.0) * ctx.scale_y,
-                    "width": w * ctx.scale_x,
-                    "height": h * ctx.scale_y,
-                    "track_id": t.track_id,
-                    "hits": t.hits,
-                    "misses": t.misses,
+                    "left": float((cx - w / 2.0) * ctx.scale_x),
+                    "top": float((cy - h / 2.0) * ctx.scale_y),
+                    "width": float(w * ctx.scale_x),
+                    "height": float(h * ctx.scale_y),
+                    "track_id": int(t.track_id),
+                    "hits": int(t.hits),
+                    "misses": int(t.misses),
                     # Diagnostics for the systematic-false-positive question:
                     # a structure that misregisters identically every frame is
                     # straight and persistent in the stabilised frame but does
                     # not move in the image.
-                    "stab_disp": round(net, 2),
-                    "img_disp": round(img_disp, 2),
-                    "straight": round(straight, 3),
-                    "speed": round(speed, 3),
+                    "stab_disp": round(float(net), 2),
+                    "img_disp": round(float(img_disp), 2),
+                    "straight": round(float(straight), 3),
+                    "speed": round(float(speed), 3),
                 }
             )
         return out

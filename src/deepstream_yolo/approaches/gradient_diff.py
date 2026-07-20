@@ -116,7 +116,12 @@ import numpy as np
 
 NAME = "gradient-diff"
 
-cv2.setNumThreads(2)
+# cv2.setNumThreads() is NOT called here, deliberately. It is process-global, so
+# a module setting it at import throttles every other approach in a batched run
+# and the video renderer besides -- this file capping OpenCV at 2 threads was
+# measured inflating klt-homography from 8.3 to 21.0 ms/frame in a batch of
+# four, on a 16-core machine. Thread policy belongs to whoever owns the process;
+# eval/run_motion.py sets it once, visibly.
 
 
 class Approach:

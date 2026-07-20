@@ -75,12 +75,19 @@ JSON each. `scripts/compare_motion.sh` does this automatically for whichever
 approaches are not already cached. Scores are unaffected — the approaches are
 independent and never see each other's output.
 
-**The `ms` column is not comparable across batched and solo runs.** Batched
-approaches share a process, and the pipeline provides the union of what they
-ask for — one approach wanting optical flow means `nvof` runs for all of them.
-Measured on the same video, `klt-homography` reports 8.3 ms/frame run alone and
-21.0 ms/frame in a batch of four. **Benchmark an approach on its own; batch
-only when you want the boxes.**
+**The `ms` column is wall time, so batched runs inflate it.** Batched
+approaches run concurrently and share the cores, so each one's timer includes
+the others' contention: `klt-homography` measures 9.4 ms/frame batched
+sequentially and 25.1 ms/frame batched concurrently, against 8.3 alone. The
+boxes are identical either way. To benchmark, run one approach alone, or pass
+`--sequential`.
+
+`MOTION_CV_THREADS` (default 8) sets the OpenCV thread budget, split across
+approaches when they run concurrently. **Approaches must never call
+`cv2.setNumThreads()` themselves** — it is process-global, and one module doing
+it at import throttles every other approach in the run. That happened: a
+`cv2.setNumThreads(2)` at module scope was inflating everything else on this
+16-core host by about 2x.
 
 ## Tuning sensitivity
 

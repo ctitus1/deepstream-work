@@ -42,8 +42,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -54,8 +56,19 @@ import gi  # noqa: E402
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst  # noqa: E402
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import pyds  # noqa: E402
+
+# Thread policy is set once, here, by the process that owns it. Approaches must
+# not call cv2.setNumThreads() themselves: it is global, so one module doing it
+# at import silently throttles every other approach sharing the run.
+# 8 measured best across the approaches on a 16-core host (klt 9.9 ms, gradient
+# 7.3, bgsub 8.3); past that they contend for memory bandwidth more than they
+# gain parallelism, and one of them is slightly slower at 16. Override with
+# MOTION_CV_THREADS on a machine with a different shape.
+cv_threads = int(os.environ.get("MOTION_CV_THREADS", "8"))
+cv2.setNumThreads(cv_threads)
 
 from deepstream_yolo.media import resolve_stream_source  # noqa: E402
 from deepstream_yolo.model_cache import discover_size  # noqa: E402
@@ -101,6 +114,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=int, default=4, help="nvof block size")
     parser.add_argument("--cfg", default="{}", help="JSON dict passed to the approach")
     parser.add_argument("--max-frames", type=int, default=0, help="0 = whole video")
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="run batched approaches one after another; use when timing one of them",
+    )
     parser.add_argument(
         "--out",
         default="",
@@ -228,6 +246,45 @@ def main() -> int:
     scale_y = args.grid_size * (src_h / float(args.height))
     frames: list[list[dict]] = [[] for _ in approaches]
     timings: list[list[float]] = [[] for _ in approaches]
+
+    def one(slot: int, ctx, index: int):
+        started = time.perf_counter()
+        try:
+            boxes = approaches[slot].process(ctx) or []
+        except Exception as exc:  # a broken frame must not kill the run
+            print(
+                f"{names[slot]} frame {index}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            boxes = []
+        timings[slot].append((time.perf_counter() - started) * 1000.0)
+        return boxes
+
+    # Approaches are independent, so they run concurrently rather than in
+    # sequence -- wall time becomes the slowest of them instead of their sum.
+    #
+    # The threads are worth having because the work is in OpenCV and numpy,
+    # which release the GIL. The thread *budget* is the subtle part: each
+    # approach is given its share of the cores rather than all of them, because
+    # four approaches each spawning a full-width pool oversubscribes and they
+    # spend the time fighting. Measured on 16 cores, sequential at 8 threads
+    # each totals 34.7 ms/frame; concurrent at 4 threads each is bounded by the
+    # slowest at 13.9.
+    #
+    # Each approach is touched by exactly one task per frame and all tasks join
+    # before the next frame, so the per-approach state needs no locking.
+    parallel = len(approaches) > 1 and not args.sequential
+    pool = ThreadPoolExecutor(max_workers=len(approaches)) if parallel else None
+    if parallel:
+        cv2.setNumThreads(max(1, cv_threads // len(approaches)))
+
+    def run_approaches(ctx, index):
+        if pool is None:
+            return [one(slot, ctx, index) for slot in range(len(approaches))]
+        futures = [pool.submit(one, slot, ctx, index) for slot in range(len(approaches))]
+        return [f.result() for f in futures]
+
     loop = GLib.MainLoop()
 
     def probe(_pad, info, _data):
@@ -265,20 +322,7 @@ def main() -> int:
                 scale_y=scale_y,
             )
 
-            frame_boxes = []
-            for slot, approach in enumerate(approaches):
-                started = time.perf_counter()
-                try:
-                    boxes = approach.process(ctx) or []
-                except Exception as exc:  # a broken frame must not kill the run
-                    print(
-                        f"{names[slot]} frame {index}: {type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    boxes = []
-                timings[slot].append((time.perf_counter() - started) * 1000.0)
-                frame_boxes.append(boxes)
+            frame_boxes = run_approaches(ctx, index)
 
             if rgba is not None:
                 try:
@@ -310,6 +354,9 @@ def main() -> int:
         loop.run()
     finally:
         pipeline.set_state(Gst.State.NULL)
+
+    if pool is not None:
+        pool.shutdown()
 
     default_dir = PROJECT_DIR / "eval" / "runs"
     for slot, name in enumerate(names):

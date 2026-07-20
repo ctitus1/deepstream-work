@@ -9,9 +9,27 @@ Writes raw BGR frames to stdout for ffmpeg to encode -- keeping the pixels
 lossless until the single encode at the end, which is what stops the boxes and
 labels turning to mush. Everything else goes to stderr so stdout stays clean.
 
-    docker compose run --rm -T deepstream-dev python3 eval/make_comparison_video.py \
+    docker run --rm -i --user "$(id -u):$(id -g)" --entrypoint python3 \
+      -v "$PWD":/w -w /w deepstream-work:7.1 \
+      eval/make_comparison_video.py --start 2160 --frames 150 2>/dev/null \
       | ffmpeg -f rawvideo -pix_fmt bgr24 -s 1920x1080 -r 30 -i - \
-               -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p out.mp4
+               -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p out.mp4
+
+Two details of that command are load-bearing, and getting either wrong
+corrupts the output in a way that looks like a rendering bug rather than a
+plumbing one:
+
+* ``--entrypoint python3`` bypasses the image's entrypoint, which prints a
+  747-byte CUDA banner **to stdout**. Those bytes land at the head of the raw
+  stream and shift every frame by 249 pixels, so each tile wraps its right
+  edge onto its left. 747 is not divisible by 3, so the channel order rotates
+  too and the video comes out with its reds and blues swapped. One stray
+  banner, two symptoms that look unrelated.
+* ``docker run``, not ``docker compose run``: compose writes its own status
+  lines to stdout and does the same thing.
+
+Neither needs the GPU -- this reads saved JSON and decodes video on the CPU --
+so plain ``docker run`` with no device flags is enough.
 """
 
 from __future__ import annotations

@@ -49,10 +49,41 @@ downstream measures the wrong thing. The affine background fit the proposal
 stage already runs is evaluated at each track's own position and accumulated,
 so association and all three gates happen in a scene-stabilised frame.
 
+Whole video, against the baseline it replaces:
+
+    approach            F1     prec   recall  box/f  onstat  onbg  ms
+    trajectory-filter   0.752  0.797  0.711   0.58   40      593   12.8
+    baseline            0.422  0.713  0.300   0.27   18      401    8.3
+
+Recall more than doubles, and precision goes *up* rather than down -- the trade
+the design predicted was recall for precision, and at the tuned operating point
+there is no trade. 4.5 ms/frame buys it, well inside the 33 ms budget.
+
 The known limit, stated up front: this suppresses *random* false positives, not
 *systematic* ones. A structure that misregisters the same way every frame is
-persistent and straight by construction and will confirm. See the ``img_disp``
-/ ``stab_disp`` keys on every emitted box, which exist to measure exactly that.
+persistent and straight by construction and will confirm. The ``img_disp`` /
+``stab_disp`` keys on every emitted box exist to measure exactly that, and the
+measurement says the worry does not bind here, for a reason worth writing down.
+
+Classifying all 633 surviving non-hit boxes by the track that produced them:
+
+  * 536 of them (85%) come from the twelve tracks that are *mostly right* --
+    the box drifting off a target it is genuinely following. Not one of those
+    tracks is static in image space; they run at 5-12 source px/frame. This is
+    a localisation error, not a detection error, and the fix for it is better
+    box regression, not a geometric prior.
+  * 97 come from twelve genuinely spurious tracks, of which six (29 boxes,
+    4.6% of the total) are static in image space.
+
+So the false structures on this footage are systematic in *where* and random in
+*when*: the top fifteen 240-px cells hold 57% of the remaining false positives
+and each keeps firing from frame ~800 to ~5200, but every individual appearance
+lasts a median of 7-13 frames. Temporal filtering is the right tool for that
+and it works -- static-in-image false positives fall from 1155 boxes at
+n_init=4 to 29 at n_init=25. A truly stationary false structure would have
+survived, and none did. What would still pay is a per-location suppression map,
+which the recurrence above makes cheap to build; what would pay more is fixing
+the drift, which is five times the error.
 """
 
 from __future__ import annotations
@@ -116,11 +147,25 @@ class Config:
     gate_cells: float = 12.0
     iou_weight: float = 1.0
     dist_weight: float = 1.0
+    # The chromaticity descriptor from motion.py, wired into the association
+    # cost. Measured and left off: at feature_weight 0.5 the whole-video score
+    # is identical to three decimals (F1 0.707, prec 0.814, recall 0.625) and
+    # costs 2.2 ms/frame. There is only ever one real target inside the 12-cell
+    # gate, so association is already unambiguous and appearance has nothing to
+    # disambiguate. It would earn its keep with several targets crossing.
     feature_weight: float = 0.0  # >0 turns on the appearance descriptor
     feature_bins: int = 6
 
     # --- track lifecycle ---------------------------------------------------
-    n_init: int = 4
+    # 25 is where the whole-video sweep peaks, and it is far higher than the
+    # 3-5 a tracker normally uses. That is the finding, not an accident: the
+    # tracks worth keeping live for a median of ~190 frames and the spurious
+    # ones for ~7, so confirmation can be made very expensive before it starts
+    # costing real detections. F1 is flat within 0.005 across n_init 22-30, so
+    # the operating point is a plateau rather than a peak -- but it does cost
+    # 0.83 s of latency before a new target is reported, which is the real
+    # price and is not visible in the metric.
+    n_init: int = 25
     max_age: int = 15  # 0.5 s at 30 fps
     # Frames a confirmed track may be emitted for while coasting. Separate from
     # max_age: keeping a track alive through an occlusion is cheap, but drawing
@@ -138,15 +183,32 @@ class Config:
     v_max_cells: float = 7.0
     # Trajectory window the gates are measured over, in frames.
     window: int = 20
-    # Re-test the gates every frame on the trailing window, not just at
-    # confirmation. A track that confirms and then stops dead is no longer
-    # evidence of a mover.
-    revalidate: bool = True
+    # Re-test the gates every frame on the trailing window rather than only at
+    # confirmation. This seemed obviously right -- a track that confirms and
+    # then stops dead is no longer evidence of a mover -- and measurement says
+    # it is wrong: it costs 0.045 F1 (0.752 -> 0.707 at n_init 25), losing 0.086
+    # recall to buy 0.017 precision.
+    #
+    # The reason is that the gates are evidence for *becoming* a track, not for
+    # *being* one. The walker turns, pauses at the kerb, and is briefly occluded,
+    # and in each case the trailing window stops being straight for a second or
+    # so; re-testing drops the box exactly then, which is not a frame anyone
+    # wanted to lose. Confirmation is a one-way door for a good reason, and the
+    # honest way to retire a track is max_age, which already does it.
+    revalidate: bool = False
 
     # Subtract the camera's own motion before association and before the
-    # trajectory gates. Off only to measure what it is worth -- the design
-    # assumes it, and every gate downstream is measuring the wrong quantity
-    # without it.
+    # trajectory gates. Off only to measure what it is worth.
+    #
+    # Worth less than expected on this clip: switching it off costs 0.011 F1
+    # (0.752 -> 0.741), all of it precision (0.797 -> 0.771). The reason is
+    # visible in the diagnostics -- median image-space and stabilised
+    # displacement over the gate window differ by under 1%, so this camera's
+    # shake is small next to the walker's own motion and the gates mostly
+    # survive without the correction. It is kept on because it is nearly free
+    # and because the argument for it is about cameras in general rather than
+    # this one: on a clip that actually pans, the uncorrected straightness test
+    # measures the pan.
     ego_compensate: bool = True
 
     # --- Kalman ------------------------------------------------------------

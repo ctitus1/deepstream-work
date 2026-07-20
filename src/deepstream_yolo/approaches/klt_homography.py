@@ -153,6 +153,7 @@ class Approach:
         "smooth": 0.5,
         "min_travel": 0.0,
         # reported box
+        "box_trim": 0.0,
         "box_pad": 10.0,
         "min_box": 30.0,
     }
@@ -343,12 +344,22 @@ class Approach:
                     if total < float(self.min_coherence) * float(strength.sum()):
                         continue
                 group = points[members]
-                left, top = group.min(axis=0)
-                right, bottom = group.max(axis=0)
+                if self.box_trim > 0.0 and len(members) >= 5:
+                    # Single-link clustering can chain one stray corner a long
+                    # way out, and the metric is centroid-in-box, so the box
+                    # midpoint is what a stray costs. Trim the extremes.
+                    edge = 100.0 * float(self.box_trim)
+                    low = np.percentile(group, edge, axis=0)
+                    high = np.percentile(group, 100.0 - edge, axis=0)
+                    left, top = float(low[0]), float(low[1])
+                    right, bottom = float(high[0]), float(high[1])
+                else:
+                    left, top = group.min(axis=0)
+                    right, bottom = group.max(axis=0)
                 clusters.append(
                     {
-                        "cx": float(group[:, 0].mean()),
-                        "cy": float(group[:, 1].mean()),
+                        "cx": float(np.median(group[:, 0])),
+                        "cy": float(np.median(group[:, 1])),
                         "box": (float(left), float(top), float(right), float(bottom)),
                         "points": int(len(members)),
                         "residual": float(strength.mean()),

@@ -54,6 +54,8 @@ motion. That is the honest cost of the recall.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
@@ -171,6 +173,11 @@ class Approach:
         "box_trim": 0.12,
         "box_pad": 10.0,
         "min_box": 30.0,
+        # How tall a target is expected to be, in SOURCE image pixels. This is
+        # the characteristic length every pixel value above is measured
+        # against -- see _scale_to_target. Set it for the camera and the range,
+        # not for the resolution.
+        "target_height": 440.0,
     }
 
     _INTS = (
@@ -316,7 +323,75 @@ class Approach:
 
     # -- contract --------------------------------------------------------
 
+    # --- characteristic length -------------------------------------------
+    #
+    # Every pixel value in `defaults` is really a statement about a target:
+    # cluster_radius is "about half a person", min_box is "smaller than this is
+    # not one", match_radius is "further than this between frames is somebody
+    # else". Frame size is the wrong thing to scale those by -- the same camera
+    # at twice the range halves the target without changing a pixel of
+    # resolution, and a 4K frame of a distant field has smaller targets than a
+    # 720p frame of a close one.
+    #
+    # So they are scaled by how large a target actually is. `target_height` is
+    # given in SOURCE image pixels, which is where a person's size is something
+    # you can look up or measure; it is converted to the branch resolution the
+    # approach really works in, and compared against the size the current
+    # values were tuned at.
+    #
+    # REFERENCE_TARGET_PX is that tuning size: the walking casualty in
+    # streams/lorton-d4-rgb.mp4 measures a median 440 px tall over 3510
+    # detections in a 3840x2160 frame, which is 110 px once the branch scales
+    # it to 960 wide.
+    # Branch width the corner budget was chosen at; only max_corners uses it.
+    REFERENCE_WIDTH = 960.0
+    REFERENCE_TARGET_PX = 110.0
+    _LENGTH_PARAMS = (
+        "min_distance",
+        "block_size",
+        "win_size",
+        "fb_threshold",
+        "ransac_threshold",
+        "residual_floor",
+        "cluster_radius",
+        "match_radius",
+        "min_travel",
+        "box_pad",
+        "min_box",
+    )
+    _AREA_PARAMS = ("max_corners",)
+    _ODD_INTS = ("block_size", "win_size")
+
+    def _scale_to_target(self, ctx) -> None:
+        """Re-express the pixel parameters for this target size, once."""
+        # Source pixels -> branch pixels, then relative to what was tuned.
+        target_branch = float(self.target_height) * (ctx.width / float(ctx.src_w))
+        scale = target_branch / self.REFERENCE_TARGET_PX
+
+        if scale > 0.0 and abs(scale - 1.0) > 1e-6:
+            for key in self._LENGTH_PARAMS:
+                setattr(self, key, getattr(self, key) * scale)
+            # A corner budget is a density over the frame, not a count, so it
+            # follows area -- and area here is the frame's, not the target's.
+            frame_scale = ctx.width / self.REFERENCE_WIDTH
+            self.max_corners = max(1, int(round(self.max_corners * frame_scale * frame_scale)))
+            for key in self._ODD_INTS:
+                value = max(3, int(round(getattr(self, key))))
+                setattr(self, key, value + 1 - value % 2)
+            # Each pyramid level halves the image, so depth is logarithmic.
+            self.max_level = max(1, int(round(self.max_level + math.log2(max(scale, 1e-6)))))
+
+        self._lk = {
+            **self._lk,
+            "winSize": (int(self.win_size), int(self.win_size)),
+            "maxLevel": int(self.max_level),
+        }
+        self._scaled = True
+
     def process(self, ctx) -> list[dict]:
+        if not getattr(self, "_scaled", False):
+            self._scale_to_target(ctx)
+
         gray = self._gray(ctx)
         if gray is None:
             return []

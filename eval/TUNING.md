@@ -44,6 +44,42 @@ If you want a lever that means "how much movement", `residual_floor` on
 `klt_homography` is the one that literally is that. It is also the
 best-scoring approach, so this is not a trade.
 
+## The characteristic length: `target_height`
+
+`klt_homography` measures every pixel-valued parameter against **how tall a
+target is expected to be, in source image pixels** — `target_height`, default
+440. That is not a frame-size normalisation: the same camera at twice the range
+halves the target without changing a pixel of resolution, and a 4K frame of a
+distant field has smaller targets than a 720p frame of a close one. Frame size
+is the wrong ruler; target size is the right one.
+
+440 is measured, not chosen: the walking casualty in
+`streams/lorton-d4-rgb.mp4` is a median 440 px tall across 3510 detections in a
+3840x2160 frame. Every other pixel value in that approach was tuned at that
+size, so at 440 the scale factor is exactly 1 and nothing is altered.
+
+**Set it for the camera and the range, not for the resolution.** Measured on the
+same clip re-encoded to 1080p, where the same person is 220 px tall:
+
+| source | `target_height` | F1 | recall |
+| --- | --- | --- | --- |
+| 3840x2160 | 440 (default) | 0.937 | 0.937 |
+| 1920x1080 | 220 (correct) | 0.941 | 0.942 |
+| 1920x1080 | 440 (left wrong) | 0.805 | 0.703 |
+
+Getting it right makes half the resolution behave identically; leaving it wrong
+costs 0.13 F1, nearly all of it recall — the thresholds end up asking for twice
+the movement the target can produce.
+
+What it does not do is recover information that is not there. Running the *same*
+source through a smaller branch (`--width 480`) scores 0.655: the scaling keeps
+the parameters honest, but halving the branch halves the target's displacement
+while the tracker's own jitter floor stays put, so the signal-to-noise ratio
+genuinely falls. Consistent semantics, not equivalent performance.
+
+`gradient_diff` and `bgsub_compensated` do not have this yet — their `min_area`
+and morphology kernels are still raw branch pixels.
+
 ## What "enough movement" is measured over
 
 The threshold is meaningless without the window it is measured across, and this

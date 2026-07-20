@@ -14,6 +14,7 @@ approach's own median cost per frame; the budget is 33 (30 fps).
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **`feature/klt-homography`** | **0.937** | 0.936 | 0.937 | 0.65 | 80 | 141 | **8.3** |
 | `feature/gradient-diff` | 0.925 | 0.920 | 0.930 | 0.81 | 165 | 185 | 14.8 |
+| `feature/bgsub-compensated` | 0.920 | **0.944** | 0.897 | 0.64 | 40 | 154 | 9.3 |
 | `feature/fastmcd` | 0.773 | 0.733 | 0.817 | 0.78 | 140 | 980 | 23.1 |
 | `feature/trajectory-filter` | 0.752 | 0.797 | 0.711 | 0.58 | 40 | 593 | 12.8 |
 | `feature/quadratic-flow-cost` | 0.624 | 0.558 | 0.707 | 0.86 | 56 | 1975 | 23.4 |
@@ -23,10 +24,30 @@ approach's own median cost per frame; the budget is 33 (30 fps).
 Every number is from one scorer run over one `detections.json`, not from the
 branches' own reports.
 
-`feature/bgsub-compensated` is pushed but had not produced a scored whole-video
-run when this was written. Its runs were probably lost: another agent, stopping
-its own eval container, filtered by image ancestor and killed every running
-`deepstream-work:7.1` container, including other agents' in-flight runs.
+All seven approaches completed. (`bgsub-compensated` had to be re-run: another
+agent, stopping its own eval container, filtered by image ancestor and killed
+every running `deepstream-work:7.1` container, taking other agents' in-flight
+runs with it.)
+
+**How to read this table, given what it does and does not measure.** Two
+corrections arrived after it was built, and both matter more than the ranking:
+
+1. **`onstat` is not a failure.** Boxes on "stationary" people are boxes on
+   people who are genuinely swaying, and swaying — like shadows, moving bushes,
+   or smoke — is something downstream stages filter. Detecting it is correct
+   behaviour. The scorer nonetheless counts those boxes against precision, so
+   every precision figure here is pessimistic, and unevenly so: backing them out
+   moves klt-homography from 0.936 to roughly 0.959 and gradient-diff, carrying
+   165, further still. **`onbg` is the column that matters.**
+2. **Part of `onbg` is mislabelled too.** Ground truth is derived from the
+   detector, so a frame where the target is moving but the *detector* misses her
+   contains no mover box — and a motion approach that correctly tracks her
+   through that gap has its box scored as a background false positive. Some of
+   the winner's 141 are her. The metric charges the motion detector for being
+   right exactly when the detector was wrong.
+
+Neither is fixed here. Both are recorded because the ranking below may not
+survive fixing them — see *What this harness measures, and what it should*.
 
 ## The winner: sparse KLT tracks, homography over a rolling window
 
@@ -131,12 +152,45 @@ heights, aspects and fill ratios all overlap; areas differ 50% at the median).
 Re-optimising the area floor per lag moved the optimum to k=3 and the score from
 0.650 to 0.925. Either parameter swept alone points somewhere wrong.
 
+**An un-warpable background model is structurally unusable on a moving camera.**
+Two branches tested this independently and agreed. `bgsub-compensated` scored
+0.920 by warping its *model* to each frame, against 0.574 (MOG2) and 0.476 (KNN)
+for the same pipeline forced to warp *frames to a keyframe* — the only option
+when the model's mixture state is private and cannot be resampled. `fastmcd`'s
+MOG2 control, with motion compensation removed entirely, scored **0.025** and put
+8527 boxes on stationary people. Compounding registration error across a
+sequence is the failure; a model with a finite time constant heals its own warp
+smear within ~200 frames.
+
+**Not learning foreground into the background model — the standard trick —
+actively hurts.** `bgsub-compensated` measured selective update at 0.900 against
+0.920 for updating everywhere. Freezing the model where it disagrees with the
+frame also freezes its ability to heal its own registration error.
+
+## What this harness measures, and what it should
+
+The real deployment runs detection at a **much lower rate than every frame**; the
+motion tracker exists to carry a target *between* those detections. This harness
+compares motion against detections taken every frame, which asks a different and
+easier question: "does motion agree with detection", not "does motion carry the
+target when detection is absent".
+
+The fix is small and does not touch any approach: subsample `detections.json` to
+every Nth frame, and score against the full-rate detections as truth. That
+converts the interesting quantities from per-frame F1 into position error at
+gap-midpoint and identity continuity across a gap — and it stops charging an
+approach for tracking a target the detector has lost, which is the entire point
+of having it.
+
+Expect the ranking to move. Approaches differ in how much they fire during
+detector gaps, and that behaviour is currently scored as pure cost, so an
+approach ranked lower here could be the better gap-filler.
+
 ## Where the winner still fails
 
-- **`onstat` 80, against the baseline's 18.** The people labelled "stationary"
-  still shift 1-4 branch px per frame, and over an 8-frame window that is real
-  motion; one of the three accounts for two-thirds. Anything sensitive enough to
-  catch a distant walker calls a weight-shifting bystander a mover too.
+- **`onstat` 80, against the baseline's 18** — recorded, but not a defect. Those
+  people are swaying, and catching that is correct; it is the metric that is
+  wrong here, not the detector.
 - **Single-link clustering at a 100 px radius** merges two targets closer than
   that into one box. Only 38 frames here contain two movers, so the metric never
   charged for it — it would matter on busier footage.

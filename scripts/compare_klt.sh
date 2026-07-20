@@ -119,7 +119,11 @@ streams/ holds: $(ls streams/ 2>/dev/null | tr '\n' ' ')"
 
 SLUG="$(basename "${VIDEO%.*}")"
 SWEEP_TAG="${PARAM_A}-${PARAM_B}"
-RUN_DIR="eval/runs/${SLUG}/klt-${SWEEP_TAG}"
+if [ "$SWEEP" -eq 0 ]; then
+    RUN_DIR="eval/runs/${SLUG}/klt-default"
+else
+    RUN_DIR="eval/runs/${SLUG}/klt-${SWEEP_TAG}"
+fi
 if [ "$SWEEP" -eq 0 ]; then
     OUT="${OUT:-outputs/${SLUG}_klt.mp4}"
 else
@@ -139,23 +143,24 @@ if [ "$TILE_W" -eq 0 ] || [ "$TILE_H" -eq 0 ]; then
 fi
 mkdir -p "$RUN_DIR" "$(dirname "$OUT")"
 
-# No sweep: collapse to one cell at the approach defaults. The machinery is
-# built around varying two parameters, so they are named but set to the
-# values they already have.
+# No sweep: one panel, and with NO parameter overrides at all. Naming two
+# parameters here and setting them to what look like the defaults would pin
+# those values in the shell, so changing a default in the approach would
+# quietly stop taking effect. Only --cfg is passed through.
 if [ "$SWEEP" -eq 0 ]; then
-    PARAM_A="lag_s";          VALUES_A="0.2667"
-    PARAM_B="residual_floor"; VALUES_B="12"
+    step "No sweep requested: klt at its own defaults, one panel"
 fi
 
 # Variant list, and the run files in the same order, so the grid reads
 # left-to-right as B varies and top-to-bottom as A varies.
 # Read line by line rather than with one whitespace-splitting `read`: the panel
 # labels contain spaces, which would cut the JSON mid-string.
-mapfile -t SWEEP_FIELDS < <(python3 - "$PARAM_A" "$VALUES_A" "$PARAM_B" "$VALUES_B" "$RUN_DIR" "$EXTRA_CFG" <<'PY'
+mapfile -t SWEEP_FIELDS < <(python3 - "$PARAM_A" "$VALUES_A" "$PARAM_B" "$VALUES_B" "$RUN_DIR" "$EXTRA_CFG" "$SWEEP" <<'PY'
 import json, sys
 
-param_a, values_a, param_b, values_b, run_dir, extra = sys.argv[1:7]
+param_a, values_a, param_b, values_b, run_dir, extra, sweep = sys.argv[1:8]
 extra = json.loads(extra)
+sweep = sweep == "1"
 
 
 def parse(text):
@@ -173,6 +178,25 @@ def tag(value):
 
 
 variants, runs = [], []
+
+if not sweep:
+    # One cell carrying only what the caller explicitly asked for, so the
+    # approach's own defaults decide everything else. The label names those
+    # overrides, so a panel is never ambiguous about what produced it.
+    shown = "  ".join(f"{k}={v}" for k, v in sorted(extra.items()))
+    variants.append(
+        {
+            "name": "default",
+            "label": f"klt-homography  {shown}" if shown else "klt-homography (defaults)",
+            "cfg": dict(extra),
+        }
+    )
+    runs.append(f"{run_dir}/default.json")
+    print(json.dumps(variants, separators=(",", ":")))
+    print(",".join(runs))
+    print(1)
+    raise SystemExit(0)
+
 for a in parse(values_a):
     for b in parse(values_b):
         name = f"{param_a}{tag(a)}_{param_b}{tag(b)}"

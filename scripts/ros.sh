@@ -23,7 +23,8 @@ Options:
   --rtsp-port PORT      RTSP port. Default: 8555
   --foxglove-port PORT  Foxglove websocket port. Default: 8765
   --bag                 Also record all ROS topics to MCAP under outputs/rosbags/.
-  --build               Build the ROS profile images first.
+  --build               Force a rebuild of the ROS profile images. They are
+                        built automatically when their inputs change.
   --setup               Run scripts/setup.sh first.
   -h, --help            Show this help.
 
@@ -89,7 +90,28 @@ require_ros_workspace >/dev/null
 install_lifecycle_traps
 sweep_stale_containers
 
-[ "$BUILD" -eq 1 ] && { step "Building ROS profile images"; docker compose --profile ros build; }
+# The ROS images are built here rather than in setup.sh: only this entrypoint
+# needs them, and the ROS Humble base costs a gigabyte that a parser-only user
+# should never pay. Stamped on the same inputs the image is built from, so a
+# change to the ROS Dockerfile or to the UID mapping in compose rebuilds without
+# anyone having to remember --build. The image check is separate from the stamp
+# because a stamp cannot see that someone deleted the image behind its back.
+ensure_ros_images() {
+    local signature
+    signature="uid=${HOST_UID}:${HOST_GID} $(hash_files docker/Dockerfile.ros-humble docker-compose.yml)"
+
+    if [ "$BUILD" -eq 0 ] && stamp_valid ros-image "$signature" \
+        && docker image inspect deepstream-work:ros-humble >/dev/null 2>&1; then
+        skip "ROS profile images"
+        return 0
+    fi
+
+    step "Building ROS profile images"
+    docker compose --profile ros build
+    stamp_write ros-image "$signature"
+}
+
+ensure_ros_images
 
 # Fail before starting anything if a port is taken; these are all host-network
 # services, so a leftover from another run would bind silently in the wrong place.

@@ -112,13 +112,23 @@ step "Starting the parser app"
 log "  quit with q, or Ctrl-C"
 log ""
 
-# Run the app in the foreground: it owns the terminal for keyboard controls, and
-# its exit status becomes this script's, so a failure is not swallowed. set +e
-# around it so an abnormal exit is described before the traps take over.
+# The app runs as a background job this script then waits on, rather than in the
+# foreground. Both forms hand it the terminal, but bash defers a trap until the
+# running foreground command returns -- so with the app in front, a SIGINT or
+# SIGTERM sent to this script's PID alone did nothing at all: the traps never
+# ran, and the stack stayed up with its containers behind it. `wait` is
+# interruptible, so the traps now fire immediately. (Ctrl-C and closing the
+# terminal always worked, because those signal the whole process group; it was
+# scripted kills that were silently ignored.)
+#
+# `<&0` is load-bearing: bash points an async command's stdin at /dev/null
+# unless the command is given one explicitly, and the app reads the terminal for
+# its q/space/arrow controls.
+#
+# set +e so an abnormal exit is described before the traps take over.
 set +e
 if in_deepstream_container; then
-    python3 src/parser_app.py --stream "$STREAM" ${APP_ARGS[@]+"${APP_ARGS[@]}"}
-    APP_STATUS=$?
+    python3 src/parser_app.py --stream "$STREAM" ${APP_ARGS[@]+"${APP_ARGS[@]}"} <&0 &
 else
     # The container needs the host X socket to open a window.
     xhost +local:docker >/dev/null 2>&1 || warn "xhost failed; the window may not open"
@@ -128,10 +138,14 @@ else
         --name "$PARSER_CONTAINER" \
         --label "$DSW_LABEL=$DSW_RUN_ID" \
         deepstream-dev \
-        python3 src/parser_app.py --stream "$STREAM" ${APP_ARGS[@]+"${APP_ARGS[@]}"}
-    APP_STATUS=$?
-    xhost -local:docker >/dev/null 2>&1 || true
+        python3 src/parser_app.py --stream "$STREAM" ${APP_ARGS[@]+"${APP_ARGS[@]}"} <&0 &
 fi
+
+APP_PID=$!
+track_pid "$APP_PID"
+wait "$APP_PID"
+APP_STATUS=$?
+in_deepstream_container || xhost -local:docker >/dev/null 2>&1
 set -e
 
 report_exit "$APP_STATUS" "the parser app"

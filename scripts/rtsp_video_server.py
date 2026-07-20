@@ -146,12 +146,42 @@ class LoopingRtspServer:
         # alive past this scope, which is what makes looping work.
         self.bus_refs.append(bus)
 
+        # Seeking on bus EOS is too late to keep a client alive. By the time
+        # that message arrives the EOS *event* has already travelled through
+        # pay0 into the RTSP session, and a DeepStream client that receives it
+        # shuts its pipeline down -- so this "looping" server ended every run
+        # one playthrough after the client connected, which is exactly as long
+        # as no looping at all. Dropping the event at the payloader's sink pad
+        # keeps it off the wire; the seek then restarts the file underneath a
+        # client that never noticed it ended.
+        pay = element.get_by_name("pay0")
+        sink_pad = pay.get_static_pad("sink") if pay is not None else None
+        if sink_pad is not None:
+            sink_pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self.on_pay_event, element)
+
+    def on_pay_event(self, _pad, info, element):
+        event = info.get_event()
+        if event is None or event.type != Gst.EventType.EOS:
+            return Gst.PadProbeReturn.OK
+
+        # The seek has to leave this thread: a flushing seek issued from the
+        # streaming thread that is currently delivering EOS deadlocks against
+        # its own flush.
+        GLib.idle_add(self.rewind, element)
+        return Gst.PadProbeReturn.DROP
+
     def on_eos(self, _bus, _message, element) -> None:
+        # Fallback for a pipeline with no reachable pay0, where the probe above
+        # was never installed. Late, but better than stopping.
+        self.rewind(element)
+
+    def rewind(self, element) -> bool:
         element.seek_simple(
             Gst.Format.TIME,
             Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
             0,
         )
+        return GLib.SOURCE_REMOVE
 
     def run(self) -> None:
         def stop(_signum, _frame):

@@ -73,6 +73,12 @@ services:
       context: .
       dockerfile: docker/Dockerfile.ros-humble
       args:
+        # Same host-UID mapping as the DeepStream image: the bag recorder writes
+        # its MCAP into a bind mount, and as root that output is undeletable by
+        # the user who asked for it.
+        USERNAME: user
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
         WORKSPACE_DIR: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     image: deepstream-work:ros-humble
     container_name: ros-humble-publisher

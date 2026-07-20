@@ -202,6 +202,12 @@ def ensure_model(
     artifacts = tagged_artifacts(stem, long_side, width, height)
 
     shutil.copy2(base, artifacts.onnx)
+    # The engine is derived from the ONNX but named independently of its
+    # contents, and nvinfer deserializes whatever engine it finds without
+    # checking it against the ONNX beside it. Re-exporting the same tag -- a new
+    # checkpoint at the same resolution, say -- would otherwise keep running the
+    # previous model's weights, silently and indefinitely.
+    artifacts.engine.unlink(missing_ok=True)
     artifacts.meta.write_text(
         json.dumps(
             {
@@ -249,6 +255,9 @@ def ensure_assessment_model(model: str, batch_size: int) -> tuple[dict, Path]:
             cwd=PROJECT_DIR,
             check=True,
         )
+        # Same stale-engine trap as the detector above: a re-export must not
+        # leave the previous checkpoint's engine sitting at the derived path.
+        artifacts.engine.unlink(missing_ok=True)
 
     meta = read_meta(artifacts.meta)
     if not artifacts.onnx.exists():

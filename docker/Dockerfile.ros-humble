@@ -4,6 +4,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONPATH=/workspace/deepstream-work/src
 
 ARG WORKSPACE_DIR=/workspace/deepstream-work
+ARG USERNAME=user
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 WORKDIR ${WORKSPACE_DIR}
 
@@ -16,5 +19,34 @@ RUN apt-get update && \
       ros-humble-rosbag2-storage-mcap \
       ros-humble-vision-msgs && \
     rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Unprivileged user matching the host UID/GID, mirroring docker/Dockerfile.
+#
+# Without this the container ran as root, and the one thing it writes to a bind
+# mount -- the MCAP bag from `ros.sh --bag` -- came back root-owned, so the user
+# who recorded it could not delete it. Kept last so the apt layer above stays
+# cached when only the UID/GID change.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    if getent group "${USER_GID}" >/dev/null; then \
+        EXISTING_GROUP="$(getent group "${USER_GID}" | cut -d: -f1)"; \
+    else \
+        groupadd --gid "${USER_GID}" "${USERNAME}"; \
+        EXISTING_GROUP="${USERNAME}"; \
+    fi; \
+    if id -u "${USER_UID}" >/dev/null 2>&1; then \
+        EXISTING_USER="$(getent passwd "${USER_UID}" | cut -d: -f1)"; \
+        usermod -l "${USERNAME}" "${EXISTING_USER}" || true; \
+        usermod -d "/home/${USERNAME}" -m "${USERNAME}" || true; \
+        usermod -g "${EXISTING_GROUP}" "${USERNAME}" || true; \
+    else \
+        useradd --uid "${USER_UID}" --gid "${EXISTING_GROUP}" -m "${USERNAME}" --shell /bin/bash; \
+    fi; \
+    mkdir -p "/home/${USERNAME}"; \
+    mkdir -p "${WORKSPACE_DIR}"; \
+    chown -R "${USER_UID}:${USER_GID}" "/home/${USERNAME}" "${WORKSPACE_DIR}"
+
+USER ${USERNAME}
 
 CMD ["/bin/bash"]

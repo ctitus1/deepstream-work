@@ -210,7 +210,12 @@ setup_models() {
         # two cannot drift and force-clear the wrong model's artifacts.
         local stem; stem="$(basename "${MODEL:-$(default_model)}" .pt)"
         warn "discarding cached exports for ${stem}"
-        rm -f "models/${stem}"_*.onnx "models/${stem}"_*.meta.json
+        # The .engine glob matters as much as the .onnx one: nvinfer loads an
+        # existing engine without validating it against the ONNX, so clearing
+        # only the export would re-run the whole stage and still infer with the
+        # previous model's weights.
+        rm -f "models/${stem}"_*.onnx "models/${stem}"_*.onnx_*.engine \
+              "models/${stem}"_*.meta.json
     fi
 
     step "Exporting models"

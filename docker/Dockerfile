@@ -177,8 +177,13 @@ sys.exit('pyds did not install') if spec is None else print('pyds installed:', s
 #
 # Placed here, after the heavy layers, so adding it costs one small layer rather
 # than a full rebuild.
-RUN pip3 install --no-cache-dir --break-system-packages numpy \
-    || pip3 install --no-cache-dir numpy
+# numpy for the flow arithmetic; scipy for labelling/morphology; OpenCV
+# (headless -- no GUI, no X dependency) for the feature-tracking, homography
+# and background-subtraction approaches. Installed together so an approach can
+# be swapped in without rebuilding the image.
+RUN pip3 install --no-cache-dir --break-system-packages \
+        numpy scipy opencv-python-headless \
+    || pip3 install --no-cache-dir numpy scipy opencv-python-headless
 
 # GIO asks a proxy resolver which proxy to use for every network connection it
 # opens. libproxy in this base image faults while unwinding when it is asked,

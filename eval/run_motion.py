@@ -14,6 +14,10 @@ what it needs:
                      when ``needs_flow`` is False.
   * ``ctx.rgba``  -- the frame as an (h, w, 4) uint8 array at branch
                      resolution, or None when ``needs_pixels`` is False.
+  * ``ctx.fps``   -- the source frame rate. Approaches quote their temporal
+                     parameters in seconds and convert with this; a parameter
+                     counted in frames means different things on 30 and 60 fps
+                     footage.
 
 Queues here are NOT leaky and the sink does not sync, so every frame is seen in
 order and frame index i is the same frame as index i in the detection dump.
@@ -96,6 +100,7 @@ class Context:
         "grid_size",
         "scale_x",
         "scale_y",
+        "fps",
     )
 
     def __init__(self, **kwargs):
@@ -282,10 +287,26 @@ def main() -> int:
     #
     # Rounded to an even height because encoders and several DeepStream
     # elements dislike odd dimensions.
+    # Frame rate, for the approaches to convert their time-valued parameters
+    # with. Falls back to 30 -- the rate everything was tuned at -- when the
+    # container will not say, which leaves behaviour exactly as it was.
+    fps = 30.0
+    try:
+        import cv2 as _cv2
+
+        probe = _cv2.VideoCapture(str(stream.path))
+        reported = float(probe.get(_cv2.CAP_PROP_FPS) or 0.0)
+        probe.release()
+        if 1.0 < reported < 1000.0:
+            fps = reported
+    except Exception:
+        pass
+
     height = args.height or max(2, int(round(args.width * src_h / src_w / 2)) * 2)
     if not args.height:
         print(
-            f"  branch {args.width}x{height} from {src_w}x{src_h} (aspect preserved)",
+            f"  branch {args.width}x{height} from {src_w}x{src_h}"
+            f" (aspect preserved), {fps:g} fps",
             file=sys.stderr,
             flush=True,
         )
@@ -375,6 +396,7 @@ def main() -> int:
                 grid_size=args.grid_size,
                 scale_x=scale_x,
                 scale_y=scale_y,
+                fps=fps,
             )
 
             frame_boxes = run_approaches(ctx, index)

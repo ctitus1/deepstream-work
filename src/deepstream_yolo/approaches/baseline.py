@@ -32,7 +32,22 @@ class Approach:
         self.cfg = replace(base, **overrides) if overrides else base
         self.state = MotionState(self.cfg.decay)
 
+    # `decay` keeps that fraction of the accumulated flow every frame, so its
+    # time constant is in frames. Tuned at 30 fps; at twice the rate it must
+    # keep the square root to forget at the same speed in seconds.
+    REFERENCE_FPS = 30.0
+
+    def _calibrate_time(self, ctx) -> None:
+        fps = float(getattr(ctx, "fps", 0.0) or self.REFERENCE_FPS)
+        if abs(fps - self.REFERENCE_FPS) > 1e-6:
+            retain = min(max(self.cfg.decay, 1e-6), 1.0 - 1e-9)
+            self.cfg = replace(self.cfg, decay=retain ** (self.REFERENCE_FPS / fps))
+            self.state = MotionState(self.cfg.decay)
+        self._timed = True
+
     def process(self, ctx) -> list[dict]:
+        if not getattr(self, "_timed", False):
+            self._calibrate_time(ctx)
         if ctx.flow is None:
             return []
 

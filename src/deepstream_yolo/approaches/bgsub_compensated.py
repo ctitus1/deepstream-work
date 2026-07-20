@@ -70,6 +70,9 @@ class Approach:
         self.min_inliers = int(cfg.get("min_inliers", 25))
 
         # Gaussian model
+        # Per-frame retention of the age variable (age += alpha*(1-age)), so
+        # its time constant is 1/alpha frames. Quoted at 30 fps and rescaled to
+        # keep the same constant in seconds at any rate.
         self.alpha = float(cfg.get("alpha", 0.005))
         self.k = float(cfg.get("k", 4.5))
         self.min_diff = float(cfg.get("min_diff", 12.0))
@@ -79,7 +82,10 @@ class Approach:
         self.age_min = float(cfg.get("age_min", 0.25))
 
         # MOG2 / KNN
-        self.history = int(cfg.get("history", 300))
+        # Model memory in SECONDS. Was 300 frames, tuned at 30 fps.
+        self.history_s = float(cfg.get("history_s", 10.0))
+        self.history = int(cfg.get("history", 0)) or 0  # explicit frame override
+        self._timed = False
         self.var_threshold = float(cfg.get("var_threshold", 24.0))
         self.detect_shadows = bool(cfg.get("detect_shadows", False))
         self.learning_rate = float(cfg.get("learning_rate", -1.0))
@@ -291,7 +297,22 @@ class Approach:
 
     # ---------------------------------------------------------------- entry
 
+    REFERENCE_FPS = 30.0
+
+    def _calibrate_time(self, ctx) -> None:
+        fps = float(getattr(ctx, "fps", 0.0) or self.REFERENCE_FPS)
+        if not self.history:
+            self.history = max(1, int(round(self.history_s * fps)))
+        if abs(fps - self.REFERENCE_FPS) > 1e-6:
+            # Retention is (1-alpha) per frame; hold the time constant fixed.
+            retain = min(max(1.0 - self.alpha, 1e-9), 1.0 - 1e-12)
+            self.alpha = 1.0 - retain ** (self.REFERENCE_FPS / fps)
+        self._timed = True
+
     def process(self, ctx) -> list[dict]:
+        if not self._timed:
+            self._calibrate_time(ctx)
+
         if ctx.rgba is None:
             return []
         gray = self._gray(ctx.rgba)

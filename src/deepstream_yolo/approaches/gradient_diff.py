@@ -116,6 +116,10 @@ import numpy as np
 
 NAME = "gradient-diff"
 
+# Everything here was tuned on 30 fps footage; durations quoted in seconds are
+# converted against the source rate.
+REFERENCE_FPS = 30.0
+
 # cv2.setNumThreads() is NOT called here, deliberately. It is process-global, so
 # a module setting it at import throttles every other approach in a batched run
 # and the video renderer besides -- this file capping OpenCV at 2 threads was
@@ -134,7 +138,15 @@ class Approach:
         # Lag, in frames, between the reference and the current frame. The
         # second reference sits at 2k so that the intersection of the two
         # differences isolates the current position.
-        self.k = int(cfg.get("k", 3))
+        # Differencing baseline in SECONDS. Was 3 frames, tuned at 30 fps; a
+        # frame count silently halves the time window at 60 fps.
+        self.k_s = float(cfg.get("k_s", 0.1))
+        # Explicit frame override, else the reference-rate equivalent of k_s.
+        # It has to be valid here, not just by the first frame: the ring buffers
+        # below are sized from it.
+        self.k_fixed = int(cfg.get("k", 0)) or 0
+        self.k = self.k_fixed or max(1, int(round(self.k_s * REFERENCE_FPS)))
+        self._timed = False
         self.single = bool(cfg.get("single", False))  # skip the 2k lag, for A/B
 
         # Feature tracking.
@@ -171,9 +183,7 @@ class Approach:
 
         self.debug = bool(cfg.get("debug", False))
 
-        lags = (self.k,) if self.single else (self.k, 2 * self.k)
-        self.lags = lags
-        self.max_lag = max(lags)
+        self._size_ring()
 
         # Ring of past frames as separate contiguous (luma, gradient magnitude)
         # planes. Interleaving them into one 2-channel image halves the warp
@@ -281,7 +291,33 @@ class Approach:
 
     # ------------------------------------------------------------------- main
 
+    def _size_ring(self) -> None:
+        """Derive the lag set and ring depth from the current k."""
+        self.lags = (self.k,) if self.single else (self.k, 2 * self.k)
+        self.max_lag = max(self.lags)
+
+    def _calibrate_time(self, ctx) -> None:
+        """Convert the differencing baseline from seconds to frames.
+
+        Re-sizes the ring, because its depth is a function of k and k is only
+        known once the frame rate is.
+        """
+        self._timed = True
+        if self.k_fixed:
+            return
+        fps = float(getattr(ctx, "fps", 0.0) or REFERENCE_FPS)
+        frames = max(1, int(round(self.k_s * fps)))
+        if frames == self.k:
+            return
+        self.k = frames
+        self._size_ring()
+        self.ring = deque(self.ring, maxlen=self.max_lag + 1)
+        self.trace = deque(self.trace, maxlen=self.max_lag + 1)
+
     def process(self, ctx) -> list[dict]:
+        if not self._timed:
+            self._calibrate_time(ctx)
+
         if ctx.rgba is None:
             return []
 

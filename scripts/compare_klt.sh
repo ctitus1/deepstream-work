@@ -16,8 +16,8 @@
 #       movement, so smaller motion is detected. The values descend so that
 #       rightward always means more sensitive, whatever the numbers say.
 #
-#   DOWN (y), lag ASCENDING 4 -> 24
-#       Frames the camera model is fitted over. This does not lower the bar, it
+#   DOWN (y), lag_s ASCENDING 0.133 -> 0.8 seconds
+#       Seconds the camera model is fitted over. This does not lower the bar, it
 #       raises the signal: real displacement accumulates over the window while
 #       tracking jitter does not, so a slow target clears the same threshold
 #       given longer. It should catch more of the true slow movement -- and it
@@ -45,8 +45,8 @@ Sweeps two klt-homography parameters over a video and renders a labelled grid,
 one panel per combination. All variants run in a single pass over the video.
 
 Options:
-  --param-a NAME      Parameter varied DOWN the grid. Default: lag
-  --values-a LIST     Its values, top to bottom. Default: 4,8,16,24
+  --param-a NAME      Parameter varied DOWN the grid. Default: lag_s
+  --values-a LIST     Its values, top to bottom. Default: 0.133,0.267,0.533,0.8
   --param-b NAME      Parameter varied ACROSS the grid. Default: residual_floor
   --values-b LIST     Its values, left to right. Default: 24,12,6,3
 
@@ -69,6 +69,7 @@ Examples:
   scripts/compare_klt.sh streams/dtc_c2-d3-rgb.mp4
   scripts/compare_klt.sh --param-b min_travel --values-b 4,10,20,40
   scripts/compare_klt.sh --param-a ransac_threshold --values-a 0.5,1,2,4
+  scripts/compare_klt.sh --param-a lag_s --values-a 0.27,0.53
 EOF
 }
 

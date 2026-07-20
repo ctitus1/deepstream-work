@@ -80,6 +80,39 @@ genuinely falls. Consistent semantics, not equivalent performance.
 `gradient_diff` and `bgsub_compensated` do not have this yet — their `min_area`
 and morphology kernels are still raw branch pixels.
 
+## Durations are in seconds, not frames
+
+Every temporal parameter is quoted in **seconds** and converted against the
+source frame rate. They were all tuned on 30 fps footage, so a parameter
+counted in frames silently meant something different on anything else.
+
+| approach | parameter | default | was |
+| --- | --- | --- | --- |
+| `klt_homography` | `lag_s` | 0.267 s | 8 frames |
+| | `refresh_every_s` | 0.1 s | 3 frames |
+| | `min_hits_s` | 0.1 s | 3 frames |
+| | `max_misses_s` | 0.067 s | 2 frames |
+| `gradient_diff` | `k_s` | 0.1 s | 3 frames |
+| `bgsub_compensated` | `history_s` | 10 s | 300 frames |
+
+Exponential-average factors — `klt_homography`'s `smooth`, `bgsub`'s `alpha`,
+`baseline`'s `decay` — are not durations, but their meaning is one: they retain
+a fraction of the old value *per frame*. They keep their names and their
+30 fps values, and are raised to `30/fps` so they forget at the same rate in
+seconds. At 60 fps a decay of 0.85 becomes 0.922, and 0.922² = 0.85.
+
+`klt_homography` also accepts `lag` (and `gradient_diff` a `k`,
+`bgsub_compensated` a `history`) as an explicit frame count, which overrides
+the seconds value when you want to pin frames directly.
+
+**What it is worth**: the 60 fps thermal clip detected in 7.9% of frames with
+the old frame-based `lag: 8`, which spanned only 0.133 s there. The same
+configuration expressed as 0.267 s detects in **23.3%** — the target had not
+changed, only how long the detector was willing to watch it.
+
+30 fps behaviour is unchanged by construction: all four approaches reproduce
+their previous scores exactly (0.937 / 0.925 / 0.920 / 0.422).
+
 ## What "enough movement" is measured over
 
 The threshold is meaningless without the window it is measured across, and this
@@ -88,16 +121,16 @@ missed:
 
 | approach | lever | default | effect |
 | --- | --- | --- | --- |
-| `klt_homography` | `lag` | 8 | frames between the two positions the camera model is fitted over |
-| `gradient_diff` | `k` | 3 | frames between the two images differenced |
-| `bgsub_compensated` | `history` | 300 | frames of appearance the background model averages |
-| `baseline` | `decay` | 0.85 | weight of the running average of flow; higher remembers longer |
+| `klt_homography` | `lag_s` | 0.267 s | seconds between the two positions the camera model is fitted over |
+| `gradient_diff` | `k_s` | 0.1 s | seconds between the two images differenced |
+| `bgsub_compensated` | `history_s` | 10 s | seconds of appearance the background model averages |
+| `baseline` | `decay` | 0.85 | per-frame retention of the flow average, rescaled by frame rate |
 
 Longer windows accumulate real motion while noise cancels, so **raising `lag`
 is often a better way to catch slow targets than lowering
 `residual_floor`** — it raises the signal instead of lowering the bar. This was
 the single largest effect measured anywhere in the comparison: `klt_homography`
-fitted at `lag: 1` scores F1 0.073, and at `lag: 8` scores 0.937. Nothing else
+fitted at a 1-frame baseline scores F1 0.073, and at `lag_s: 0.267` scores 0.937. Nothing else
 came close to mattering that much.
 
 The cost is latency and smearing: a target is only reported once it has been

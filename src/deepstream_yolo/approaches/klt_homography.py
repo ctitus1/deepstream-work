@@ -145,13 +145,13 @@ class Approach:
         "quality_level": 0.01,
         "min_distance": 5.0,
         "block_size": 5,
-        "refresh_every": 3,
+        "refresh_every_s": 0.1,
         # LK tracking
         "win_size": 21,
         "max_level": 3,
         "fb_threshold": 1.0,
-        # temporal baseline the camera model is fitted over
-        "lag": 8,
+        # temporal baseline the camera model is fitted over, in SECONDS
+        "lag_s": 0.2667,
         # camera model
         "ransac_threshold": 2.0,
         "min_correspondences": 30,
@@ -165,8 +165,8 @@ class Approach:
         "min_coherence": 0.0,
         # temporal persistence
         "match_radius": 70.0,
-        "min_hits": 3,
-        "max_misses": 2,
+        "min_hits_s": 0.1,
+        "max_misses_s": 0.0667,
         "smooth": 0.5,
         "min_travel": 20.0,
         # reported box
@@ -183,13 +183,9 @@ class Approach:
     _INTS = (
         "max_corners",
         "block_size",
-        "refresh_every",
         "max_level",
-        "lag",
         "min_correspondences",
         "min_cluster_points",
-        "min_hits",
-        "max_misses",
     )
 
     def __init__(self, cfg: dict):
@@ -362,6 +358,41 @@ class Approach:
     _AREA_PARAMS = ("max_corners",)
     _ODD_INTS = ("block_size", "win_size")
 
+    # --- temporal calibration --------------------------------------------
+    #
+    # Everything below was tuned on 30 fps footage, and a parameter counted in
+    # frames means a different duration at any other rate. The 60 fps thermal
+    # clip made that concrete: a lag of 8 frames spans 0.27 s at 30 fps and
+    # 0.13 s at 60, so the same configuration demanded roughly twice the speed
+    # of a target before it registered.
+    #
+    # Durations are therefore quoted in seconds and converted here.
+    REFERENCE_FPS = 30.0
+    # (seconds-valued name, frames-valued attribute, minimum frames)
+    _DURATIONS = (
+        ("lag_s", "lag", 1),
+        ("refresh_every_s", "refresh_every", 1),
+        ("min_hits_s", "min_hits", 1),
+        ("max_misses_s", "max_misses", 0),
+    )
+    # Retained-weight factors of an exponential average. These are not
+    # durations, but their meaning is one: `smooth` keeps that fraction of the
+    # old value every frame, so at twice the rate it must keep the square root
+    # to forget at the same speed.
+    _EMA_RETAIN = ("smooth",)
+
+    def _calibrate_time(self, ctx) -> None:
+        fps = float(getattr(ctx, "fps", 0.0) or self.REFERENCE_FPS)
+        for seconds_name, frames_name, floor in self._DURATIONS:
+            frames = int(round(float(getattr(self, seconds_name)) * fps))
+            setattr(self, frames_name, max(floor, frames))
+
+        if abs(fps - self.REFERENCE_FPS) > 1e-6:
+            exponent = self.REFERENCE_FPS / fps
+            for key in self._EMA_RETAIN:
+                value = min(max(float(getattr(self, key)), 1e-6), 1.0 - 1e-9)
+                setattr(self, key, value ** exponent)
+
     def _scale_to_target(self, ctx) -> None:
         """Re-express the pixel parameters for this target size, once."""
         # Source pixels -> branch pixels, then relative to what was tuned.
@@ -390,6 +421,7 @@ class Approach:
 
     def process(self, ctx) -> list[dict]:
         if not getattr(self, "_scaled", False):
+            self._calibrate_time(ctx)
             self._scale_to_target(ctx)
 
         gray = self._gray(ctx)

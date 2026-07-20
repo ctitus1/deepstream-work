@@ -41,6 +41,10 @@ class PipelineParts:
     osd: Gst.Element
     sink: Gst.Element
     record_sink: Gst.Element | None = None
+    # Tail of the motion branch: the element whose source pad carries both the
+    # optical-flow meta and the RGBA pixels. Callers attach the motion probe
+    # there; it is the only handle they need on that branch.
+    motion_of: Gst.Element | None = None
 
 
 def element(factory: str, name: str):
@@ -184,6 +188,83 @@ def recording_branch(pipeline, tee, record_path) -> Gst.Element:
     return sink
 
 
+def motion_branch(pipeline, tee, motion, live: bool) -> Gst.Element:
+    """Optical-flow branch, deliberately independent of the inference path.
+
+    It hangs off a tee placed before the leaky queue that feeds ``nvstreammux``,
+    so the frames inference drops to stay live still arrive here. Everything
+    downstream of this point is its own: its own mux, its own batch meta, its
+    own sink. It shares nothing with the main branch except the decoded frames,
+    and it only reads those.
+
+    The queue is the part that matters. It is deep, because this branch must
+    absorb bursts rather than pass backpressure up into the tee -- a tee blocks
+    every branch when one of them blocks, so a stalled motion branch would take
+    display and inference down with it. It is also leaky as a last resort, and
+    the probe counts frames in against frames processed so a leak that does
+    happen is visible rather than silent.
+    """
+    queue = element("queue", "motion-queue")
+    mux = element("nvstreammux", "motion-mux")
+    nvof = element("nvof", "motion-nvof")
+    # RGBA after the flow stage so the probe can read pixels for the appearance
+    # descriptor. It sits downstream of nvof, not upstream, because the flow
+    # meta rides along on the buffer and the probe needs both at once.
+    convert = element("nvvideoconvert", "motion-convert")
+    caps = element("capsfilter", "motion-caps")
+    sink = element("fakesink", "motion-sink")
+
+    queue.set_property("max-size-buffers", 60)
+    queue.set_property("max-size-bytes", 0)
+    queue.set_property("max-size-time", 0)
+    queue.set_property("leaky", 2)
+
+    # Downscaling here is what makes the branch cheap enough to keep up at
+    # source rate: bulk motion is unaffected, and a smaller field is less
+    # sensitive to per-pixel sensor noise.
+    mux.set_property("batch-size", 1)
+    mux.set_property("width", motion.width)
+    mux.set_property("height", motion.height)
+    mux.set_property("batched-push-timeout", 0 if live else 40000)
+    set_property_if_present(mux, "attach-sys-ts", False)
+    set_property_if_present(mux, "live-source", live)
+    set_property_if_present(mux, "sync-inputs", False)
+
+    set_property_if_present(nvof, "preset-level", 0)  # NV_OF_PERF_LEVEL_FAST
+    set_property_if_present(nvof, "grid-size", 0)  # 4x4
+
+    # CUDA unified memory: on a dGPU the surface is otherwise device-only and
+    # pyds.get_nvds_buf_surface cannot map it for the CPU-side histogram.
+    set_property_if_present(convert, "nvbuf-memory-type", 3)
+    caps.set_property(
+        "caps",
+        Gst.Caps.from_string(
+            "video/x-raw(memory:NVMM), format=RGBA, "
+            f"width={motion.width}, height={motion.height}"
+        ),
+    )
+
+    # sync=False so the sink never paces this branch off the clock: it has to
+    # run as fast as frames arrive, not as fast as they are displayed.
+    sink.set_property("sync", False)
+    set_property_if_present(sink, "async", False)
+    set_property_if_present(sink, "enable-last-sample", False)
+
+    for elem in (queue, mux, nvof, convert, caps, sink):
+        pipeline.add(elem)
+
+    link_tee_to_queue(tee, queue)
+    queue.get_static_pad("src").link(mux.request_pad_simple("sink_0"))
+    if not mux.link(nvof) or not nvof.link(convert):
+        raise RuntimeError("Failed to link the motion branch")
+    if not convert.link(caps) or not caps.link(sink):
+        raise RuntimeError("Failed to link the motion branch output")
+
+    # The probe point: last element that still has both the flow meta and the
+    # pixels.
+    return caps
+
+
 def link_parser_to_decoder(parser, decoder) -> None:
     """Give the decoder's single static sink pad to the codec actually in use.
 
@@ -270,6 +351,7 @@ def build_pipeline(
     assess_output_size: tuple[int, int] | None = None,
     jpeg_quality: int = 85,
     record_path=None,
+    motion=None,
 ) -> PipelineParts:
     pipeline = Gst.Pipeline.new("yolo-parser")
     if assess_output_size and not assessment_config:
@@ -288,6 +370,9 @@ def build_pipeline(
     h265_parser = element("h265parse", "h265-parser")
     h264_parser = element("h264parse", "h264-parser")
     decoder = element("nvv4l2decoder", "decoder")
+    # Before `queue`, which is leaky: the motion branch has to fork off the
+    # decoder's full frame rate, upstream of anything that drops frames.
+    motion_tee = element("tee", "motion-tee") if motion else None
     queue = element("queue", "queue")
     streammux = element("nvstreammux", "streammux")
     raw_tee = element("tee", "raw-input-tee") if raw_output_size else None
@@ -348,7 +433,10 @@ def build_pipeline(
     if display_queue:
         configure_latest_queue(display_queue)
 
-    elements = source_elements + [h265_parser, h264_parser, decoder, queue, streammux]
+    elements = source_elements + [h265_parser, h264_parser, decoder]
+    if motion_tee:
+        elements.append(motion_tee)
+    elements.extend((queue, streammux))
     if raw_tee:
         elements.append(raw_tee)
     elements.append(pgie)
@@ -386,7 +474,13 @@ def build_pipeline(
         source.link(demux)
         demux.connect("pad-added", on_file_pad_added, parsers, decoder)
 
-    decoder.link(queue)
+    motion_of = None
+    if motion_tee:
+        decoder.link(motion_tee)
+        link_tee_to_queue(motion_tee, queue)
+        motion_of = motion_branch(pipeline, motion_tee, motion, bool(stream.is_rtsp))
+    else:
+        decoder.link(queue)
     queue.get_static_pad("src").link(streammux.request_pad_simple("sink_0"))
     raw_appsink = None
     if raw_tee and raw_output_size:
@@ -470,4 +564,5 @@ def build_pipeline(
         osd=osd,
         sink=sink,
         record_sink=record_sink,
+        motion_of=motion_of,
     )

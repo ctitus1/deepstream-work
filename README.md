@@ -443,6 +443,44 @@ Override with `--rtsp-latency-ms` only if a stream needs extra buffering. RTSP
 streams are paced by the stream clock; late display frames are dropped instead
 of queued.
 
+## Motion Detection
+
+`scripts/parser.sh` also runs a bulk-motion detector and draws its findings as
+grey boxes over the detection boxes. Disable it with `--no-motion`.
+
+It exists because `nvinfer` cannot keep up with the source, so the inference
+path drops frames — and motion is exactly the signal that must not be sampled.
+The detector therefore hangs off its own tee straight after the decoder, ahead
+of the leaky queue that feeds inference, with its own `nvstreammux`, its own
+`nvof` (the GPU's hardware optical-flow engine) and its own sink. It reads the
+decoded frames and writes nothing, so detection and assessment still run on
+untouched raw frames. The two branches see different frames and are reconciled
+by buffer PTS: the OSD asks for the newest motion result at or before the
+timestamp of the frame being drawn.
+
+Turning a flow field into a few boxes is mostly a matter of rejecting things:
+
+- An **affine background model**, fitted robustly with outlier rejection, takes
+  out the camera's own contribution. A single median translation cannot
+  describe a pan, a rotation or a change in altitude, and leaves a gradient
+  that reads as motion at the frame edges.
+- A **running average of the residual vectors** is what separates a target from
+  noise. A person walking pushes their cells the same way frame after frame; a
+  compression artefact points somewhere new each frame and averages to nothing.
+  Thresholding the average asks "has this been moving?" where one frame could
+  only ask "did this change?".
+- **Hysteresis** — seed high, grow low — keeps a target's full extent without
+  admitting the diffuse structures a static scene throws up around
+  high-contrast edges.
+- A **border crop**, because `nvof` has nothing to match against outside the
+  frame and its edge cells are badly wrong.
+
+Each box carries a speed, a moving-cell count, a direction, and a 38-dimension
+appearance descriptor for re-identification: a chromaticity histogram (colour
+with brightness divided out, so a target keeps its descriptor walking from sun
+into shade) plus aspect and extent. `--debug` prints the per-frame numbers
+behind every decision.
+
 ## Verifying a Run
 
 ```bash

@@ -170,6 +170,16 @@ sys.exit('pyds did not install') if spec is None else print('pyds installed:', s
 # present and locatable without dlopening CUDA; the actual import is exercised
 # by the smoke test, which runs with the GPU attached.
 
+# numpy for the motion branch: pyds.get_optical_flow_vectors() hands back an
+# ndarray, and the motion detector does per-frame arithmetic over the whole
+# optical-flow field. Nothing else in the image pulls numpy in, and the pure
+# ctypes access the assessment path uses does not scale to a flow field.
+#
+# Placed here, after the heavy layers, so adding it costs one small layer rather
+# than a full rebuild.
+RUN pip3 install --no-cache-dir --break-system-packages numpy \
+    || pip3 install --no-cache-dir numpy
+
 # GIO asks a proxy resolver which proxy to use for every network connection it
 # opens. libproxy in this base image faults while unwinding when it is asked,
 # taking the process down with SIGSEGV and no message at all. rtspsrc opens

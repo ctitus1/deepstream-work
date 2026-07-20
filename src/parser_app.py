@@ -29,6 +29,12 @@ from deepstream_yolo.assessment_runtime import AssessmentReporter, AssessmentTim
 from deepstream_yolo.controls import KeyboardControls, RateLimiter
 from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
+from deepstream_yolo.motion import (
+    MotionConfig,
+    MotionStore,
+    motion_overlay_probe,
+    motion_probe,
+)
 from deepstream_yolo.paths import DEFAULT_ASSESSMENT_MODEL, DEFAULT_MODEL, DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
 from deepstream_yolo.media import StreamSource, resolve_record_path, resolve_stream_source
@@ -49,6 +55,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream", default=str(DEFAULT_STREAM))
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--no-motion",
+        dest="enable_motion",
+        action="store_false",
+        help="Disable the optical-flow bulk-motion branch and its grey overlay boxes.",
+    )
+    parser.set_defaults(enable_motion=True)
+    parser.add_argument(
+        "--motion-max-boxes",
+        type=int,
+        default=MotionConfig.max_boxes,
+        help="Cap on grey motion boxes per frame. Default: %(default)s",
+    )
     parser.add_argument(
         "--base-fps",
         type=float,
@@ -293,6 +312,13 @@ def main():
     if record_path:
         print(f"record={record_path}", flush=True)
 
+    motion_cfg = (
+        MotionConfig(max_boxes=max(1, int(args.motion_max_boxes)))
+        if args.enable_motion
+        else None
+    )
+    motion_store = MotionStore() if motion_cfg else None
+
     # Build once, then attach app-specific probes around the shared pipeline.
     parts = build_pipeline(
         stream,
@@ -302,10 +328,28 @@ def main():
         assessment_config,
         rtsp_latency_ms=args.rtsp_latency_ms,
         record_path=record_path,
+        motion=motion_cfg,
     )
     limiter = attach_runtime_probes(parts, args, stream)
     if args.debug:
         attach_debug_probes(parts)
+
+    if motion_store is not None and parts.motion_of is not None:
+        # Read side: on the nvof source pad, inside the motion branch's own
+        # streaming thread. It never touches the inference path's buffers.
+        parts.motion_of.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER,
+            motion_probe(motion_cfg, motion_store, src_w, src_h, debug=args.debug),
+            None,
+        )
+        # Draw side: on the OSD sink pad, after every inference stage, so the
+        # grey boxes land on top of the detection boxes and no overlay can
+        # reach a frame before it has been inferred on.
+        parts.osd.get_static_pad("sink").add_probe(
+            Gst.PadProbeType.BUFFER,
+            motion_overlay_probe(motion_store),
+            None,
+        )
 
     loop = GLib.MainLoop()
     # Makes SIGTERM/SIGHUP take the same clean exit as Ctrl-C, so `docker stop`
@@ -331,6 +375,12 @@ def main():
             controls.stop()
         finish_recording(parts, tracker)
         parts.pipeline.set_state(Gst.State.NULL)
+        if motion_store is not None:
+            # frames_in is what reached the motion branch, frames_processed is
+            # what produced a flow field. A gap means the branch could not keep
+            # up with the source, which is the one thing its design forbids.
+            seen, processed = motion_store.stats()
+            print(f"motion frames_in={seen} processed={processed}", flush=True)
 
 
 if __name__ == "__main__":

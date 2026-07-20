@@ -63,6 +63,25 @@ There is deliberately **no cap on box count**. Robustness to few or many
 targets is part of what is measured, so limiting output is not a way to score
 well — precision already penalises spraying boxes.
 
+## Running several approaches at once
+
+```bash
+python3 eval/run_motion.py --approach klt_homography,gradient_diff --out eval/runs/
+```
+
+Decoding 4K H.265 is the expensive part and does not depend on which approach
+is asking, so a comma-separated list runs them all in one pass and writes one
+JSON each. `scripts/compare_motion.sh` does this automatically for whichever
+approaches are not already cached. Scores are unaffected — the approaches are
+independent and never see each other's output.
+
+**The `ms` column is not comparable across batched and solo runs.** Batched
+approaches share a process, and the pipeline provides the union of what they
+ask for — one approach wanting optical flow means `nvof` runs for all of them.
+Measured on the same video, `klt-homography` reports 8.3 ms/frame run alone and
+21.0 ms/frame in a batch of four. **Benchmark an approach on its own; batch
+only when you want the boxes.**
+
 ## Tuning sensitivity
 
 Every approach has one knob that decides how much movement is enough, and they

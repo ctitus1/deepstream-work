@@ -89,14 +89,23 @@ class Context:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--approach", required=True, help="module under deepstream_yolo.approaches")
+    parser.add_argument(
+        "--approach",
+        required=True,
+        help="module under deepstream_yolo.approaches; comma-separated runs several "
+        "in one pass over the video",
+    )
     parser.add_argument("--stream", default=str(DEFAULT_MEDIA))
     parser.add_argument("--width", type=int, default=960, help="branch resolution width")
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--grid-size", type=int, default=4, help="nvof block size")
     parser.add_argument("--cfg", default="{}", help="JSON dict passed to the approach")
     parser.add_argument("--max-frames", type=int, default=0, help="0 = whole video")
-    parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--out",
+        default="",
+        help="output path; with several approaches, a directory to write <name>.json into",
+    )
     return parser.parse_args()
 
 
@@ -196,10 +205,20 @@ def main() -> int:
         print("run_motion needs a local file", file=sys.stderr)
         return 2
 
-    module = importlib.import_module(f"deepstream_yolo.approaches.{args.approach}")
-    approach = module.Approach(json.loads(args.cfg))
-    needs_flow = getattr(module.Approach, "needs_flow", True)
-    needs_pixels = getattr(module.Approach, "needs_pixels", False)
+    # Several approaches in one pass. Decoding 4K H.265 is the expensive part of
+    # a comparison and it does not depend on which approach is asking, so running
+    # them together turns N decodes into one. They are independent -- each keeps
+    # its own state and never sees another's output -- so this changes cost, not
+    # results.
+    names = [n for n in args.approach.split(",") if n]
+    modules = [importlib.import_module(f"deepstream_yolo.approaches.{n}") for n in names]
+    cfg = json.loads(args.cfg)
+    approaches = [m.Approach(dict(cfg)) for m in modules]
+
+    # The pipeline has to satisfy every approach in the batch, so the inputs are
+    # the union: one that wants flow means nvof runs for all of them.
+    needs_flow = any(getattr(m.Approach, "needs_flow", True) for m in modules)
+    needs_pixels = any(getattr(m.Approach, "needs_pixels", False) for m in modules)
 
     Gst.init(None)
     src_w, src_h = discover_size(stream.uri)
@@ -207,8 +226,8 @@ def main() -> int:
 
     scale_x = args.grid_size * (src_w / float(args.width))
     scale_y = args.grid_size * (src_h / float(args.height))
-    frames: list[dict] = []
-    timings: list[float] = []
+    frames: list[list[dict]] = [[] for _ in approaches]
+    timings: list[list[float]] = [[] for _ in approaches]
     loop = GLib.MainLoop()
 
     def probe(_pad, info, _data):
@@ -220,7 +239,7 @@ def main() -> int:
         frame_list = batch_meta.frame_meta_list
         while frame_list:
             frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
-            index = len(frames)
+            index = len(frames[0])
 
             flow = flow_field(frame_meta) if needs_flow else None
             rgba = None
@@ -246,13 +265,20 @@ def main() -> int:
                 scale_y=scale_y,
             )
 
-            started = time.perf_counter()
-            try:
-                boxes = approach.process(ctx) or []
-            except Exception as exc:  # a broken frame must not kill the run
-                print(f"frame {index}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-                boxes = []
-            timings.append((time.perf_counter() - started) * 1000.0)
+            frame_boxes = []
+            for slot, approach in enumerate(approaches):
+                started = time.perf_counter()
+                try:
+                    boxes = approach.process(ctx) or []
+                except Exception as exc:  # a broken frame must not kill the run
+                    print(
+                        f"{names[slot]} frame {index}: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    boxes = []
+                timings[slot].append((time.perf_counter() - started) * 1000.0)
+                frame_boxes.append(boxes)
 
             if rgba is not None:
                 try:
@@ -260,10 +286,13 @@ def main() -> int:
                 except Exception:
                     pass
 
-            frames.append({"index": index, "pts": int(buf.pts), "boxes": boxes})
-            if len(frames) % 500 == 0:
-                print(f"  {len(frames)} frames", flush=True)
-            if args.max_frames and len(frames) >= args.max_frames:
+            for slot, boxes in enumerate(frame_boxes):
+                frames[slot].append(
+                    {"index": index, "pts": int(buf.pts), "boxes": boxes}
+                )
+            if len(frames[0]) % 500 == 0:
+                print(f"  {len(frames[0])} frames", flush=True)
+            if args.max_frames and len(frames[0]) >= args.max_frames:
                 loop.quit()
                 return Gst.PadProbeReturn.OK
 
@@ -282,32 +311,41 @@ def main() -> int:
     finally:
         pipeline.set_state(Gst.State.NULL)
 
-    out = Path(args.out) if args.out else PROJECT_DIR / "eval" / "runs" / f"{args.approach}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    timings.sort()
-    out.write_text(
-        json.dumps(
-            {
-                "approach": getattr(module, "NAME", args.approach),
-                "module": args.approach,
-                "cfg": json.loads(args.cfg),
-                "source": str(stream.path.relative_to(PROJECT_DIR)),
-                "width": src_w,
-                "height": src_h,
-                "branch_width": args.width,
-                "branch_height": args.height,
-                "ms_per_frame_median": timings[len(timings) // 2] if timings else 0.0,
-                "ms_per_frame_p95": timings[int(len(timings) * 0.95)] if timings else 0.0,
-                "frames": frames,
-            }
+    default_dir = PROJECT_DIR / "eval" / "runs"
+    for slot, name in enumerate(names):
+        if not args.out:
+            out = default_dir / f"{name}.json"
+        elif len(names) > 1 or args.out.endswith("/"):
+            out = Path(args.out) / f"{name}.json"
+        else:
+            out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        ms = sorted(timings[slot])
+        out.write_text(
+            json.dumps(
+                {
+                    "approach": getattr(modules[slot], "NAME", name),
+                    "module": name,
+                    "cfg": cfg,
+                    "source": str(stream.path.relative_to(PROJECT_DIR)),
+                    "width": src_w,
+                    "height": src_h,
+                    "branch_width": args.width,
+                    "branch_height": args.height,
+                    "ms_per_frame_median": ms[len(ms) // 2] if ms else 0.0,
+                    "ms_per_frame_p95": ms[int(len(ms) * 0.95)] if ms else 0.0,
+                    "frames": frames[slot],
+                }
+            )
         )
-    )
-    counts = [len(f["boxes"]) for f in frames]
-    print(
-        f"wrote {out} frames={len(frames)} "
-        f"boxes/frame mean={sum(counts)/max(len(counts),1):.2f} max={max(counts, default=0)} "
-        f"ms/frame median={timings[len(timings)//2] if timings else 0:.1f}"
-    )
+        counts = [len(f["boxes"]) for f in frames[slot]]
+        print(
+            f"wrote {out} frames={len(frames[slot])} "
+            f"boxes/frame mean={sum(counts)/max(len(counts),1):.2f} "
+            f"max={max(counts, default=0)} "
+            f"ms/frame median={ms[len(ms)//2] if ms else 0:.1f}"
+        )
     return 0
 
 

@@ -5,26 +5,37 @@ Draws each approach's boxes over the source video and tiles the four side by
 side. Reads the runs that are already on disk rather than re-running anything,
 so this costs one decode.
 
-Writes raw BGR frames to stdout for ffmpeg to encode -- keeping the pixels
-lossless until the single encode at the end, which is what stops the boxes and
-labels turning to mush. Everything else goes to stderr so stdout stays clean.
+Writes an MJPEG stream to stdout for ffmpeg to encode. Not raw frames: docker's
+stdout proxy moves about 55 MB/s, and raw 1920x1080 is 6.2 MB a frame, so five
+seconds of output is 933 MB and measured 17 seconds of pure piping against 1.6
+to decode, resize and tile the same frames. The pipe was costing more than all
+the work. JPEG at quality 97 is visually indistinguishable here and roughly
+thirty times smaller, and the host still does one proper x264 encode at the end.
+
+Encoding in-container would avoid the pipe entirely, but this image has no
+usable encoder: DeepStream deletes the ffmpeg shared libraries (nothing on the
+filesystem provides libavcodec.so.58), OpenCV is built without GStreamer, and
+its bundled ffmpeg has no x264 -- cv2.VideoWriter falls through to a V4L2
+device that does not exist.
+
+Everything except the JPEG bytes goes to stderr so stdout stays clean.
 
     docker run --rm -i --user "$(id -u):$(id -g)" --entrypoint python3 \
       -v "$PWD":/w -w /w deepstream-work:7.1 \
-      eval/make_comparison_video.py --start 2160 --frames 150 2>/dev/null \
-      | ffmpeg -f rawvideo -pix_fmt bgr24 -s 1920x1080 -r 30 -i - \
-               -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p out.mp4
+      eval/make_comparison_video.py --video V --runs A.json,B.json 2>/dev/null \
+      | ffmpeg -f image2pipe -vcodec mjpeg -r 30 -i - \
+               -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p out.mp4
 
 Two details of that command are load-bearing, and getting either wrong
 corrupts the output in a way that looks like a rendering bug rather than a
 plumbing one:
 
 * ``--entrypoint python3`` bypasses the image's entrypoint, which prints a
-  747-byte CUDA banner **to stdout**. Those bytes land at the head of the raw
-  stream and shift every frame by 249 pixels, so each tile wraps its right
-  edge onto its left. 747 is not divisible by 3, so the channel order rotates
-  too and the video comes out with its reds and blues swapped. One stray
-  banner, two symptoms that look unrelated.
+  747-byte CUDA banner **to stdout**. When this wrote raw frames those bytes
+  shifted every frame by 249 pixels and rotated the colour channels, giving a
+  wrapped, red-and-blue-swapped video. MJPEG is self-framing so the damage is
+  now a corrupt first frame rather than a corrupt everything, but the banner
+  still has no business in the stream.
 * ``docker run``, not ``docker compose run``: compose writes its own status
   lines to stdout and does the same thing.
 
@@ -37,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -61,6 +73,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", type=int, default=0, help="first frame index")
     parser.add_argument("--frames", type=int, default=0, help="0 = to end of video")
+    parser.add_argument("--quality", type=int, default=97, help="JPEG quality on the pipe")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="threads used for JPEG encoding; cv2 releases the GIL so these do run",
+    )
     parser.add_argument("--tile-width", type=int, default=TILE_W)
     parser.add_argument("--tile-height", type=int, default=TILE_H)
     parser.add_argument(
@@ -150,6 +169,23 @@ def main() -> int:
     blank = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
 
     out = sys.stdout.buffer
+    params = [cv2.IMWRITE_JPEG_QUALITY, int(args.quality)]
+
+    def encode(grid):
+        ok, buf = cv2.imencode(".jpg", grid, params)
+        return buf.tobytes() if ok else b""
+
+    # JPEG encoding is the remaining per-frame cost, and cv2.imencode releases
+    # the GIL, so a small pool genuinely overlaps it with decode and tiling.
+    # Results are written in submission order -- a video is an ordered thing and
+    # completion order is not.
+    pool = ThreadPoolExecutor(max_workers=max(1, args.workers))
+    pending: list = []
+
+    def drain(limit: int) -> None:
+        while len(pending) > limit:
+            out.write(pending.pop(0).result())
+
     for offset in range(count):
         ok, frame = capture.read()
         if not ok:
@@ -168,10 +204,14 @@ def main() -> int:
         grid = np.vstack(
             [np.hstack(tiles[r * cols : (r + 1) * cols]) for r in range(rows)]
         )
-        out.write(grid.tobytes())
+        pending.append(pool.submit(encode, grid))
+        # Bounded so the queue cannot grow into a copy of the whole video.
+        drain(args.workers * 2)
         if offset % 120 == 0:
             print(f"  frame {index}", file=sys.stderr, flush=True)
 
+    drain(0)
+    pool.shutdown()
     capture.release()
     return 0
 

@@ -99,19 +99,28 @@ render_run() {
         "deepstream-work:${DS_VERSION:-7.1}" "$@"
 }
 
-# --- one run per approach ---------------------------------------------------
+# --- the approaches, in a single pass ---------------------------------------
+# Decoding 4K H.265 dominates, and it does not depend on which approach is
+# asking, so every approach that still needs running goes through one pass
+# instead of one each. Four approaches used to mean four decodes.
 RUNS=()
+MISSING=()
 for approach in ${APPROACHES//,/ }; do
     run_json="${RUN_DIR}/${approach}.json"
+    RUNS+=("$run_json")
     if [ "$FORCE" -eq 1 ] || [ ! -f "$run_json" ]; then
-        step "Running ${approach}"
-        gpu_run python3 eval/run_motion.py \
-            --approach "$approach" --stream "$VIDEO" --out "$run_json"
+        MISSING+=("$approach")
     else
         skip "${approach} ($run_json)"
     fi
-    RUNS+=("$run_json")
 done
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+    batch="$(IFS=,; echo "${MISSING[*]}")"
+    step "Running ${#MISSING[@]} approach(es) in one pass: ${batch}"
+    gpu_run python3 eval/run_motion.py \
+        --approach "$batch" --stream "$VIDEO" --out "${RUN_DIR}/"
+fi
 
 # --- render -----------------------------------------------------------------
 # Panels are labelled with each run's own approach name; the renderer reads it
@@ -123,12 +132,15 @@ FPS="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
     -of csv=p=0 "$VIDEO" | head -1)"
 
 step "Rendering ${GEOMETRY} at ${FPS} fps -> ${OUT}"
+# The renderer emits MJPEG rather than raw frames: docker's stdout proxy is the
+# slowest thing in this whole script at ~55 MB/s, and raw 1080p is 6.2 MB a
+# frame. See eval/make_comparison_video.py.
 render_run eval/make_comparison_video.py \
     --video "$VIDEO" --runs "$RUNS_CSV" \
     --start "$START" --frames "$FRAMES" \
     | ffmpeg -y -loglevel error \
-        -f rawvideo -pix_fmt bgr24 -s "$GEOMETRY" -r "$FPS" -i - \
-        -c:v libx264 -preset slow -crf "$CRF" -pix_fmt yuv420p \
+        -f image2pipe -vcodec mjpeg -r "$FPS" -i - \
+        -c:v libx264 -preset veryfast -crf "$CRF" -pix_fmt yuv420p \
         -movflags +faststart "$OUT"
 
 log ""

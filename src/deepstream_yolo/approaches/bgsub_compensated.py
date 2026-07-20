@@ -97,7 +97,7 @@ class Approach:
     # ---------------------------------------------------------------- input
 
     def _gray(self, rgba: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
+        gray = rgba if rgba.ndim == 2 else cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
         if self.scale != 1.0:
             gray = cv2.resize(gray, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA)
         if self.blur >= 3:

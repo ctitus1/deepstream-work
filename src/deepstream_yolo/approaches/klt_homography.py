@@ -136,9 +136,11 @@ class Approach:
         # what counts as a moving point
         "residual_floor": 6.0,
         "residual_scale": 8.0,
-        # clustering
+        # clustering, and the evidence a cluster must carry
         "cluster_radius": 26.0,
         "min_cluster_points": 3,
+        "min_cluster_energy": 0.0,
+        "min_coherence": 0.0,
         # temporal persistence
         "match_radius": 70.0,
         "min_hits": 3,
@@ -257,7 +259,11 @@ class Approach:
     # -- camera model ----------------------------------------------------
 
     def _moving_points(self):
-        """Tracks whose displacement over the window the camera cannot explain."""
+        """Tracks whose displacement over the window the camera cannot explain.
+
+        Returns their current positions and their residual *vectors*: the
+        direction of the unexplained motion is evidence in its own right.
+        """
         if len(self.trail) <= self.lag:
             return None, None
         mature = self.age >= self.lag
@@ -284,7 +290,7 @@ class Approach:
         if inlier_mask is not None:
             # RANSAC has already ruled that these belong to the background.
             moving &= ~inlier_mask
-        return now[moving], residual[moving]
+        return now[moving], (now - predicted)[moving]
 
     # -- contract --------------------------------------------------------
 
@@ -308,13 +314,28 @@ class Approach:
         del self.trail[self.lag + 1 :]
         self.prev_gray = gray
 
-        points, residual = self._moving_points()
+        points, vectors = self._moving_points()
 
         clusters = []
         if points is not None and len(points):
+            magnitude = np.linalg.norm(vectors, axis=1)
             for members in _grid_clusters(points, float(self.cluster_radius)):
                 if len(members) < self.min_cluster_points:
                     continue
+                strength = magnitude[members]
+                # Energy rather than a count: two corners displaced a long way
+                # are as much evidence as five displaced a little, and a person
+                # far from the camera only ever offers the former.
+                if float(strength.sum()) < float(self.min_cluster_energy):
+                    continue
+                # Points on one body share a direction of travel even though
+                # limbs differ in speed. Foliage and parallax do not: their
+                # residuals point every way at once and cancel.
+                if self.min_coherence > 0.0:
+                    group_vectors = vectors[members]
+                    total = float(np.linalg.norm(group_vectors.sum(axis=0)))
+                    if total < float(self.min_coherence) * float(strength.sum()):
+                        continue
                 group = points[members]
                 left, top = group.min(axis=0)
                 right, bottom = group.max(axis=0)
@@ -324,7 +345,7 @@ class Approach:
                         "cy": float(group[:, 1].mean()),
                         "box": (float(left), float(top), float(right), float(bottom)),
                         "points": int(len(members)),
-                        "residual": float(np.mean(residual[members])),
+                        "residual": float(strength.mean()),
                     }
                 )
 

@@ -186,6 +186,21 @@ class Approach:
             )
         self.anchor = np.eye(3, dtype=np.float64)
 
+    @staticmethod
+    def _drift(anchor, shape) -> float:
+        """How far the view has travelled from its keyframe, in pixels.
+
+        The translation column alone is not that distance -- a pan that rotates
+        or scales moves the image without moving the origin much -- so measure
+        the worst corner displacement instead.
+        """
+        if anchor is None:
+            return 0.0
+        rows, cols = shape
+        corners = np.float32([[0, 0], [cols, 0], [cols, rows], [0, rows]]).reshape(-1, 1, 2)
+        moved = cv2.perspectiveTransform(corners, anchor).reshape(-1, 2)
+        return float(np.max(np.linalg.norm(moved - corners.reshape(-1, 2), axis=1)))
+
     def _mixture(self, gray: np.ndarray, matrix) -> np.ndarray | None:
         """MOG2/KNN on frames warped into a keyframe's coordinates.
 
@@ -206,8 +221,7 @@ class Approach:
         elif matrix is None:
             pass
 
-        drift = float(np.hypot(self.anchor[0, 2], self.anchor[1, 2])) if self.anchor is not None else 0.0
-        if drift > self.reanchor_px:
+        if self._drift(self.anchor, gray.shape) > self.reanchor_px:
             self._reanchor(gray)
 
         warped = cv2.warpPerspective(gray, self.anchor, (width, height), flags=cv2.INTER_LINEAR)

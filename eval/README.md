@@ -63,6 +63,17 @@ There is deliberately **no cap on box count**. Robustness to few or many
 targets is part of what is measured, so limiting output is not a way to score
 well — precision already penalises spraying boxes.
 
+## Tuning sensitivity
+
+Every approach has one knob that decides how much movement is enough, and they
+all run the same direction: smaller admits smaller movement. They are not in the
+same units, and two of them threshold intensity change rather than movement.
+See [TUNING.md](TUNING.md).
+
+```bash
+python3 eval/run_motion.py --approach klt_homography --cfg '{"residual_floor": 6.0}'
+```
+
 ## Adding an approach
 
 Drop a module in `src/deepstream_yolo/approaches/`:

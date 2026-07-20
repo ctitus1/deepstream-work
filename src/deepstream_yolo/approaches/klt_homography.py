@@ -151,7 +151,7 @@ class Approach:
         "max_level": 3,
         "fb_threshold": 1.0,
         # temporal baseline the camera model is fitted over, in SECONDS
-        "lag_s": 0.2,
+        "lag_s": 0.2667,
         # Explicit frame count, overriding lag_s when non-zero. 0 means "use
         # the seconds value". Kept so a sweep can pin frames directly, and
         # because a bare `lag` in a config should not be silently ignored.

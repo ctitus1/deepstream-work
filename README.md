@@ -89,6 +89,9 @@ scripts/
   rtsp_server.py    serves a local video over RTSP, looping
   ros_service.sh    the ROS container's entrypoints: bridge | foxglove | bag
   smoke_pipeline.py headless bounded run; setup's verify stage
+  test_klt.sh       run the motion detector on a video, get a video back
+  compare_klt.sh    the same, or a parameter sweep tiled into a grid
+  compare_motion.sh all four approaches side by side
   lib/common.sh     shared shell helpers, sourced by the three entrypoints
   setup/            one script per setup stage, plus prepare_models.py
 src/
@@ -96,6 +99,8 @@ src/
   ros_source.py     DeepStream frame source for ROS publishing
   ros_bridge.py     ROS Humble publisher bridge
   deepstream_yolo/  the package all three share
+    approaches/     interchangeable motion detectors, one module each
+eval/               the harness that scores them; see eval/README.md
 docker/             Dockerfiles for the DeepStream and ROS Humble images
 configs/generated/  nvinfer configs written by the models stage
 models/ lib/        exported models and the compiled bbox parser
@@ -445,8 +450,95 @@ of queued.
 
 ## Motion Detection
 
-`scripts/parser.sh` also runs a bulk-motion detector and draws its findings as
-grey boxes over the detection boxes. Disable it with `--no-motion`.
+`klt_homography` is the motion detector: sparse feature tracks, a RANSAC
+homography for the camera's own motion, and the outliers clustered into
+targets. To see what it makes of a video:
+
+```bash
+scripts/test_klt.sh streams/other.mp4
+scripts/test_klt.sh streams/*-nano*.mp4        # several at once
+```
+
+Writes `outputs/<video>_klt.mp4` per input — the source with grey boxes over
+whatever moved. Motion only: no detector and no assessment run.
+
+### The one setting worth getting right
+
+```bash
+scripts/test_klt.sh streams/thermal.mp4 --target-height 100
+```
+
+`target_height` is **how tall a target is expected to be, in source image
+pixels**. Every pixel threshold in the approach is scaled against it, so it is
+what makes one configuration work on a 640x512 thermal camera and a 4K aerial
+frame alike. Set it for the camera and the range, not for the resolution — the
+same camera at twice the distance halves the target without changing a pixel of
+resolution.
+
+The default, 440, is measured: the walking casualty in
+`streams/lorton-d4-rgb.mp4` is a median 440 px tall in a 3840x2160 frame. Left
+wrong it costs real recall — on that clip re-encoded to 1080p, saying 440 when
+the answer is 220 drops recall from 0.94 to 0.70.
+
+Resolution and frame rate are handled without being told: the analysis
+resolution follows the source aspect ratio, and every duration is in seconds
+and converted against the source frame rate. A 60 fps clip is not quietly given
+half the time window a 30 fps one gets.
+
+### Sweeping a parameter
+
+```bash
+scripts/compare_klt.sh streams/other.mp4                       # one panel, defaults
+scripts/compare_klt.sh streams/other.mp4 --param-b residual_floor --values-b 24,12,6,3
+```
+
+With no `--param-*`, this is the same single-panel default test. Given some, it
+runs every combination in one pass over the video and tiles them into a grid,
+labelled with the values that produced each panel. Order the values so both
+axes run toward more sensitivity — the defaults sweep `lag_s` down the grid and
+`residual_floor` across it, so the bottom-right panel is the most permissive.
+
+Two dials control how small a movement registers, and they work differently:
+
+- **`residual_floor`** — pixels of unexplained displacement a point needs
+  before it counts. Lower it to accept less movement.
+- **`lag_s`** — seconds the camera model is fitted over. Raising it does not
+  lower the bar, it raises the signal: real displacement accumulates over the
+  window while tracking jitter does not. Usually the better lever for slow
+  targets, at the cost of latency.
+
+`eval/TUNING.md` covers every lever, including which ones measured no effect
+at all.
+
+### Comparing approaches
+
+```bash
+scripts/compare_motion.sh streams/other.mp4
+```
+
+Runs all four approaches and tiles them, one panel each, same frame and same
+moment. `--approaches` picks which appear, `--start`/`--frames` cut a segment,
+`--crf` trades size against quality.
+
+Runs are cached under `eval/runs/<video>/`, keyed by the video's name, so an
+interrupted comparison resumes and two videos never mix; `--force` redoes
+everything.
+
+For which approach is actually *better* — scored against the detector's own
+boxes rather than eyeballed — see [eval/README.md](eval/README.md) and
+[eval/RESULTS.md](eval/RESULTS.md).
+
+### In the live parser app
+
+`scripts/parser.sh` runs a motion detector of its own, live, and draws its
+findings as grey boxes over the detection boxes. Disable it with `--no-motion`.
+
+**This is the `baseline` approach**, and the offline comparison found it the
+weakest of the four — F1 0.422 against klt-homography's 0.937. It is what runs
+in the live app because it was built first and is wired into the pipeline;
+the approaches under `src/deepstream_yolo/approaches/` are evaluated offline and
+have not been moved into `parser.sh`. If you are choosing a detector, choose
+from [eval/RESULTS.md](eval/RESULTS.md), not from what happens to be live.
 
 It exists because `nvinfer` cannot keep up with the source, so the inference
 path drops frames — and motion is exactly the signal that must not be sampled.
@@ -480,36 +572,6 @@ appearance descriptor for re-identification: a chromaticity histogram (colour
 with brightness divided out, so a target keeps its descriptor walking from sun
 into shade) plus aspect and extent. `--debug` prints the per-frame numbers
 behind every decision.
-
-## Comparing Motion Approaches
-
-Several motion detectors live side by side under
-`src/deepstream_yolo/approaches/`. To see what they each make of a video:
-
-```bash
-scripts/compare_motion.sh streams/other.mp4
-```
-
-Runs every approach over the file and writes a labelled grid to
-`outputs/<video>_comparison.mp4` — one panel per approach, same frame, same
-moment, so the differences are watchable rather than tabulated. Motion only: no
-detector and no assessment run, because this answers "what does each approach
-see", not "which one is right".
-
-```bash
-scripts/compare_motion.sh streams/other.mp4 --start 2160 --frames 150
-scripts/compare_motion.sh --approaches klt_homography,baseline
-```
-
-`--start`/`--frames` cut a segment out of a long video, `--approaches` picks
-which panels appear (two to four), and `--crf` trades file size against
-quality. Each approach's run is cached under `eval/runs/<video>/`, keyed by the
-video's name, so an interrupted comparison resumes and two videos never mix;
-`--force` redoes everything.
-
-For which approach is actually *better* — scored against the detector's own
-boxes rather than eyeballed — see [eval/README.md](eval/README.md) and
-[eval/RESULTS.md](eval/RESULTS.md).
 
 ## Verifying a Run
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="${1:-}"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 source "$ROOT_DIR/scripts/lib/common.sh"
 
@@ -11,9 +11,9 @@ source "$ROOT_DIR/scripts/lib/common.sh"
 # into a stride-safe WIDTH x HEIGHT for YOLO/DeepStream.
 #
 # Examples:
-#   ./scripts/setup_and_export_yolo.sh yolo11n.pt 640
-#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640
-#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 1920
+#   ./scripts/setup/yolo_export.sh yolo11n.pt 640
+#   ./scripts/setup/yolo_export.sh yolo12x.pt 640
+#   ./scripts/setup/yolo_export.sh yolo12x.pt 1920
 #
 # The long edge is rounded UP to the stride, so the result does not preserve
 # the source aspect exactly; nvstreammux letterboxes to make up the difference.
@@ -25,7 +25,7 @@ MODEL_SIZE="${2:-1920}"
 # Stream used to derive aspect ratio. Defaults to whatever media this checkout
 # has, since streams/ is gitignored and its contents differ per machine.
 # Override as third arg if needed:
-#   ./scripts/setup_and_export_yolo.sh yolo12x.pt 640 streams/other.mp4
+#   ./scripts/setup/yolo_export.sh yolo12x.pt 640 streams/other.mp4
 STREAM="${3:-$(PYTHONPATH="$ROOT_DIR/src" python3 -c \
     'from deepstream_yolo.paths import DEFAULT_MEDIA; print(DEFAULT_MEDIA)')}"
 
@@ -91,7 +91,7 @@ install_labels() {
 # Delegates to the stamped setup script, so a warm environment costs nothing.
 # This runs on every model export via model_cache.ensure_model().
 ensure_export_venv() {
-    scripts/setup_yolo_export_env.sh
+    scripts/setup/yolo_env.sh
 
     PYTHON_BIN="$VENV_DIR/bin/python3"
     YOLO_BIN="$VENV_DIR/bin/yolo"
@@ -264,8 +264,10 @@ PY
 rm -f "models/${MODEL_STEM}.onnx"*.engine
 
 ENGINE="${ONNX}_b1_gpu0_fp16.engine"
-# Untagged on purpose: training/export_to_deepstream.py reads and patches
-# exactly this filename, and validation/timestamps globs the family.
+# Untagged, and not what the pipeline loads: model_cache writes its own
+# resolution-tagged config (config_infer_primary_<stem>_<long>_<w>x<h>.txt) and
+# points nvinfer at that. This one is the artifact of running this script by
+# hand -- a ready-to-use nvinfer config for deepstream-app or a manual pipeline.
 INFER_CONFIG="${GENERATED_CONFIG_DIR}/config_infer_primary_${MODEL_STEM}.txt"
 ONNX_ABS="$(absolute_path "$ONNX")"
 ENGINE_ABS="$(absolute_path "$ENGINE")"

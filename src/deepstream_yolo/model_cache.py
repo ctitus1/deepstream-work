@@ -21,7 +21,7 @@ from .paths import (
     SETUP_SCRIPT,
     YOLO_PYTHON,
 )
-from .stream_source import StreamSource
+from .media import StreamSource
 
 
 CACHE_POLICY = "parser_line_osd_conf_v2"

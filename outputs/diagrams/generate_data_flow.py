@@ -535,7 +535,7 @@ def render_png(diagram: Diagram, output_path: Path) -> None:
 
 def ros_publisher_diagram() -> Diagram:
     groups = (
-        group_around("stream_group", "Video starter: scripts/start_rtsp_stream.sh", X_VIDEO, ROW_MIDDLE, BOX_W, BOX_H),
+        group_around("stream_group", "Video starter: scripts/rtsp_server.py", X_VIDEO, ROW_MIDDLE, BOX_W, BOX_H),
         group_around(
             "source_group",
             "DeepStream sender: src/ros_source.py + pipeline.py",
@@ -636,7 +636,7 @@ def parser_app_diagram() -> Diagram:
     x_status = X_BRANCH
 
     groups = (
-        group_around("stream_group", "Video starter: scripts/start_rtsp_stream.sh", X_VIDEO, row_runtime, BOX_W, BOX_H),
+        group_around("stream_group", "Video starter: scripts/rtsp_server.py", X_VIDEO, row_runtime, BOX_W, BOX_H),
         group_around(
             "parser_group",
             "Parser app: src/parser_app.py",

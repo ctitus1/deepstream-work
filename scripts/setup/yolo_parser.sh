@@ -5,7 +5,7 @@
 # upstream ref, since nothing here changes between runs of the pipeline.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 source scripts/lib/common.sh
 
 ROOT_DIR="$(pwd)"

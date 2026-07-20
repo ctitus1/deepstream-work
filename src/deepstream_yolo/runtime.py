@@ -1,7 +1,88 @@
+"""Process-level plumbing around the GLib main loop.
+
+Both halves exist because a GLib app does not behave like a normal Python
+process, and both are about the same thing: making sure the output and the exit
+path are trustworthy.
+
+  * **Signals** -- ``GLib.MainLoop.run()`` blocks inside C, so a plain Python
+    ``signal`` handler does not run until the loop returns, which for a signal
+    meant to *stop* the loop is never. PyGObject special-cases SIGINT, so Ctrl-C
+    works, but nothing handles SIGTERM or SIGHUP: ``docker stop``, ``kill``, and
+    closing the terminal all kill the process outright. That matters beyond
+    tidiness -- the recording branch writes its mp4 moov atom only during normal
+    teardown, so a process killed mid-run leaves an unplayable file.
+    ``GLib.unix_signal_add`` runs the handler from inside the loop, giving every
+    stop signal the same clean exit Ctrl-C gets.
+  * **Stderr** -- GStreamer prints known-benign startup noise that looks exactly
+    like a real failure, in the same screenful where real failures appear.
+    ``StderrLineFilter`` drops only specific known lines and lets everything
+    else through.
+"""
+
+from __future__ import annotations
+
 import atexit
 import os
+import signal
 import sys
 import threading
+
+# GLib is imported inside install_shutdown_handlers rather than here on purpose.
+# The entrypoints import the stderr filter below *before* `import gi`, so that
+# the filter is already in place when GStreamer scans its plugins and prints the
+# noise it exists to suppress. Importing GLib at module scope would drag
+# PyGObject into that early window for the benefit of the other half of this
+# file, which no caller needs until it already has a main loop.
+
+
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+
+# SIGHUP covers the closed-terminal case; the rest are the usual stop signals.
+# GLib.unix_signal_add supports only this set plus SIGUSR1/2 and SIGWINCH.
+_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+_SIGNAL_NAMES = {
+    signal.SIGINT: "SIGINT",
+    signal.SIGTERM: "SIGTERM",
+    signal.SIGHUP: "SIGHUP",
+}
+
+
+def install_shutdown_handlers(loop) -> None:
+    """Quit ``loop`` on any stop signal; a second signal exits immediately.
+
+    The escalation path matters when teardown itself is what is stuck: the
+    first signal starts a clean shutdown, and a user who is not willing to wait
+    for it can press Ctrl-C again instead of reaching for ``kill -9``, which
+    would skip the flush entirely.
+    """
+    from gi.repository import GLib
+
+    state = {"stopping": False}
+
+    def handle(signum: int) -> bool:
+        name = _SIGNAL_NAMES.get(signum, str(signum))
+
+        if state["stopping"]:
+            print(f"\n{name} again: exiting now.", file=sys.stderr, flush=True)
+            # os._exit skips the teardown we already know is not finishing.
+            os._exit(130)
+
+        state["stopping"] = True
+        print(f"\n{name}: shutting down cleanly...", file=sys.stderr, flush=True)
+        loop.quit()
+        # Stay installed so the second press can escalate.
+        return GLib.SOURCE_CONTINUE
+
+    for signum in _SHUTDOWN_SIGNALS:
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signum, handle, signum)
+
+
+# ---------------------------------------------------------------------------
+# Stderr filtering
+# ---------------------------------------------------------------------------
 
 
 class StderrLineFilter:

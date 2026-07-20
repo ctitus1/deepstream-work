@@ -1,9 +1,16 @@
-"""Annotated-video recording helpers.
+"""What the pipeline reads and what it writes.
 
-``pipeline.build_pipeline()`` uses these to name mp4 outputs and to pick the
-best available H.264 encoder. The recording branch itself is built in
-``pipeline.py``; this module keeps naming and encoder policy out of the graph
-builder.
+Two halves of one concern, kept together because every caller that resolves an
+input also decides where output goes:
+
+  * **Input** -- ``resolve_stream_source`` turns whatever came off the command
+    line (an RTSP URL, a ``file://`` URI, a relative path) into a
+    ``StreamSource`` the graph builder can use without re-parsing it.
+  * **Output** -- ``resolve_record_path`` names the annotated mp4, and
+    ``select_encoder`` picks the encoder that writes it.
+
+``pipeline.build_pipeline()`` builds the recording branch itself; the naming and
+encoder policy live here so they stay out of the graph builder.
 """
 
 from __future__ import annotations
@@ -11,17 +18,72 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import gi
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
-from .paths import PROJECT_DIR, resolve_project_path
+from .paths import PROJECT_DIR, missing_media_message, resolve_project_path
 
 OUTPUTS_DIR = PROJECT_DIR / "outputs"
 MAX_TAG_LEN = 24
+
+
+# ---------------------------------------------------------------------------
+# Input
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StreamSource:
+    raw: str
+    uri: str
+    path: Path | None
+
+    @property
+    def is_rtsp(self) -> bool:
+        return urlparse(self.uri).scheme.lower() in {"rtsp", "rtsps"}
+
+    @property
+    def display(self) -> str:
+        if self.path is None:
+            return self.uri
+        try:
+            return str(self.path.relative_to(PROJECT_DIR))
+        except ValueError:
+            return str(self.path)
+
+
+def local_source(raw: str, path: Path) -> StreamSource:
+    """Build a file-backed source, failing early if the media is not here."""
+    if not path.is_file():
+        raise FileNotFoundError(missing_media_message(path))
+
+    return StreamSource(raw=raw, uri=path.resolve().as_uri(), path=path)
+
+
+def resolve_stream_source(stream: str | Path) -> StreamSource:
+    raw = str(stream)
+    parsed = urlparse(raw)
+
+    if parsed.scheme == "file":
+        return local_source(raw, Path(unquote(parsed.path)))
+
+    if parsed.scheme:
+        return StreamSource(raw=raw, uri=raw, path=None)
+
+    path = Path(raw)
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+
+    return local_source(raw, path)
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)

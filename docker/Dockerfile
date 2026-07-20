@@ -23,7 +23,7 @@ ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV CUDA_CACHE_DISABLE=0
 ENV QT_X11_NO_MITSHM=1
-# Consumed by scripts/build_yolo_parser.sh to pick the matching CUDA toolkit.
+# Consumed by scripts/setup/yolo_parser.sh to pick the matching CUDA toolkit.
 ENV DS_VERSION=${DS_VERSION}
 
 ARG USERNAME=user

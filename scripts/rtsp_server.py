@@ -12,7 +12,7 @@ import gi
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
-from deepstream_yolo.gst_warnings import (  # noqa: E402
+from deepstream_yolo.runtime import (  # noqa: E402
     maybe_start_gst_scan_warning_filter,
     stop_gst_scan_warning_filter,
 )

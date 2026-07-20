@@ -4,7 +4,7 @@ set -euo pipefail
 MODEL="${1:-models/injury.pt}"
 BATCH_SIZE="${2:-8}"
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 source scripts/lib/common.sh
 
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -28,8 +28,8 @@ if [ -z "$PYTHON_BIN" ]; then
     if has_export_deps python3; then
         PYTHON_BIN="python3"
     else
-        scripts/setup_yolo_export_env.sh
-        # Must be the same version-keyed venv setup_yolo_export_env.sh just
+        scripts/setup/yolo_env.sh
+        # Must be the same version-keyed venv yolo_env.sh just
         # built. Hardcoding .venv-yolo pointed the DS container (3.10) at the
         # host's 3.12 venv, so the dependency check below always failed.
         PYTHON_BIN="$(yolo_venv_dir)/bin/python3"
@@ -40,7 +40,7 @@ if ! has_export_deps "$PYTHON_BIN"
 then
     echo "Missing injury export dependencies in: $PYTHON_BIN"
     echo "Need Python packages: torch, clip, onnx"
-    echo "Use scripts/setup_yolo_export_env.sh, or set PYTHON_BIN."
+    echo "Use scripts/setup/yolo_env.sh, or set PYTHON_BIN."
     exit 1
 fi
 

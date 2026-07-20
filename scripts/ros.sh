@@ -141,8 +141,8 @@ log "  ROS msgs:  $CDCL_ROS_WS"
 log ""
 
 start_service "deepstream-rtsp-${DSW_RUN_ID}" "RTSP server" \
-    -e RTSP_PORT="$RTSP_PORT" -e RTSP_MOUNT="$MOUNT" \
-    deepstream-dev scripts/start_rtsp_stream.sh "$VIDEO"
+    deepstream-dev \
+    python3 scripts/rtsp_server.py "$VIDEO" --port "$RTSP_PORT" --mount "$MOUNT"
 wait_for_port "RTSP server" "$RTSP_PORT" 60
 
 start_service "ros-humble-publisher-${DSW_RUN_ID}" "ROS publisher" \
@@ -158,13 +158,13 @@ wait_for_port "Foxglove Bridge" "$FOXGLOVE_PORT" 60
 if [ "$BAG" -eq 1 ]; then
     mkdir -p "$(dirname "$BAG_OUTPUT")"
     start_service "rosbag-${DSW_RUN_ID}" "bag recorder" \
-        ros-humble-publisher scripts/record_bag.sh "$BAG_OUTPUT"
+        ros-humble-publisher scripts/ros_service.sh bag "$BAG_OUTPUT"
     # ros2 bag needs to have discovered the topics before frames start flowing.
     sleep 2
 fi
 
 start_service "deepstream-ros-source-${DSW_RUN_ID}" "DeepStream source" \
-    deepstream-ros-source scripts/run_source.sh \
+    deepstream-ros-source python3 src/ros_source.py \
     --stream "$RTSP_URL" ${SOURCE_ARGS[@]+"${SOURCE_ARGS[@]}"}
 
 log ""

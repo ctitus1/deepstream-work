@@ -66,7 +66,7 @@ done
 
 # A display app needs an X server; say so now rather than failing inside GStreamer.
 [ -n "${DISPLAY:-}" ] || die "DISPLAY is not set. The parser app opens a window;
-for a headless check use: python3 validation/smoke_pipeline.py --frames 60"
+for a headless check use: python3 scripts/smoke_pipeline.py --frames 60"
 
 install_lifecycle_traps
 sweep_stale_containers
@@ -88,8 +88,7 @@ streams/ holds: $(ls streams/ 2>/dev/null | tr '\n' ' ')"
 
     step "Serving $VIDEO on $STREAM"
     if in_deepstream_container; then
-        RTSP_PORT="$RTSP_PORT" RTSP_MOUNT="$MOUNT" \
-            scripts/start_rtsp_stream.sh "$VIDEO" &
+        python3 scripts/rtsp_server.py "$VIDEO" --port "$RTSP_PORT" --mount "$MOUNT" &
         track_pid "$!"
     else
         require_docker
@@ -99,9 +98,8 @@ streams/ holds: $(ls streams/ 2>/dev/null | tr '\n' ' ')"
         docker compose run --rm -T \
             --name "$RTSP_CONTAINER" \
             --label "$DSW_LABEL=$DSW_RUN_ID" \
-            -e RTSP_PORT="$RTSP_PORT" \
-            -e RTSP_MOUNT="$MOUNT" \
-            deepstream-dev scripts/start_rtsp_stream.sh "$VIDEO" &
+            deepstream-dev \
+            python3 scripts/rtsp_server.py "$VIDEO" --port "$RTSP_PORT" --mount "$MOUNT" &
         track_pid "$!"
     fi
 

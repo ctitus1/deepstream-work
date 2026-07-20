@@ -42,7 +42,6 @@ __pycache__/
 configs/generated/
 labels.txt
 
-# Logs and editor state
+# Logs
 *.log
 *.tlog
-.vscode/

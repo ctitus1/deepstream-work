@@ -81,14 +81,25 @@ coexist. See [docker/README.md](docker/README.md) for what changes per release.
 
 ## Layout
 
-Work in this repo is organized into four areas:
-
-| Area | Directory | What lives there |
-| --- | --- | --- |
-| Runtime pipeline | `src/` | the shared `deepstream_yolo` package and the app entrypoints |
-| Model training | `training/` | dataset prep, fine-tuning, and the handoff into export |
-| Validation | `validation/` | detection accuracy, benchmarking, timestamp diagnostics |
-| Motion tracking | `tracking/` | placeholders for a future custom tracker |
+```
+scripts/
+  setup.sh          staged, idempotent setup (and --clean, its inverse)
+  parser.sh         RTSP server + display app
+  ros.sh            the full RTSP/ROS/Foxglove stack
+  rtsp_server.py    serves a local video over RTSP, looping
+  ros_service.sh    the ROS container's entrypoints: bridge | foxglove | bag
+  smoke_pipeline.py headless bounded run; setup's verify stage
+  lib/common.sh     shared shell helpers, sourced by the three entrypoints
+  setup/            one script per setup stage, plus prepare_models.py
+src/
+  parser_app.py     display-oriented DeepStream app
+  ros_source.py     DeepStream frame source for ROS publishing
+  ros_bridge.py     ROS Humble publisher bridge
+  deepstream_yolo/  the package all three share
+docker/             Dockerfiles for the DeepStream and ROS Humble images
+configs/generated/  nvinfer configs written by the models stage
+models/ lib/        exported models and the compiled bbox parser
+```
 
 The two normal runtime workflows are:
 
@@ -113,8 +124,7 @@ They orchestrate the underlying pieces, each of which still works on its own:
 - `src/parser_app.py`: display-oriented DeepStream app.
 - `src/ros_source.py`: DeepStream frame source for ROS publishing.
 - `src/ros_bridge.py`: ROS Humble publisher bridge.
-- `scripts/build_yolo_parser.sh`, `scripts/setup_and_export_yolo.sh`,
-  `scripts/setup_injury_model.sh`: the individual setup steps.
+- `scripts/setup/`: the individual setup stages, one script each.
 
 ## Manual Setup
 
@@ -161,26 +171,26 @@ docker compose run --rm deepstream-dev bash
 Inside the container, build the custom YOLO parser library:
 
 ```bash
-scripts/build_yolo_parser.sh          # skipped if already current
-scripts/build_yolo_parser.sh --force  # rebuild regardless
+scripts/setup/yolo_parser.sh          # skipped if already current
+scripts/setup/yolo_parser.sh --force  # rebuild regardless
 ```
 
 Export a YOLO model and generate DeepStream configs:
 
 ```bash
-scripts/setup_and_export_yolo.sh yolo12n.pt 640
+scripts/setup/yolo_export.sh yolo12n.pt 640
 ```
 
 Export the injury assessment model:
 
 ```bash
-scripts/setup_injury_model.sh models/injury.pt 8
+scripts/setup/injury_model.sh models/injury.pt 8
 ```
 
 Or do both through the same cache the apps use at startup:
 
 ```bash
-python3 scripts/prepare_models.py --model yolo12n.pt --long-side 640
+python3 scripts/setup/prepare_models.py --model yolo12n.pt --long-side 640
 ```
 
 Generated configs are written to `configs/generated/`. The export scripts manage
@@ -196,8 +206,8 @@ section only matters when running the pieces separately.
 Start a local RTSP stream from a DeepStream container shell:
 
 ```bash
-scripts/start_rtsp_stream.sh                     # the video in streams/
-scripts/start_rtsp_stream.sh streams/my-video.mp4
+python3 scripts/rtsp_server.py                     # the video in streams/
+python3 scripts/rtsp_server.py streams/my-video.mp4
 ```
 
 The mount name is the video's basename, so serving `streams/my-video.mp4` gives:
@@ -210,7 +220,7 @@ The server and the app defaults derive that URL from the same file, so neither
 has to be told. Override the port or mount explicitly:
 
 ```bash
-RTSP_PORT=8560 RTSP_MOUNT=test scripts/start_rtsp_stream.sh streams/my-video.mp4
+python3 scripts/rtsp_server.py streams/my-video.mp4 --port 8560 --mount test
 ```
 
 Then pass the matching RTSP URL with `--stream`:
@@ -218,7 +228,7 @@ Then pass the matching RTSP URL with `--stream`:
 ```bash
 python3 src/parser_app.py --stream rtsp://127.0.0.1:8560/test
 docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_source.sh --stream rtsp://127.0.0.1:8560/test
+  python3 src/ros_source.py --stream rtsp://127.0.0.1:8560/test
 ```
 
 For quick debugging, both DeepStream apps can also read a local file directly:
@@ -226,7 +236,7 @@ For quick debugging, both DeepStream apps can also read a local file directly:
 ```bash
 python3 src/parser_app.py --stream streams/my-video.mp4
 docker compose --profile ros run --rm deepstream-ros-source \
-  scripts/run_source.sh --stream streams/my-video.mp4
+  python3 src/ros_source.py --stream streams/my-video.mp4
 ```
 
 Local-file input is useful for development, but RTSP better matches the live
@@ -308,16 +318,16 @@ The editable draw.io sources and preview generator live in
 
 The ROS publishing workflow uses two containers:
 
-- `deepstream-ros-source`: runs `scripts/run_source.sh`, which starts
+- `deepstream-ros-source`: runs `python3 src/ros_source.py`, which starts
   `src/ros_source.py`. It forks raw, detect, and assess frame outputs,
   downsizes each image to `640x368`, JPEG-compresses them, and sends frame
   metadata over local TCP.
-- `ros-humble-publisher`: runs `scripts/run_bridge.sh`, which starts
+- `ros-humble-publisher`: runs `scripts/ros_service.sh bridge`, which starts
   `src/ros_bridge.py`. It receives those frames and publishes ROS Humble
   `cdcl_umd_msgs` messages with the JPEG image embedded in each message.
 
 `scripts/ros.sh` starts those containers plus the RTSP server and Foxglove
-Bridge. With `--bag`, it also runs `scripts/record_bag.sh` to record all ROS
+Bridge. With `--bag`, it also runs `scripts/ros_service.sh bag` to record all ROS
 topics to MCAP.
 
 From a host shell, start the full RTSP, ROS publisher, Foxglove, and DeepStream
@@ -423,7 +433,7 @@ FOXGLOVE_PORT=8766 docker compose --profile ros run --rm ros-foxglove-bridge
 ## RTSP Timing
 
 The RTSP pipeline preserves reference timestamp metadata when GStreamer exposes
-it. Local MP4 streams served by `scripts/start_rtsp_stream.sh` get network time
+it. Local MP4 streams served by `python3 scripts/rtsp_server.py` get network time
 from the RTSP server clock; original camera wall-clock time is only available if
 the upstream source provides it.
 
@@ -433,56 +443,16 @@ Override with `--rtsp-latency-ms` only if a stream needs extra buffering. RTSP
 streams are paced by the stream clock; late display frames are dropped instead
 of queued.
 
-## Model Training
-
-`training/` covers fine-tuning a detector and handing it to the export path
-this repo already uses. See [training/README.md](training/README.md).
+## Verifying a Run
 
 ```bash
-python3 training/prepare_dataset.py --format coco \
-  --annotations data/instances.json --images data/images --out datasets/injury
-python3 training/finetune.py --weights yolo11n.pt --data datasets/injury/injury.yaml
-python3 training/export_to_deepstream.py runs/detect/train/weights/best.pt --long-side 640
+python3 scripts/smoke_pipeline.py --frames 60
 ```
 
-Training runs in `.venv-yolo` (see `requirements/training.txt`), not the
-DeepStream interpreter. `export_to_deepstream.py` deliberately refuses when a
-fine-tuned model's class count disagrees with `labels/coco_labels.txt`: the
-export script installs the 80-class COCO labels unconditionally, so a custom
-model would otherwise deploy with the wrong labels and a wrong
-`num-detected-classes`.
-
-## Validation and Benchmarking
-
-`validation/` answers three separate questions. See
-[validation/README.md](validation/README.md).
-
-```bash
-python3 validation/smoke_pipeline.py --frames 60          # does the pipeline run at all
-python3 validation/accuracy/dump_detections.py --out dets.json
-python3 validation/accuracy/score_detections.py --detections dets.json --gt gt.json
-python3 validation/benchmark/benchmark_pipeline.py --frames 300
-```
-
-`smoke_pipeline.py` is headless (`display=False`) and bounded, so it works over
-SSH and in CI as a build gate: it fails if the parser library is missing, the
-engine cannot be built, or no frames arrive.
-
-Accuracy numbers are easy to misread. The deployed `nvinfer` thresholds
-(`pre-cluster-threshold=0.25`, `nms-iou-threshold=0.45`) are much stricter than
-the ultralytics `val` defaults (`conf=0.001`, `iou=0.7`), and the pipeline runs
-non-square (for example 640x384) while ultralytics only evaluates square. Both
-gaps make a correctly deployed model look worse than it is; the validation
-README explains how to compare like with like.
-
-## Motion Tracking
-
-`tracking/` is a placeholder work area for a custom motion tracker. Nothing
-there is implemented yet — the Python stubs raise `NotImplementedError` rather
-than return fake results. It records the integration surface: the `NvMOT` entry
-points a low-level tracker library must export, how `nvtracker` loads one via
-`ll-lib-file`, the six tracker configs DeepStream 7.1 ships, and how tracking
-would be scored. See [tracking/README.md](tracking/README.md).
+Headless (`display=False`) and bounded, so it works over SSH and in CI as a
+build gate: it fails if the parser library is missing, the engine cannot be
+built, or no frames arrive. This is also setup's `verify` stage, so
+`scripts/setup.sh --only verify` runs exactly the same check.
 
 ## Local Artifacts
 
@@ -491,19 +461,15 @@ Large runtime artifacts are intentionally ignored by Git, including
 `outputs/`, and `__pycache__/`.
 
 `streams/` is ignored because videos are user-provided input media. Cleanup
-scripts do not remove it.
+never removes it.
 
-Preview cleanup:
-
-```bash
-scripts/clean_artifacts.sh
-```
-
-Remove generated artifacts:
+Cleanup is the inverse of setup and lives with it. It is a dry run unless you
+pass `--yes`:
 
 ```bash
-scripts/clean_artifacts.sh --force
+scripts/setup.sh --clean              # list what would be removed
+scripts/setup.sh --clean --yes        # remove it
 ```
 
-Use `--include-models` only when you also want to remove generated/downloaded
-model artifacts.
+Add `--include-models` when you also want to drop generated and downloaded
+model artifacts. Anything git tracks is refused rather than deleted.

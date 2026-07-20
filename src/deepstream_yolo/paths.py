@@ -28,6 +28,7 @@ MODELS_DIR = PROJECT_DIR / "models"
 CONFIGS_DIR = PROJECT_DIR / "configs"
 GENERATED_CONFIG_DIR = CONFIGS_DIR / "generated"
 SCRIPTS_DIR = PROJECT_DIR / "scripts"
+SETUP_DIR = SCRIPTS_DIR / "setup"
 LIB_DIR = PROJECT_DIR / "lib"
 LABELS_SOURCE_PATH = PROJECT_DIR / "labels" / "coco_labels.txt"
 LABELS_PATH = MODELS_DIR / "coco_labels.txt"
@@ -36,8 +37,8 @@ YOLO_VENV_DIR = yolo_venv_dir()
 YOLO_PYTHON = YOLO_VENV_DIR / "bin" / "python3"
 
 STREAMS_DIR = PROJECT_DIR / "streams"
-SETUP_SCRIPT = SCRIPTS_DIR / "setup_and_export_yolo.sh"
-INJURY_SETUP_SCRIPT = SCRIPTS_DIR / "setup_injury_model.sh"
+SETUP_SCRIPT = SETUP_DIR / "yolo_export.sh"
+INJURY_SETUP_SCRIPT = SETUP_DIR / "injury_model.sh"
 
 # Shipped in models/ and small enough that its engine builds in seconds, so the
 # zero-argument path works on a fresh checkout. Override with --model.

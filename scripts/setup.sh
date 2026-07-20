@@ -49,11 +49,19 @@ Options:
   --frames N            Frames for the verify stage. Default: 60
   -h, --help            Show this help.
 
+Cleanup (the inverse of the stages above):
+  --clean               List every generated artifact that would be removed.
+  --yes                 With --clean, actually remove them.
+  --include-models      With --clean, also remove models/. streams/ is user
+                        media and is never removed.
+
 Examples:
   scripts/setup.sh                              # full setup, or a fast no-op
   scripts/setup.sh --model best.pt              # export one new model
   scripts/setup.sh --only verify                # just re-check the pipeline
   scripts/setup.sh --force parser               # rebuild the parser library
+  scripts/setup.sh --clean                      # show what cleanup would remove
+  scripts/setup.sh --clean --yes                # remove it
 EOF
 }
 
@@ -66,9 +74,15 @@ FORCE_ALL=0
 FORCE_STAGE=""
 ONLY=""
 SKIP=""
+CLEAN=0
+CLEAN_YES=0
+CLEAN_MODELS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --clean)     CLEAN=1; shift ;;
+        --yes)       CLEAN_YES=1; shift ;;
+        --include-models) CLEAN_MODELS=1; shift ;;
         --only)      ONLY="$2"; shift 2 ;;
         --skip)      SKIP="$2"; shift 2 ;;
         --force)
@@ -196,8 +210,8 @@ run_stamped_stage() {
     fi
 }
 
-setup_parser() { run_stamped_stage parser scripts/build_yolo_parser.sh; }
-setup_env()    { run_stamped_stage env scripts/setup_yolo_export_env.sh; }
+setup_parser() { run_stamped_stage parser scripts/setup/yolo_parser.sh; }
+setup_env()    { run_stamped_stage env scripts/setup/yolo_env.sh; }
 
 setup_models() {
     wants models || return 0
@@ -223,7 +237,7 @@ setup_models() {
     [ -n "$MODEL" ]  && args+=(--model "$MODEL")
     [ -n "$STREAM" ] && args+=(--stream "$STREAM")
     [ "$ASSESSMENT" -eq 0 ] && args+=(--no-assessment)
-    python3 scripts/prepare_models.py "${args[@]}"
+    python3 scripts/setup/prepare_models.py "${args[@]}"
 }
 
 setup_verify() {
@@ -235,7 +249,76 @@ setup_verify() {
     # Deliberately the local file, not the RTSP default: no server is running
     # during setup, and the smoke test only needs frames from somewhere.
     args+=(--stream "${STREAM:-$(default_media)}")
-    python3 validation/smoke_pipeline.py "${args[@]}"
+    python3 scripts/smoke_pipeline.py "${args[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# Clean: the inverse of everything above
+# ---------------------------------------------------------------------------
+
+# Undoing setup belongs with setup rather than in a script of its own -- the two
+# have to agree on exactly which paths are generated, and split across files
+# they drifted.
+#
+# Dry run unless --yes. streams/ is never touched: it is user media, not an
+# artifact, and there is no way to get it back.
+clean_artifacts() {
+    local targets=(.setup-state configs/generated external lib bus.jpg labels.txt yolo12n.pt yolo12x.pt)
+
+    # Version-keyed export venvs (.venv-yolo-3.10, .venv-yolo-3.12); a bare
+    # .venv-yolo may also survive from an older checkout.
+    local entry
+    while IFS= read -r entry; do targets+=("$entry"); done \
+        < <(find . -maxdepth 1 -type d -name '.venv-yolo*' -printf '%P\n')
+
+    # outputs/ mixes run output with the checked-in diagram sources that
+    # .gitignore whitelists, so queue its entries individually rather than
+    # removing the directory.
+    if [ -d outputs ]; then
+        while IFS= read -r entry; do targets+=("$entry"); done \
+            < <(find outputs -mindepth 1 -maxdepth 1 -not -name diagrams)
+    fi
+
+    while IFS= read -r entry; do targets+=("$entry"); done \
+        < <(find . \( -path './.git' -o -path './.venv-yolo*' -o -path './external' \) -prune \
+                 -o -type d -name __pycache__ -print)
+
+    [ "$CLEAN_MODELS" -eq 1 ] && targets+=(models)
+
+    log "Cleanup targets:"
+    local target found=0
+    for target in "${targets[@]}"; do
+        [ -e "$target" ] && { du -sh "$target"; found=1; }
+    done
+    [ "$found" -eq 0 ] && { log "  nothing to remove."; return 0; }
+
+    if [ "$CLEAN_YES" -ne 1 ]; then
+        log ""
+        log "Dry run. Re-run with --clean --yes to remove these."
+        return 0
+    fi
+
+    for target in "${targets[@]}"; do
+        [ -e "$target" ] || continue
+
+        # Cleanup only ever removes generated artifacts, so anything git tracks
+        # is by definition source and is refused. .gitkeep markers are excepted:
+        # they only pin otherwise-empty generated directories, and are restored
+        # below.
+        local tracked
+        tracked="$(git ls-files -- "$target" 2>/dev/null | grep -Ev '(^|/)\.gitkeep$' || true)"
+        if [ -n "$tracked" ]; then
+            warn "keeping $target: it holds git-tracked files"
+            continue
+        fi
+
+        rm -rf "$target"
+    done
+
+    mkdir -p models configs/generated
+    touch models/.gitkeep configs/generated/.gitkeep
+    log ""
+    log "Artifacts removed."
 }
 
 # ---------------------------------------------------------------------------
@@ -243,6 +326,8 @@ setup_verify() {
 # ---------------------------------------------------------------------------
 
 main() {
+    [ "$CLEAN" -eq 1 ] && { clean_artifacts; return 0; }
+
     setup_image
 
     # The remaining stages need DeepStream, CUDA and pyds. From the host, hand

@@ -64,7 +64,7 @@ services:
     # is a checkpoint that actually ships, so this works on a fresh checkout.
     # scripts/ros.sh replaces this command; it is the standalone debug path.
     command: >
-      bash -lc "scripts/run_source.sh
+      bash -lc "python3 src/ros_source.py
       --long-side 640"
 
   ros-humble-publisher: &ros-humble-base
@@ -99,7 +99,7 @@ services:
       - ${CDCL_ROS_WS:-/home/user/ros2_ws}:${CDCL_ROS_WS_MOUNT:-/ros2_ws}:ro
     working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
     command: >
-      bash -lc "scripts/run_bridge.sh"
+      bash -lc "scripts/ros_service.sh bridge"
 
   ros-foxglove-bridge:
     <<: *ros-humble-base
@@ -110,4 +110,4 @@ services:
       FOXGLOVE_PORT: ${FOXGLOVE_PORT:-8765}
       TERM: xterm-256color
     command: >
-      bash -lc "scripts/run_foxglove_bridge.sh"
+      bash -lc "scripts/ros_service.sh foxglove"

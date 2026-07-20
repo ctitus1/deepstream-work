@@ -199,11 +199,11 @@ Build it with colcon inside a ROS Humble container, then retry."
 # The pinned DeepStream-Yolo checkout
 # ---------------------------------------------------------------------------
 
-# The compiled bbox parser (build_yolo_parser.sh) and the ONNX exporter
-# (setup_and_export_yolo.sh) both come out of this one checkout, and a single
+# The compiled bbox parser (yolo_parser.sh) and the ONNX exporter
+# (yolo_export.sh) both come out of this one checkout, and a single
 # scripts/setup.sh run uses both. The ref lived in each script separately; if
 # the two ever drifted, the .so and the exporter would disagree about the model
-# output layout with no error anywhere. build_yolo_parser.sh also folds this
+# output layout with no error anywhere. yolo_parser.sh also folds this
 # value into its stamp signature, so moving the pin retriggers a rebuild.
 DEEPSTREAM_YOLO_REF="${DEEPSTREAM_YOLO_REF:-2894babce8e75c49115dbe0c7b516289ed853565}"
 
@@ -342,18 +342,40 @@ dsw_cleanup() {
     printf '\n'
     step "Shutting down..."
 
+    # Containers first, and exactly one stop signal each.
+    #
+    # docker stop sends SIGTERM and waits, which is what lets a recording write
+    # its moov atom. The tracked PIDs are the `docker compose run` clients for
+    # these same containers, so signalling them here as well would deliver a
+    # *second* stop signal to the app inside -- and install_shutdown_handlers
+    # deliberately escalates a second signal to an immediate os._exit, skipping
+    # the flush. Doing that produced a 0-byte mp4 every time. Stop the
+    # containers, let their clients exit on their own, and only then deal with
+    # whatever is still alive -- which is the in-container path, where the
+    # tracked children are bare processes with no container to stop.
+    if [ ${#DSW_CONTAINERS[@]} -gt 0 ]; then
+        # Reverse registration order, one at a time. The entrypoints start
+        # producers before consumers (RTSP server, then the bridges, then the
+        # apps that read them), so reversing takes each consumer down while the
+        # thing it reads is still alive.
+        #
+        # Stopping them all in one call instead killed the RTSP server
+        # underneath a recording that was still draining: rtspsrc failed with
+        # "Could not open resource for reading and writing", that error aborted
+        # the EOS flush, and every --record run produced a 0-byte mp4 with no
+        # moov atom.
+        local i
+        for (( i = ${#DSW_CONTAINERS[@]} - 1; i >= 0; i-- )); do
+            docker stop --timeout "${DSW_STOP_TIMEOUT:-15}" \
+                "${DSW_CONTAINERS[i]}" >/dev/null 2>&1 || true
+        done
+        docker rm -f ${DSW_CONTAINERS[@]+"${DSW_CONTAINERS[@]}"} >/dev/null 2>&1 || true
+    fi
+
     local pid
     for pid in ${DSW_PIDS[@]+"${DSW_PIDS[@]}"}; do
         kill -INT "$pid" 2>/dev/null || true
     done
-
-    if [ ${#DSW_CONTAINERS[@]} -gt 0 ]; then
-        # docker stop sends SIGTERM first, which the apps now handle, so an
-        # in-progress recording is finalized rather than truncated.
-        docker stop --time "${DSW_STOP_TIMEOUT:-15}" \
-            ${DSW_CONTAINERS[@]+"${DSW_CONTAINERS[@]}"} >/dev/null 2>&1 || true
-        docker rm -f ${DSW_CONTAINERS[@]+"${DSW_CONTAINERS[@]}"} >/dev/null 2>&1 || true
-    fi
 
     # Give the signalled children a moment to finish flushing, then insist.
     local waited=0

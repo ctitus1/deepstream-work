@@ -2,13 +2,13 @@
 # Create (or reuse) the YOLO export virtualenv.
 #
 # This is on the hot path: model_cache.ensure_model() shells out to
-# setup_and_export_yolo.sh on every cache miss, which lands here. It used to
+# yolo_export.sh on every cache miss, which lands here. It used to
 # re-resolve and re-install the whole requirements file every time, so exporting
 # a second .pt paid the full torch download again. The install is now guarded by
 # a stamp over the requirements file, making a warm environment a no-op.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 source scripts/lib/common.sh
 
 VENV_DIR="${VENV_DIR:-$(yolo_venv_dir)}"

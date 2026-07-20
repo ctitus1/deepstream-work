@@ -12,8 +12,8 @@ frames, so it can verify a container end to end without an X display:
 Exits non-zero if the pipeline errors or no frames are processed, so it is
 usable as a build gate.
 
-    python3 validation/smoke_pipeline.py --frames 60
-    python3 validation/smoke_pipeline.py --frames 60 --record
+    python3 scripts/smoke_pipeline.py --frames 60
+    python3 scripts/smoke_pipeline.py --frames 60 --record
 """
 
 from __future__ import annotations
@@ -34,8 +34,7 @@ sys.path.insert(0, str(PROJECT_DIR / "src"))
 from deepstream_yolo.model_cache import discover_size, ensure_model  # noqa: E402
 from deepstream_yolo.paths import DEFAULT_MODEL, DEFAULT_STREAM  # noqa: E402
 from deepstream_yolo.pipeline import build_pipeline, on_message  # noqa: E402
-from deepstream_yolo.recording import resolve_record_path  # noqa: E402
-from deepstream_yolo.stream_source import resolve_stream_source  # noqa: E402
+from deepstream_yolo.media import resolve_record_path, resolve_stream_source  # noqa: E402
 
 
 def counting_probe(state, limit, loop):

@@ -16,8 +16,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
-from .recording import select_encoder
-from .stream_source import StreamSource
+from .media import StreamSource, select_encoder
 
 
 @dataclass

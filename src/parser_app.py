@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from deepstream_yolo.gst_warnings import (
+from deepstream_yolo.runtime import (
     maybe_start_gst_scan_warning_filter,
     stop_gst_scan_warning_filter,
 )
@@ -31,9 +31,8 @@ from deepstream_yolo.detection_overlay import bbox_probe
 from deepstream_yolo.model_cache import discover_size, ensure_assessment_model, ensure_model
 from deepstream_yolo.paths import DEFAULT_ASSESSMENT_MODEL, DEFAULT_MODEL, DEFAULT_STREAM
 from deepstream_yolo.pipeline import build_pipeline, on_message
-from deepstream_yolo.recording import resolve_record_path
-from deepstream_yolo.shutdown import install_shutdown_handlers
-from deepstream_yolo.stream_source import StreamSource, resolve_stream_source
+from deepstream_yolo.media import StreamSource, resolve_record_path, resolve_stream_source
+from deepstream_yolo.runtime import install_shutdown_handlers
 from deepstream_yolo.timing import TimeLog
 
 

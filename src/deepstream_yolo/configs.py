@@ -29,7 +29,7 @@ INJURY_CLASS_COUNTS = {
 def ensure_labels_file() -> None:
     LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     if LABELS_PATH.exists():
-        # scripts/setup_and_export_yolo.sh installs the exported model's own
+        # scripts/setup/yolo_export.sh installs the exported model's own
         # class names here. Re-copying the checked-in COCO list on every run
         # would put 80 wrong names back on top of a fine-tuned model.
         return

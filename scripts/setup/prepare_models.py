@@ -8,8 +8,8 @@ the ROS stack finds everything already exported instead of stalling on it.
 Both exports are content-addressed by the cache, so re-running is a no-op and
 pointing ``--model`` at a new checkpoint only rebuilds that one model:
 
-    python3 scripts/prepare_models.py
-    python3 scripts/prepare_models.py --model runs/detect/train/weights/best.pt
+    python3 scripts/setup/prepare_models.py
+    python3 scripts/setup/prepare_models.py --model runs/detect/train/weights/best.pt
 
 Unlike the apps, this defaults to the local media file rather than the RTSP URL:
 setup runs before any RTSP server is up, and only the source geometry is needed
@@ -22,10 +22,10 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
-from deepstream_yolo.gst_warnings import (  # noqa: E402
+from deepstream_yolo.runtime import (  # noqa: E402
     maybe_start_gst_scan_warning_filter,
     stop_gst_scan_warning_filter,
 )
@@ -50,7 +50,7 @@ from deepstream_yolo.paths import (  # noqa: E402
     DEFAULT_MEDIA,
     DEFAULT_MODEL,
 )
-from deepstream_yolo.stream_source import resolve_stream_source  # noqa: E402
+from deepstream_yolo.media import resolve_stream_source  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

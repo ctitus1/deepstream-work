@@ -30,7 +30,7 @@ wheel and the base image therefore have to be chosen together.
 | 8.0 | 24.04 | 3.12 | 1.2.2 wheel (cp312) | 12.8 |
 | 9.0 | 24.04 | 3.12 | no wheel published; source build | 13.1 |
 
-`scripts/build_yolo_parser.sh` derives the CUDA version from the DeepStream
+`scripts/setup/yolo_parser.sh` derives the CUDA version from the DeepStream
 version at runtime, so it does not need updating when the base image changes.
 `CUDA_VERSION` overrides it. This matters because DeepStream-Yolo's Makefile
 interpolates `CUDA_VER` directly into `/usr/local/cuda-$(CUDA_VER)/{include,lib64}`
@@ -59,7 +59,7 @@ The build verifies `pyds` with `importlib.util.find_spec` instead of importing
 it. `pyds` links against `libcuda.so.1`, which the NVIDIA container runtime
 injects at *run* time; it does not exist during a build, so a real import fails
 even when the install is correct. The genuine import is covered by
-`validation/smoke_pipeline.py`, which runs with the GPU attached.
+`scripts/smoke_pipeline.py`, which runs with the GPU attached.
 
 There is no CUDA "compat" symlinking here, and it should not be added back. An
 earlier revision linked `libcuda.so.<driver>` out of `/usr/local/cuda-*/compat`
@@ -73,6 +73,6 @@ driver 580 with CUDA 12.6) is the normal, supported direction and needs no help.
 ```bash
 docker compose build deepstream-dev
 docker compose run --rm deepstream-dev python3 -c "import pyds; print(pyds.__file__)"
-docker compose run --rm deepstream-dev scripts/build_yolo_parser.sh
-docker compose run --rm deepstream-dev python3 validation/smoke_pipeline.py --frames 60
+docker compose run --rm deepstream-dev scripts/setup/yolo_parser.sh
+docker compose run --rm deepstream-dev python3 scripts/smoke_pipeline.py --frames 60
 ```

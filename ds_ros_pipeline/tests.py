@@ -4,8 +4,8 @@ Run anywhere, either way: ``python3 -m pytest ds_ros_pipeline/tests.py`` or
 ``python3 ds_ros_pipeline/tests.py`` (unittest main). Imports only the pure
 seams — timestamps, frames (logic classes), source (pts schedule),
 infer_configs, disk (DetachSequencer/Recorder finalize with injected
-callables), batch_pipeline (crop_bounds, and BatchWorker's publish dispatch
-over a faked valve/appsrc). Never imports Gst, pyds, rclpy, or
+callables), batch_pipeline (indexed_detections, and BatchWorker's publish
+dispatch over a faked valve/appsrc). Never imports Gst, pyds, rclpy, or
 ros_io/ds_node.
 
 The sys.path insertion below implements the package's flat sibling-import
@@ -32,7 +32,6 @@ from batch_pipeline import (
     BatchWorker,
     Detection,
     ResultCollector,
-    crop_bounds,
     indexed_detections,
 )
 import config
@@ -475,46 +474,6 @@ class TestGrabState(unittest.TestCase):
         self.assertIsNone(late.wait(0))
 
 
-class TestCropBounds(unittest.TestCase):
-
-    @staticmethod
-    def _det(left, top, width, height) -> Detection:
-        return Detection(left=left, top=top, width=width, height=height,
-                         confidence=0.9, class_id=0, label="person",
-                         object_id=0)
-
-    def test_integer_box_passes_through(self):
-        """batch_pipeline.crop_bounds: an in-frame integer bbox maps to its
-        own pixel bounds; a frame-covering box maps to the whole frame."""
-        self.assertEqual(crop_bounds(self._det(10, 20, 30, 40), 2560, 1440),
-                         (10, 20, 40, 60))
-        self.assertEqual(crop_bounds(self._det(0, 0, 2560, 1440), 2560, 1440),
-                         (0, 0, 2560, 1440))
-
-    def test_fractional_box_covers_partial_pixels(self):
-        """Fractional edges floor left/top and ceil right/bottom, so every
-        partially covered pixel lands in the crop."""
-        self.assertEqual(
-            crop_bounds(self._det(10.4, 20.6, 30.2, 40.2), 2560, 1440),
-            (10, 20, 41, 61))
-
-    def test_clamped_to_frame(self):
-        """Boxes overhanging any edge clamp to the frame bounds."""
-        self.assertEqual(crop_bounds(self._det(-5.0, -8.0, 20.0, 30.0), 640, 480),
-                         (0, 0, 15, 22))
-        self.assertEqual(crop_bounds(self._det(630.0, 470.0, 20.0, 30.0), 640, 480),
-                         (630, 470, 640, 480))
-
-    def test_degenerate_and_outside_boxes_return_none(self):
-        """Non-positive size or a box entirely outside the frame yields None
-        (publisher falls back to the full-frame image)."""
-        self.assertIsNone(crop_bounds(self._det(10, 10, 0, 30), 640, 480))
-        self.assertIsNone(crop_bounds(self._det(10, 10, 30, -1), 640, 480))
-        self.assertIsNone(crop_bounds(self._det(640, 100, 20, 20), 640, 480))
-        self.assertIsNone(crop_bounds(self._det(100, 480, 20, 20), 640, 480))
-        self.assertIsNone(crop_bounds(self._det(-50, 100, 20, 20), 640, 480))
-
-
 class TestIndexedDetections(unittest.TestCase):
     """batch_pipeline.indexed_detections: the array-position contract.
 
@@ -585,7 +544,6 @@ class TestBatchPublishDispatch(unittest.TestCase):
             PipelineConfig(), grab, parts, collector,
             publish_detections=lambda r: self.calls.append("detections"),
             publish_assessments=lambda r: self.calls.append("assessments"),
-            publish_casualties=lambda r: self.calls.append("casualties"),
             publish_vlm_detections=lambda r: self.calls.append("vlm"))
         # Stand in for the appsrc push + probe round-trip: feed the collector
         # the detections the pgie probe would have produced for this pts.
@@ -621,12 +579,12 @@ class TestBatchPublishDispatch(unittest.TestCase):
         self.assertEqual(self.valve.drop_history, [False, True])
         self.assertIn("assessed", message)
 
-    def test_capture_vlm_publishes_both_vlm_boxes_and_casualties(self):
-        """run_capture -> the /uas4/target_detections/vlm TargetBoxArray AND
-        the casualty crops, detection-only (valve dropping throughout)."""
+    def test_capture_vlm_publishes_only_the_vlm_box_array(self):
+        """run_capture -> the /uas4/target_detections/vlm TargetBoxArray and
+        nothing else, detection-only (valve dropping throughout)."""
         success, _ = self.worker.run_capture(self.item, timeout=1.0)
         self.assertTrue(success)
-        self.assertEqual(self.calls, ["vlm", "casualties"])
+        self.assertEqual(self.calls, ["vlm"])
         self.assertEqual(self.valve.drop_history, [True, True])
 
     def test_capture_vlm_rejected_in_continuous_mode(self):

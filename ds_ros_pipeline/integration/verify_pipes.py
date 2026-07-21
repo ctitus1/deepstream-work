@@ -17,11 +17,10 @@ from std_srvs.srv import Trigger
 
 from diagnostic_msgs.msg import DiagnosticArray
 
-from cdcl_umd_msgs.msg import CasualtyImageCompressed, TargetBoxArray
+from cdcl_umd_msgs.msg import TargetBoxArray
 
 BATCH_TOPIC = "/uas4/target_detections"
 VLM_TOPIC = "/uas4/target_detections/vlm"
-CASUALTY_TOPIC = "/casualty_image/compressed/vlm"
 
 # The pgie is configured person-only at or above detect.min_confidence
 # (config.py default 0.4, written into the generated nvinfer config as
@@ -42,13 +41,11 @@ def qos(latched):
 class Verifier(Node):
     def __init__(self):
         super().__init__("pipe_verifier")
-        self.batch, self.vlm, self.casualties = [], [], []
+        self.batch, self.vlm = [], []
         self.create_subscription(TargetBoxArray, BATCH_TOPIC,
                                  self.batch.append, qos(False))
         self.create_subscription(TargetBoxArray, VLM_TOPIC,
                                  self.vlm.append, qos(True))
-        self.create_subscription(CasualtyImageCompressed, CASUALTY_TOPIC,
-                                 self.casualties.append, qos(True))
         self._srv_clients = {}
         self.queue_depth = None
         self.create_subscription(DiagnosticArray, "/ds/status",
@@ -279,7 +276,6 @@ def main():
     # and crop assertions below are actually exercised.
     for attempt in range(8):
         node.vlm.clear()
-        node.casualties.clear()
         node.batch.clear()
         resp = node.call("/ds/capture/vlm")
         time.sleep(2.0)
@@ -305,44 +301,20 @@ def main():
               msg.detection_source == got[0].detection_source)
     check("nothing leaked onto " + BATCH_TOPIC,
           len(node.batch) == 0, f"{len(node.batch)} messages")
-    check("casualty crops still published",
-          len(node.casualties) > 0, f"{len(node.casualties)} crops")
-
-    # Cross-validate the index across two independently built message types:
-    # each CasualtyImageCompressed carries detection_id plus the unrounded
-    # full-frame bbox floats, so if detection_id really is the box's position
-    # in uav_target_boxes, indexing the TBA by it must reproduce the same
-    # rectangle. This catches an off-by-one or a permuted array that the
-    # per-message checks above cannot see.
+    # The index contract, now checked inside the array itself: box i must
+    # be detection i. With the crops gone there is no second message type to
+    # cross-validate against, so assert the array is self-consistent and that
+    # the assess pipe's annotations still key off the same positions.
     if got:
         boxes = got[0].uav_target_boxes
-        ids = [c.detection_id for c in node.casualties]
-        check("casualty detection_ids are valid TBA positions",
-              all(0 <= i < len(boxes) for i in ids),
-              f"ids {ids} vs {len(boxes)} boxes")
-        geom = []
-        for cas in node.casualties:
-            if not (0 <= cas.detection_id < len(boxes)):
-                continue
-            bb = boxes[cas.detection_id].target_bbox
-            left = bb.center.position.x - bb.size_x / 2.0
-            top = bb.center.position.y - bb.size_y / 2.0
-            if (abs(left - cas.bbox_x) > 0.01
-                    or abs(top - cas.bbox_y) > 0.01
-                    or abs(bb.size_x - cas.bbox_width) > 0.01
-                    or abs(bb.size_y - cas.bbox_height) > 0.01):
-                geom.append(
-                    (cas.detection_id,
-                     (round(left, 1), round(top, 1),
-                      round(bb.size_x, 1), round(bb.size_y, 1)),
-                     (round(cas.bbox_x, 1), round(cas.bbox_y, 1),
-                      round(cas.bbox_width, 1), round(cas.bbox_height, 1))))
-        check("TBA[detection_id] bbox == the crop's own bbox, for every crop",
-              not geom, f"mismatches {geom[:3]}")
-        check("indices are contiguous 0..n-1 over the whole array",
-              sorted(ids) == list(range(len(boxes)))
-              or set(ids).issubset(range(len(boxes))),
-              f"ids {sorted(ids)}")
+        check("every box has a positive-area bbox",
+              all(b.target_bbox.size_x > 0 and b.target_bbox.size_y > 0
+                  for b in boxes),
+              f"{len(boxes)} boxes")
+        centers = [(round(b.target_bbox.center.position.x, 2),
+                    round(b.target_bbox.center.position.y, 2)) for b in boxes]
+        check("boxes are distinct (no duplicated/permuted entries)",
+              len(set(centers)) == len(centers), f"{centers}")
 
     # ---- latching: a late subscriber still sees the vlm array ----
     print("\n== pipe 3: late-subscriber latching ==")

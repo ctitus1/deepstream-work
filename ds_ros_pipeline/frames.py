@@ -34,7 +34,9 @@ class CaptureKind(enum.Enum):
     """The four independently armed one-shot captures (grp_capture, Sec 4)."""
 
     MOSAIC = "mosaic"          # -> /mosaic_compressed (JPEG q90, full res)
-    VLM = "vlm"                # -> /vlm_raw (rgb8)
+    VLM = "vlm"                # -> detection over the captured frame, then
+    #                               one CasualtyImageCompressed (PNG crop +
+    #                               detection_id) per detected box
     SNAPSHOT_PNG = "snapshot"  # -> PNG file
     SNAPSHOT_RAW = "snapshot_raw"  # -> .ppm + .json sidecar
 

@@ -1,11 +1,18 @@
 """The rclpy node: services, publishers, QoS, callback groups, /ds/status.
 
-DESIGN.md Sec 4 in full. Node name ``ds_pipeline``. Thirteen services in four
-callback groups (grp_fast MutuallyExclusive; grp_capture REENTRANT;
-grp_record MutuallyExclusive; grp_batch MutuallyExclusive — Sec 4 table), six
-publishers with the exact QoS of the topics table, a 1 Hz /ds/status timer
-(grp_fast), and the ended-state fail-fast behavior of Sec 5 via
-frames.Lifecycle.guard. Spun by a MultiThreadedExecutor(num_threads=8) on the
+DESIGN.md Sec 4, amended: the batch outputs live on ONE shared
+TargetBoxArray topic, /uas4/target_detections (ros_bridge.py's detect-topic
+name) — detect runs publish plain boxes, assess runs the same boxes with
+annotations filled on the assessed ones. /ds/capture/vlm runs detection over
+the captured frame and publishes the SAME TargetBoxArray a detect run would,
+with use_for_assessment=True on every box, on the sibling topic
+/uas4/target_detections/vlm. /casualty_image/compressed/vlm and /vlm_raw no
+longer exist. Node name ``ds_pipeline``. Thirteen services in
+four callback groups (grp_fast MutuallyExclusive; grp_capture REENTRANT;
+grp_record MutuallyExclusive; grp_batch MutuallyExclusive — Sec 4 table),
+five publishers with the exact QoS of the README topics table, a 1 Hz
+/ds/status timer (grp_fast), and the ended-state fail-fast behavior of Sec 5
+via frames.Lifecycle.guard. Spun by a MultiThreadedExecutor(num_threads=8) on the
 "ros" thread (Sec 2) — the executor is owned by ds_node.
 
 Message builders borrow the field mapping of src/ros_bridge.py
@@ -34,12 +41,11 @@ from rclpy.qos import (
 from std_srvs.srv import SetBool, Trigger
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from sensor_msgs.msg import CompressedImage, Image
+from sensor_msgs.msg import CompressedImage
 
 from cdcl_umd_msgs.msg import (
     AerialDetectionSource,
     Annotation,
-    CasualtyImageCompressed,
     TargetBox,
     TargetBoxArray,
 )
@@ -63,9 +69,23 @@ DATA_SOURCE_ID = 0
 PLATFORM_NAME = "deepstream"
 
 
+def no_type_description_service() -> list:
+    """Parameter overrides that keep the node from advertising
+    ``~/get_type_description`` (Jazzy+; declared read-only at node init, so a
+    construction-time override is the only way to turn it off). The service
+    is optional introspection nothing here uses, and a humble-era peer — the
+    ros-humble foxglove bridge in particular — cannot resolve its type and
+    logs a WARN on every graph poll. On distros without the service the
+    override is simply never consumed."""
+    from rclpy.parameter import Parameter
+
+    return [Parameter("start_type_description_service", value=False)]
+
+
 def one_shot_qos(depth: int) -> QoSProfile:
-    """RELIABLE, KEEP_LAST depth, TRANSIENT_LOCAL — the latched one-shot
-    profile for /mosaic_compressed (depth 5) and /vlm_raw (depth 1), Sec 4."""
+    """RELIABLE, KEEP_LAST depth, TRANSIENT_LOCAL — the latched profile for
+    /mosaic_compressed (depth 5) and the capture/vlm TargetBoxArray
+    (depth 10), so a subscriber attaching after the call still gets it."""
     return QoSProfile(
         reliability=ReliabilityPolicy.RELIABLE,
         history=HistoryPolicy.KEEP_LAST,
@@ -75,8 +95,8 @@ def one_shot_qos(depth: int) -> QoSProfile:
 
 
 def reliable_qos(depth: int) -> QoSProfile:
-    """RELIABLE, KEEP_LAST depth, VOLATILE — /ds/detections and
-    /ds/assessments (depth 10), /ds/status (depth 1), Sec 4."""
+    """RELIABLE, KEEP_LAST depth, VOLATILE — /uas4/target_detections
+    (depth 10) and /ds/status (depth 1)."""
     return QoSProfile(
         reliability=ReliabilityPolicy.RELIABLE,
         history=HistoryPolicy.KEEP_LAST,
@@ -134,7 +154,8 @@ class DsRosNode(Node):
         callback groups, all publishers (exact QoS above +
         qos_profile_sensor_data for /ds/preview/compressed), all thirteen
         services, and the 1 Hz status timer. Main thread, before spin."""
-        super().__init__("ds_pipeline")
+        super().__init__("ds_pipeline",
+                         parameter_overrides=no_type_description_service())
         self._config = config
         self._lifecycle = lifecycle
         self._grab = grab
@@ -145,7 +166,10 @@ class DsRosNode(Node):
         self._loop_count_fn = loop_count_fn
 
         self._seq_lock = threading.Lock()
-        self._seq = 0
+        # TargetBoxArray.seq, counted per TBA topic: a consumer watching
+        # /uas4/target_detections for gaps must not see phantom ones because
+        # a capture/vlm run consumed a number from a shared counter.
+        self._seq = {"batch": 0, "vlm": 0}
         # Coalesced-call publish-once bookkeeping (Sec 4 race handling): per
         # kind, one mutex serializing produce/publish and the last waiter
         # already served, so N callers sharing a waiter yield ONE message and
@@ -160,13 +184,20 @@ class DsRosNode(Node):
 
         self._pub_mosaic = self.create_publisher(
             CompressedImage, "/mosaic_compressed", one_shot_qos(5))
-        self._pub_vlm = self.create_publisher(Image, "/vlm_raw", one_shot_qos(1))
         self._pub_preview = self.create_publisher(
             CompressedImage, "/ds/preview/compressed", qos_profile_sensor_data)
-        self._pub_detections = self.create_publisher(
-            TargetBoxArray, "/ds/detections", reliable_qos(10))
-        self._pub_assessments = self.create_publisher(
-            CasualtyImageCompressed, "/ds/assessments", reliable_qos(10))
+        # One shared TargetBoxArray topic (ros_bridge.py's detect-topic name):
+        # detect runs publish plain boxes, assess runs the same boxes with
+        # annotations filled on the assessed ones.
+        self._pub_tba = self.create_publisher(
+            TargetBoxArray, "/uas4/target_detections", reliable_qos(10))
+        # capture/vlm TargetBoxArray: message-identical to a detect run's
+        # except use_for_assessment=True on every box. Latched (unlike the
+        # batch topic) because this one is a one-shot, like every other
+        # one-shot output here — a subscriber attaching after the service
+        # call still receives it.
+        self._pub_tba_vlm = self.create_publisher(
+            TargetBoxArray, "/uas4/target_detections/vlm", one_shot_qos(10))
         self._pub_status = self.create_publisher(
             DiagnosticArray, "/ds/status", reliable_qos(1))
 
@@ -206,12 +237,10 @@ class DsRosNode(Node):
         return response
 
     def _fill_header(self, header, ntp_ns: int) -> None:
-        sec, nanosec = timestamps.split_stamp(ntp_ns)
-        header.stamp.sec = int(sec)
-        header.stamp.nanosec = int(nanosec)
+        self._fill_stamp(header.stamp, ntp_ns)
         header.frame_id = self._config.frame_id
 
-    def _set_stamp(self, stamp, ntp_ns: int) -> None:
+    def _fill_stamp(self, stamp, ntp_ns: int) -> None:
         sec, nanosec = timestamps.split_stamp(ntp_ns)
         stamp.sec = int(sec)
         stamp.nanosec = int(nanosec)
@@ -253,8 +282,16 @@ class DsRosNode(Node):
         msg.data = jpeg
         return msg
 
-    def _target_box(self, det: batch_pipeline.Detection) -> TargetBox:
-        """One TargetBox, field mapping per ros_bridge.py:target_box."""
+    def _target_box(self, det: batch_pipeline.Detection,
+                    use_for_assessment: bool = False) -> TargetBox:
+        """One TargetBox, field mapping per ros_bridge.py:target_box.
+
+        ``use_for_assessment`` ("flag if a target should be considered for
+        assessment", TargetBox.msg) marks the box for a downstream assessor.
+        Only the capture/vlm path sets it — the batch detect/assess paths
+        publish boxes already carrying whatever assessment they ran, so
+        flagging them for more would be a request nobody meant to make.
+        """
         bbox = BoundingBox2D()
         bbox.size_x = float(det.width)
         bbox.size_y = float(det.height)
@@ -264,7 +301,7 @@ class DsRosNode(Node):
         box = TargetBox()
         box.data_source_id = DATA_SOURCE_ID
         box.target_bbox = bbox
-        box.use_for_assessment = True
+        box.use_for_assessment = bool(use_for_assessment)
         box.detection_source.detection_source = AerialDetectionSource.DETECTION_YOLO
         box.detection_class = str(det.label)
         box.detection_confidence = float(det.confidence)
@@ -295,49 +332,81 @@ class DsRosNode(Node):
         msg.data = jpeg
         self._pub_preview.publish(msg)
 
-    def publish_detections(self, result: batch_pipeline.FrameResult) -> None:
-        """/ds/detections: one TargetBoxArray per batched frame; source_img =
-        detections.image_width x image_height JPEG of the frame; all stamps =
-        result.item.ntp_ns. Called from the batch worker thread."""
+    def _target_box_array(self, result: batch_pipeline.FrameResult,
+                          boxes: list[TargetBox],
+                          seq_key: str = "batch") -> TargetBoxArray:
+        """TargetBoxArray shell for the TBA topics: header.stamp and
+        source_img (the detections.image_width x image_height JPEG of the
+        frame, its own header included) all carry the frame's resolved
+        ingest time. ``seq_key`` selects the per-topic seq counter."""
         msg = TargetBoxArray()
         with self._seq_lock:
-            msg.seq = self._seq
-            self._seq += 1
+            msg.seq = self._seq[seq_key]
+            self._seq[seq_key] += 1
         self._fill_header(msg.header, result.item.ntp_ns)
         msg.system_id = SYSTEM_ID
         msg.source_img = self._source_image(result)
         msg.gimbal_attitude_quaternion.w = 1.0
-        msg.uav_target_boxes = [
-            self._target_box(det) for det in result.detections
-        ]
+        msg.uav_target_boxes = boxes
         msg.use_for_mosaic = False
         msg.detection_source = AerialDetectionSource.DETECTION_YOLO
-        self._pub_detections.publish(msg)
+        return msg
 
-    def publish_assessment(self, result: batch_pipeline.FrameResult,
-                           object_id: int) -> None:
-        """/ds/assessments: one CasualtyImageCompressed per detected person;
-        annotations = the 8 clip_rgb_* heads (ros_bridge.py shape); stamp
-        fields from result.item.ntp_ns. Batch worker thread."""
-        det = next(
-            (d for d in result.detections if d.object_id == object_id), None)
-        predictions = result.assessments.get(object_id, {})
-        msg = CasualtyImageCompressed()
-        msg.data_source_id = DATA_SOURCE_ID
-        self._set_stamp(msg.stamp, result.item.ntp_ns)
-        msg.image = self._source_image(result)
-        self._set_stamp(msg.position.header.stamp, result.item.ntp_ns)
-        msg.position.header.frame_id = self._config.frame_id
-        msg.annotations = self._annotations(predictions)
-        if det is not None:
-            msg.bbox_x = float(det.left)
-            msg.bbox_y = float(det.top)
-            msg.bbox_width = float(det.width)
-            msg.bbox_height = float(det.height)
-        msg.sensor_frame_id = self._config.frame_id
-        msg.platform_name = PLATFORM_NAME
-        msg.is_sensor_frame_moving = False
-        self._pub_assessments.publish(msg)
+    def _indexed_detections(self, result: batch_pipeline.FrameResult,
+                            ) -> list[batch_pipeline.Detection]:
+        """``result.detections`` in DeepStream index order, so the box at
+        position i of uav_target_boxes is the detection DeepStream indexed i.
+
+        Thin logging wrapper over batch_pipeline.indexed_detections, which
+        holds the ordering rule itself (and its rationale) in a module unit
+        tests can import.
+        """
+        detections, complaint = batch_pipeline.indexed_detections(
+            result.detections)
+        if complaint is not None:
+            self.get_logger().warning(complaint)
+        return detections
+
+    def publish_detections(self, result: batch_pipeline.FrameResult) -> None:
+        """run_detect / continuous_detect output: one TargetBoxArray per
+        batched frame on /uas4/target_detections — detections only (every
+        box's annotations empty) plus the compressed frame image; all stamps
+        = result.item.ntp_ns. Called from the batch worker thread."""
+        boxes = [self._target_box(det)
+                 for det in self._indexed_detections(result)]
+        self._pub_tba.publish(self._target_box_array(result, boxes))
+
+    def publish_assessments(self, result: batch_pipeline.FrameResult) -> None:
+        """run_detect_assess / continuous output: one TargetBoxArray per
+        frame on /uas4/target_detections — the SAME boxes a detect run would
+        publish, with the 8 clip_rgb_* heads (ros_bridge.py shape) filled
+        into the annotations of every box the injury SGIE assessed; all
+        stamps = result.item.ntp_ns. Batch worker thread.
+
+        The annotations land on the right box because both sides of the join
+        use the index det_collect stamped into the object meta: the box at
+        position i IS detection i, and assessments[i] is the tensor output
+        the SGIE produced for that same object."""
+        boxes = []
+        for det in self._indexed_detections(result):
+            box = self._target_box(det)
+            predictions = result.assessments.get(det.object_id)
+            if predictions:
+                box.annotations = self._annotations(predictions)
+            boxes.append(box)
+        self._pub_tba.publish(self._target_box_array(result, boxes))
+
+    def publish_vlm_detections(self, result: batch_pipeline.FrameResult) -> None:
+        """capture/vlm output: one TargetBoxArray on
+        /uas4/target_detections/vlm — field-for-field what publish_detections
+        would put on /uas4/target_detections for the same frame (same boxes,
+        empty annotations, same source_img, all stamps = result.item.ntp_ns),
+        except every box carries use_for_assessment=True. Batch worker
+        thread."""
+        boxes = [self._target_box(det, use_for_assessment=True)
+                 for det in self._indexed_detections(result)]
+        self._pub_tba_vlm.publish(
+            self._target_box_array(result, boxes, seq_key="vlm"))
 
     # -- service callbacks (executor threads, groups as annotated) ----------
 
@@ -359,23 +428,20 @@ class DsRosNode(Node):
             response, lambda: self._capture(CaptureKind.MOSAIC, "capture", produce))
 
     def on_capture_vlm(self, request, response):
-        """/ds/capture/vlm (Trigger, grp_capture): as mosaic but raw rgb8 on
-        /vlm_raw (~11 MB)."""
+        """/ds/capture/vlm (Trigger, grp_capture): arm VLM, wait <= 2 s for
+        the next frame, run DETECTION over just that frame via
+        worker.run_capture (bypasses the pending queue; serialized with
+        other runs; rejected while a continuous mode is on), and publish the
+        detect-run TargetBoxArray with use_for_assessment=True on
+        /uas4/target_detections/vlm. Blocks until published
+        (capture wait + <= 10 s run). Coalesced calls share one frame and
+        one run (Sec 4); message = the stamp used + run counts."""
         def produce(captured: frames.CapturedFrame) -> tuple[bool, str]:
-            import numpy as np
-
-            rgb = np.ascontiguousarray(captured.frame_rgba[..., :3])
-            height, width = rgb.shape[:2]
-            msg = Image()
-            self._fill_header(msg.header, captured.ntp_ns)
-            msg.height = int(height)
-            msg.width = int(width)
-            msg.encoding = "rgb8"
-            msg.is_bigendian = 0
-            msg.step = 3 * int(width)
-            msg.data = rgb.tobytes()
-            self._pub_vlm.publish(msg)
-            return True, _stamp_text(captured.ntp_ns)
+            item = frames.BatchItem(frame_rgba=captured.frame_rgba,
+                                    ntp_ns=captured.ntp_ns,
+                                    pts=captured.pts)
+            success, message = self._worker.run_capture(item)
+            return success, f"{_stamp_text(captured.ntp_ns)} ({message})"
 
         return self._answer(
             response, lambda: self._capture(CaptureKind.VLM, "capture", produce))
@@ -400,12 +466,15 @@ class DsRosNode(Node):
 
     def on_run_detect(self, request, response):
         """/ds/batch/run_detect (Trigger, grp_batch): worker.run_once(
-        assess=False); blocks <= 30 s."""
+        assess=False) — detection TargetBoxArrays on /uas4/target_detections;
+        blocks <= 30 s."""
         return self._answer(response, lambda: self._worker.run_once(assess=False))
 
     def on_run_detect_assess(self, request, response):
         """/ds/batch/run_detect_assess (Trigger, grp_batch): worker.run_once(
-        assess=True); additionally yields /ds/assessments."""
+        assess=True) — assessment TargetBoxArrays (annotations filled) on
+        /uas4/target_detections; the plain detection arrays are not
+        additionally published."""
         return self._answer(response, lambda: self._worker.run_once(assess=True))
 
     def _set_continuous(self, active: bool, assess: bool) -> tuple[bool, str]:

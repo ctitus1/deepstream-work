@@ -3,7 +3,8 @@
 Builds the persistent ``Gst.Pipeline "batch"``: appsrc (is-live=true
 format=time block=true do-timestamp=false max-bytes=268435456, RGBA WxH caps)
 -> nvvideoconvert output-buffers=16 -> NVMM RGBA capsfilter -> nvstreammux
-batch-size=8 batched-push-timeout=100000 attach-sys-ts=false
+batch-size=1 (Sec 3.3 said 8; see build_batch_pipeline for why a single-pad
+mux must emit one frame per batch) batched-push-timeout=100000 attach-sys-ts=false
 live-source=false -> nvinfer pgie_batch (generated b8 yolo config) -> valve
 v_assess drop=true -> nvinfer sgie_batch (existing injury b8 config,
 process-mode=2 output-tensor-meta=true) -> fakesink sync=false async=false.
@@ -57,6 +58,33 @@ class Detection:
     class_id: int
     label: str
     object_id: int
+
+
+def indexed_detections(detections: "tuple[Detection, ...] | list[Detection]",
+                       ) -> tuple[list[Detection], str | None]:
+    """``detections`` in DeepStream index order, plus a complaint or None.
+
+    The publishers lay TargetBoxes down in this order so that position i of
+    ``uav_target_boxes`` is the detection whose ``object_id`` is i — the same
+    index ``assessments`` and ``detection_id`` key on (see the note in
+    install_collect_probes). det_collect already emits them in that order, so
+    the sort is a no-op today; it is here so the guarantee is enforced where
+    the array is built rather than inherited from a probe two modules away.
+
+    The second element is a human-readable warning when the indices are not
+    contiguous 0..n-1 — the join still follows object_id and stays correct,
+    but array position no longer equals detection_id, which every consumer
+    indexing the array by detection_id would need to know. Returned rather
+    than logged so this stays importable without rclpy.
+    """
+    ordered = sorted(detections, key=lambda det: det.object_id)
+    indices = [det.object_id for det in ordered]
+    if indices != list(range(len(ordered))):
+        return ordered, (
+            f"detection indices are not contiguous 0..n-1: {indices}; "
+            "annotations still follow object_id, but array position no "
+            "longer equals detection_id")
+    return ordered, None
 
 
 @dataclass(frozen=True)
@@ -215,7 +243,18 @@ def build_batch_pipeline(config: PipelineConfig, width: int, height: int,
     )
 
     mux_batch = _make("nvstreammux", "mux_batch")
-    mux_batch.set_property("batch-size", config.batch_engine_batch)
+    # batch-size=1, NOT config.batch_engine_batch. Every frame here enters on
+    # the one sink_0 pad, so the legacy nvstreammux stamps them all
+    # source_id=0; when it packs several into one batch, nvinfer annotates
+    # only batch_id=0 and every later frame comes out with zero objects
+    # (measured: a 6-frame run published boxes on frame 0 and empty arrays on
+    # frames 1-5, even when all six buffers were byte-identical copies).
+    # batch-size=1 makes the mux emit one frame per batch, which is the case
+    # nvinfer handles correctly for a single source. The pgie config stays
+    # b8 -- the engine accepts any batch in [1, 8], and the run still streams
+    # back-to-back, it just no longer infers 8-up. Recovering true batched
+    # inference needs one mux sink pad per frame (see README).
+    mux_batch.set_property("batch-size", 1)
     mux_batch.set_property("width", width)
     mux_batch.set_property("height", height)
     mux_batch.set_property("batched-push-timeout", MUX_BATCH_PUSH_TIMEOUT_US)
@@ -274,10 +313,22 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
         parse_assessment_tensor_meta,
     )
 
-    # No tracker in this pipeline, so obj_meta.object_id is the untracked
-    # sentinel for every object. Both probes instead key objects by their
-    # ordinal position in the frame's obj_meta_list — the sgie appends tensor
-    # meta without reordering the list, so the join is stable.
+    # No tracker in this pipeline, so obj_meta.object_id arrives as the
+    # untracked sentinel for every object. det_collect (pgie src pad, i.e.
+    # upstream of the valve and therefore of the sgie) OVERWRITES it with the
+    # object's ordinal position in the frame's obj_meta_list, and that
+    # written-down index is the one identifier everything downstream uses:
+    #
+    #   Detection.object_id            == the index
+    #   TargetBoxArray.uav_target_boxes[i].. == the detection whose index is i
+    #   FrameResult.assessments[index] == that box's 8 clip_rgb_* heads
+    #
+    # assess_collect then reads obj.object_id back rather than re-deriving a
+    # position by counting the list a second time. Two independent counters
+    # would agree only as long as the sgie never reorders, inserts, or drops
+    # an object meta; carrying the index in the meta makes the join correct
+    # by construction instead of by assumption, and a reorder can no longer
+    # silently attach one person's assessment to another person's box.
 
     def det_collect(_pad, info):
         buffer = info.get_buffer()
@@ -296,6 +347,9 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
                 while obj_list:
                     obj = pyds.NvDsObjectMeta.cast(obj_list.data)
                     rect = obj.rect_params
+                    # Stamp the index into the meta so the sgie side can read
+                    # back exactly this object's identity (see note above).
+                    obj.object_id = index
                     detections.append(Detection(
                         left=float(rect.left),
                         top=float(rect.top),
@@ -327,9 +381,11 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
                 frame_meta = pyds.NvDsFrameMeta.cast(frame_list.data)
                 assessments: dict[int, dict] = {}
                 obj_list = frame_meta.obj_meta_list
-                index = 0
                 while obj_list:
                     obj = pyds.NvDsObjectMeta.cast(obj_list.data)
+                    # The index det_collect stamped on this very object --
+                    # not a fresh positional count.
+                    index = int(obj.object_id)
                     user_meta_list = obj.obj_user_meta_list
                     while user_meta_list:
                         user_meta = pyds.NvDsUserMeta.cast(user_meta_list.data)
@@ -342,7 +398,6 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
                                 if predictions:
                                     assessments[index] = predictions
                         user_meta_list = user_meta_list.next
-                    index += 1
                     obj_list = obj_list.next
                 collector.add_assessments(int(frame_meta.buf_pts), assessments)
                 frame_list = frame_list.next
@@ -358,10 +413,17 @@ class BatchWorker:
     """The "batch" thread (Sec 2): serializes all runs, owns appsrc pushing.
 
     Constructed with the grab state (source of swap_pending), the parts, the
-    collector, and publish callbacks injected by ros_io:
-      publish_detections(result: FrameResult) -> None   (one TargetBoxArray)
-      publish_assessment(result: FrameResult, object_id: int) -> None
-                                      (one CasualtyImageCompressed per person)
+    collector, and publish callbacks injected by ros_io — the run's trigger
+    selects which fire per frame result:
+      publish_detections(result) -> None   run_detect / continuous_detect:
+                                      one TargetBoxArray, annotations empty
+      publish_assessments(result) -> None  run_detect_assess / continuous:
+                                      one TargetBoxArray, annotations filled
+                                      on the assessed boxes
+      publish_vlm_detections(result) -> None
+                                      capture/vlm: one TargetBoxArray on the
+                                      /vlm topic, boxes flagged
+                                      use_for_assessment
     Callbacks are invoked on the worker thread; rclpy publishers are
     thread-safe (Sec 2).
     """
@@ -369,13 +431,15 @@ class BatchWorker:
     def __init__(self, config: PipelineConfig, grab: GrabState,
                  parts: BatchParts, collector: ResultCollector,
                  publish_detections: Callable[[FrameResult], None],
-                 publish_assessment: Callable[[FrameResult, int], None]) -> None:
+                 publish_assessments: Callable[[FrameResult], None],
+                 publish_vlm_detections: Callable[[FrameResult], None]) -> None:
         self._config = config
         self._grab = grab
         self._parts = parts
         self._collector = collector
         self._publish_detections = publish_detections
-        self._publish_assessment = publish_assessment
+        self._publish_assessments = publish_assessments
+        self._publish_vlm_detections = publish_vlm_detections
         # _cond guards the continuous flags and stop flag; _run_lock
         # serializes run execution so the valve never toggles mid-run even in
         # the set_continuous(False)-during-auto-run / run_once race window.
@@ -422,6 +486,19 @@ class BatchWorker:
         if not items:
             return False, "batch queue empty"
         return self._execute_run(items, assess, min(timeout, COLLECT_TIMEOUT_S))
+
+    def run_capture(self, item: BatchItem,
+                    timeout: float = COLLECT_TIMEOUT_S) -> tuple[bool, str]:
+        """Run detection over ONE captured frame, bypassing the pending queue,
+        and publish the vlm TargetBoxArray (the capture/vlm path;
+        grp_capture service thread). Serialized with every other run by
+        _run_lock; the pending queue and any run in flight are untouched.
+        Rejected while a continuous mode is on, like the manual runs."""
+        with self._cond:
+            if self._continuous:
+                return False, "continuous mode active"
+        return self._execute_run([item], assess=False, wait_timeout=timeout,
+                                 publish="vlm")
 
     def set_continuous(self, active: bool, assess: bool) -> None:
         """Enable/disable auto-runs (grp_fast service thread, non-blocking).
@@ -482,13 +559,19 @@ class BatchWorker:
                 self._cond.wait(_POLL_INTERVAL_S)
 
     def _execute_run(self, items: list[BatchItem], assess: bool,
-                     wait_timeout: float) -> tuple[bool, str]:
+                     wait_timeout: float,
+                     publish: str | None = None) -> tuple[bool, str]:
         """Sec 3.3/6 run: valve -> push k -> wait k or timeout -> publish.
 
         Serialized by _run_lock; the valve is set before the first push and
         restored after collection, so it never toggles with buffers in
-        flight (runs never overlap).
+        flight (runs never overlap). ``publish`` selects which callbacks are
+        invoked per frame result — "detections" (default for assess=False),
+        "assessments" (default for assess=True), or "vlm" (the capture/vlm
+        path: the vlm TargetBoxArray).
         """
+        if publish is None:
+            publish = "assessments" if assess else "detections"
         with self._run_lock:
             self._collector.start_run([item.pts for item in items], assess)
             self._parts.v_assess.set_property("drop", not assess)
@@ -501,12 +584,14 @@ class BatchWorker:
             boxes = 0
             assessed = 0
             for result in results:
-                self._publish_detections(result)
                 boxes += len(result.detections)
-                if assess:
-                    for object_id in sorted(result.assessments):
-                        self._publish_assessment(result, object_id)
-                        assessed += 1
+                if publish == "assessments":
+                    self._publish_assessments(result)
+                    assessed += len(result.assessments)
+                elif publish == "vlm":
+                    self._publish_vlm_detections(result)
+                else:
+                    self._publish_detections(result)
             message = f"{len(results)}/{len(items)} frames, {boxes} boxes"
             if assess:
                 message += f", {assessed} assessed"

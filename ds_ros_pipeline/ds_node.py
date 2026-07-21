@@ -151,8 +151,6 @@ class App:
                 self._node.publish_detections(result),
             publish_assessments=lambda result:
                 self._node.publish_assessments(result),
-            publish_casualties=lambda result:
-                self._node.publish_casualties(result),
             publish_vlm_detections=lambda result:
                 self._node.publish_vlm_detections(result))
 

@@ -1,4 +1,21 @@
-FROM ros:humble-ros-base
+# ROS_DISTRO selects the base. It defaults to humble, so the root
+# docker-compose.yml and scripts/ros.sh build exactly what they always did.
+#
+# ds_ros_pipeline/compose.yaml overrides it to match the PIPELINE's distro,
+# and must, because a foxglove bridge cannot read a topic published by a node
+# on a different distro when any message in the tree changed shape between
+# them. Concretely: cdcl_umd_msgs/TargetBoxArray embeds a sensor_msgs/Range,
+# Jazzy's Range added a `float32 variance` field that Humble's lacks, and it
+# sits immediately before uav_target_boxes -- so a Humble reader deserializing
+# a Jazzy publisher runs 4 bytes short, reads the sequence length from the
+# wrong offset, logs "sequence size exceeds remaining buffer", and hands the
+# client an EMPTY box array. Every field before the Range decodes fine, which
+# is what makes it look like a pipeline bug rather than a distro mismatch.
+ARG ROS_DISTRO=humble
+FROM ros:${ROS_DISTRO}-ros-base
+
+# ARGs do not survive FROM; re-declare for the apt layer below.
+ARG ROS_DISTRO=humble
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONPATH=/workspace/deepstream-work/src
@@ -14,10 +31,10 @@ WORKDIR ${WORKSPACE_DIR}
 # end so DeepStream image rebuilds stay untouched and this layer stays cacheable.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ros-humble-foxglove-bridge \
-      ros-humble-nav-msgs \
-      ros-humble-rosbag2-storage-mcap \
-      ros-humble-vision-msgs && \
+      ros-${ROS_DISTRO}-foxglove-bridge \
+      ros-${ROS_DISTRO}-nav-msgs \
+      ros-${ROS_DISTRO}-rosbag2-storage-mcap \
+      ros-${ROS_DISTRO}-vision-msgs && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------

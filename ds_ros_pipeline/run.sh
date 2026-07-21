@@ -16,7 +16,15 @@ if [ "${1:-}" = "--prebuild" ]; then
     exec python3 ds_ros_pipeline/ds_node.py --prebuild "$@"
 fi
 
-source /opt/ros/humble/setup.bash
+# The image bakes its ROS distro into DS_ROS_DISTRO (Dockerfile ARG
+# ROS_DISTRO: humble on the 7.1/jammy base, jazzy on 9.0/noble). Fall back to
+# the last-sorted installed distro so hand-built containers still work.
+if [ -z "${DS_ROS_DISTRO:-}" ] || [ ! -f "/opt/ros/${DS_ROS_DISTRO}/setup.bash" ]; then
+    for candidate in /opt/ros/*/setup.bash; do
+        DS_ROS_DISTRO="$(basename "$(dirname "$candidate")")"
+    done
+fi
+source "/opt/ros/${DS_ROS_DISTRO}/setup.bash"
 
 # With ipc:host, Fast DDS shared-memory segments left in the host's /dev/shm
 # by a SIGKILLed predecessor (docker kill, §10 test 8) intermittently segfault

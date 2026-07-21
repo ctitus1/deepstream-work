@@ -17,11 +17,10 @@ from std_srvs.srv import Trigger
 
 from diagnostic_msgs.msg import DiagnosticArray
 
-from cdcl_umd_msgs.msg import CasualtyImageCompressed, TargetBoxArray
+from cdcl_umd_msgs.msg import TargetBoxArray
 
 BATCH = "/uas4/target_detections"
 VLM = "/uas4/target_detections/vlm"
-CAS = "/casualty_image/compressed/vlm"
 # pgie is person-only at or above detect.min_confidence (config default 0.4).
 MIN_CONFIDENCE = float(os.environ.get("DS_MIN_CONFIDENCE", "0.4"))
 FAIL = []
@@ -45,12 +44,10 @@ def check(label, cond, detail=""):
 class N(Node):
     def __init__(self):
         super().__init__("evidence")
-        self.batch, self.vlm, self.cas = [], [], []
+        self.batch, self.vlm = [], []
         self.depth = None
         self.create_subscription(TargetBoxArray, BATCH, self.batch.append, qos())
         self.create_subscription(TargetBoxArray, VLM, self.vlm.append, qos(True))
-        self.create_subscription(CasualtyImageCompressed, CAS,
-                                 self.cas.append, qos(True))
         self.create_subscription(DiagnosticArray, "/ds/status", self._st, qos())
         self._cl = {}
 
@@ -206,7 +203,6 @@ def main():
     print("=" * 72)
     for _ in range(8):
         node.vlm.clear()
-        node.cas.clear()
         node.batch.clear()
         r3 = node.call("/ds/capture/vlm")
         time.sleep(2.0)

@@ -59,3 +59,7 @@ env/
 # Per-video comparison artifacts
 eval/runs/
 eval/detections*.json
+
+# ds_ros_pipeline runtime outputs and machine-local compose overrides
+ds_ros_pipeline/generated/
+ds_ros_pipeline/.env

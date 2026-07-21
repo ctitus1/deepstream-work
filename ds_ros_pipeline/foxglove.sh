@@ -11,7 +11,14 @@
 # and host IPC, exactly as the root compose's ROS services already do.
 set -eo pipefail
 
-source /opt/ros/humble/setup.bash
+# Same distro selection as run.sh: prefer the image-baked DS_ROS_DISTRO
+# (unset in the stock ros-humble bridge image, where the glob finds humble).
+if [ -z "${DS_ROS_DISTRO:-}" ] || [ ! -f "/opt/ros/${DS_ROS_DISTRO}/setup.bash" ]; then
+    for candidate in /opt/ros/*/setup.bash; do
+        DS_ROS_DISTRO="$(basename "$(dirname "$candidate")")"
+    done
+fi
+source "/opt/ros/${DS_ROS_DISTRO}/setup.bash"
 
 # Same stale-segment hazard as run.sh: with ipc:host, Fast DDS segments left in
 # the host's /dev/shm by a SIGKILLed predecessor can segfault the next

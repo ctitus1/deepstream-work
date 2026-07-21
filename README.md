@@ -435,6 +435,22 @@ To run Foxglove Bridge on a different port:
 FOXGLOVE_PORT=8766 docker compose --profile ros run --rm ros-foxglove-bridge
 ```
 
+## Signal-Driven ROS2 Pipeline
+
+`ds_ros_pipeline/` is a separate, self-contained workflow: a single ROS2
+Humble node inside a DeepStream container (built as a layer on top of
+`deepstream-work:7.1`; nothing above changes) that runs a paced, loopable
+live pipeline with on-demand frame capture, dynamic disk recording, and a
+decoupled batch detect/assess pipeline — all controlled via ROS2 services.
+
+```bash
+docker compose -f ds_ros_pipeline/compose.yaml up --build ds-ros-pipeline
+```
+
+See [ds_ros_pipeline/README.md](ds_ros_pipeline/README.md) for bring-up,
+services/topics, and outputs, and
+[ds_ros_pipeline/DESIGN.md](ds_ros_pipeline/DESIGN.md) for the design.
+
 ## RTSP Timing
 
 The RTSP pipeline preserves reference timestamp metadata when GStreamer exposes

@@ -1,0 +1,43 @@
+# Standalone compose file for the signal-driven DeepStream + ROS2 pipeline
+# (DESIGN.md §2). Invoked explicitly, never merged with the root compose:
+#
+#   docker compose -f ds_ros_pipeline/compose.yaml up --build ds-ros-pipeline
+#
+# container_name is fixed so test commands like `docker kill ds-ros-pipeline`
+# are project-prefix-independent.
+#
+# The colcon workspace is mounted read-only AT THE PATH IT WAS BUILT AT (a
+# --symlink-install workspace has absolute symlinks into its own build/ tree,
+# so any other mount point breaks sourcing silently -- same caveat the root
+# compose documents for ros-humble-base). Because that mount path differs from
+# the root compose convention (/ros2_ws), CDCL_ROS_SETUP is pinned here to
+# match this file's own mount: both derive from the same CDCL_ROS_WS variable,
+# so the two values can never drift apart.
+
+services:
+  ds-ros-pipeline:
+    build:
+      context: ..
+      dockerfile: ds_ros_pipeline/Dockerfile
+    image: deepstream-work:ds-ros
+    container_name: ds-ros-pipeline
+    network_mode: host
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      CDCL_ROS_SETUP: ${CDCL_ROS_WS:-/home/user/ros2_ws}/install/setup.bash
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      TERM: xterm-256color
+    volumes:
+      - ..:${WORKSPACE_DIR:-/workspace/deepstream-work}
+      - ${CDCL_ROS_WS:-/home/user/ros2_ws}:${CDCL_ROS_WS:-/home/user/ros2_ws}:ro
+    working_dir: ${WORKSPACE_DIR:-/workspace/deepstream-work}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: bash -lc ds_ros_pipeline/run.sh

@@ -41,11 +41,14 @@ class CaptureKind(enum.Enum):
 
 
 class Mode(enum.Enum):
-    """Continuous-run state: off, or on with assessment off/on.
+    """DERIVED view of the continuous state, for /ds/status only.
 
-    DETECT and DETECT_ASSESS are the SAME stream of auto-runs differing only
-    in whether the assess valve opens — not two competing modes. Moving
-    between them therefore keeps the stream running (see ``set_mode``).
+    The real state is two independent booleans on GrabState — detection on/off
+    and assessment on/off, set by the two toggle services. This enum is what
+    that pair looks like from outside; nothing stores it. Note there is no
+    value for "stopped but assessment armed": while detection is off the
+    assessment flag is remembered but the stream reads as ``off``, which is
+    the only thing an observer can act on.
     """
 
     OFF = "off"
@@ -173,7 +176,8 @@ class GrabState:
       on_frame                 -- Gst streaming thread (grab probe), 1/frame
       arm                      -- grp_capture service threads
       request_enqueue, clear   -- grp_fast service thread
-      set_mode                 -- grp_fast service thread
+      set_continuous_detection, set_continuous_assessment
+                               -- grp_fast service thread
       take_pending             -- batch worker thread (manual run dispatch)
       take_continuous, continuous_depth -- batch worker thread
       pending_depth, counters  -- /ds/status timer thread
@@ -188,7 +192,11 @@ class GrabState:
         self._pending: deque[BatchItem] = deque()
         self._pending_continuous: deque[BatchItem] = deque(
             maxlen=config.continuous_capacity)
-        self._mode = Mode.OFF
+        # Two independent flags, one per toggle service. Assessment is
+        # remembered while detection is off, so arming it ahead of time and
+        # then starting the stream does what it looks like it does.
+        self._continuous_on = False
+        self._continuous_assess = False
         self._stride_count = 0
         # Manual only: it exists solely so request_enqueue's admission check
         # cannot over-admit during the copy window. Tracking continuous frames
@@ -244,7 +252,7 @@ class GrabState:
             if manual:
                 self._pending_enqueues -= 1
             fire = False
-            if self._mode is not Mode.OFF:
+            if self._continuous_on:
                 # Stride clock advances on EVERY frame while mode is on,
                 # regardless of who consumes the frame (steady cadence).
                 fire = self._stride_count % self._config.continuous_stride == 0
@@ -379,27 +387,51 @@ class GrabState:
             self._pending_continuous.clear()
             return removed
 
-    def set_mode(self, mode: Mode) -> Mode:
-        """Set the continuous-run mode; returns the previous one.
+    def set_continuous_detection(self, on: bool) -> bool:
+        """Start/stop the continuous stream (/ds/mode/toggle_detection).
 
-        The stride clock resets only when continuous starts or stops, NOT
-        when DETECT and DETECT_ASSESS swap: that swap only decides whether
-        the worker opens the assess valve, so the auto-enqueue cadence
-        carries straight through it. Resetting there would put a seam in what
-        is meant to be one uninterrupted stream.
+        Returns the previous state. The stride clock resets on a real
+        transition, so a restarted stream begins a fresh cadence. Leaves the
+        assessment flag untouched — that is the other toggle's business.
         """
         with self._lock:
-            previous = self._mode
-            if mode is not previous:
-                if previous is Mode.OFF or mode is Mode.OFF:
-                    self._stride_count = 0
-                self._mode = mode
+            previous = self._continuous_on
+            if on is not previous:
+                self._continuous_on = on
+                self._stride_count = 0
+            return previous
+
+    def set_continuous_assessment(self, assess: bool) -> bool:
+        """Enable/disable assessment (/ds/mode/toggle_assessment).
+
+        Returns the previous state. Independent of whether the stream is
+        running: it only decides whether the worker opens the assess valve on
+        the next run, so flipping it mid-stream must NOT disturb the stride
+        clock — that would put a seam in what is one uninterrupted stream —
+        and setting it while stopped is remembered for when detection starts.
+        """
+        with self._lock:
+            previous = self._continuous_assess
+            self._continuous_assess = assess
             return previous
 
     @property
-    def mode(self) -> Mode:
+    def continuous_on(self) -> bool:
         with self._lock:
-            return self._mode
+            return self._continuous_on
+
+    @property
+    def continuous_assess(self) -> bool:
+        with self._lock:
+            return self._continuous_assess
+
+    @property
+    def mode(self) -> Mode:
+        """The two flags as the single derived Mode /ds/status publishes."""
+        with self._lock:
+            if not self._continuous_on:
+                return Mode.OFF
+            return Mode.DETECT_ASSESS if self._continuous_assess else Mode.DETECT
 
     @staticmethod
     def _take_newest(queue: "deque[BatchItem]",

@@ -482,7 +482,7 @@ class BatchWorker:
     Constructed with the grab state (source of take_pending/take_continuous),
     the parts, the collector, and publish callbacks injected by ros_io — the
     run's trigger selects which fire per frame result:
-      publish_detections(result) -> None   run_detect / continuous_detect:
+      publish_detections(result) -> None   run_detect / continuous run:
                                       one TargetBoxArray, annotations empty
       publish_assessments(result) -> None  run_detect_assess / continuous:
                                       one TargetBoxArray, annotations filled

@@ -388,13 +388,13 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual(state.take_pending(), [])
 
     def test_continuous_stride_auto_enqueue(self):
-        """Mode.DETECT auto-enqueues every stride-th frame INTO THE CONTINUOUS
-        deque; a DETECT <-> DETECT_ASSESS swap does not interrupt that
-        cadence, only OFF does."""
+        """Detection on auto-enqueues every stride-th frame INTO THE
+        CONTINUOUS deque; toggling assessment does not interrupt that cadence,
+        only toggling detection does."""
         state, _ = _grab_state(continuous_stride=3)
         copy = _CopySpy()
 
-        self.assertIs(state.set_mode(Mode.DETECT), Mode.OFF)
+        self.assertFalse(state.set_continuous_detection(True))
         self.assertIs(state.mode, Mode.DETECT)
         # 8 frames, deliberately NOT a multiple of the stride: the counter is
         # left mid-cycle (8 % 3 == 2), so the cadence assertions below can
@@ -410,15 +410,16 @@ class TestGrabState(unittest.TestCase):
         # Enabling assessment on a running stream only moves the valve flag:
         # the stride clock carries on mid-cycle, so the NEXT fire lands on
         # the 9th frame of the sequence (index 9 % 3 == 0), not immediately.
-        self.assertIs(state.set_mode(Mode.DETECT_ASSESS), Mode.DETECT)
+        self.assertFalse(state.set_continuous_assessment(True))
         self.assertIs(state.mode, Mode.DETECT_ASSESS)
         state.on_frame(2000, 1, copy)          # counter 8 -> no fire
         self.assertEqual(state.continuous_depth(), 0)
         state.on_frame(2001, 1, copy)          # counter 9 -> fire
         self.assertEqual([item.pts for item in state.take_continuous()], [2001])
 
-        # Same-mode set is a no-op: the stride clock keeps running.
-        self.assertIs(state.set_mode(Mode.DETECT_ASSESS), Mode.DETECT_ASSESS)
+        # Re-setting the same value is a no-op: the stride clock keeps
+        # running.
+        self.assertTrue(state.set_continuous_assessment(True))
         for pts in (2002, 2003):
             state.on_frame(pts, 1, copy)
         self.assertEqual(state.continuous_depth(), 0)
@@ -426,16 +427,17 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual([item.pts for item in state.take_continuous()], [2004])
 
         # Disabling assessment likewise leaves the cadence untouched.
-        self.assertIs(state.set_mode(Mode.DETECT), Mode.DETECT_ASSESS)
+        self.assertTrue(state.set_continuous_assessment(False))
         for pts in (2005, 2006):
             state.on_frame(pts, 1, copy)
         self.assertEqual(state.continuous_depth(), 0)
         state.on_frame(2007, 1, copy)
         self.assertEqual([item.pts for item in state.take_continuous()], [2007])
 
-        # OFF and back on DOES reset the clock: the next frame fires at once.
-        self.assertIs(state.set_mode(Mode.OFF), Mode.DETECT)
-        self.assertIs(state.set_mode(Mode.DETECT), Mode.OFF)
+        # Toggling DETECTION off and back on DOES reset the clock: the next
+        # frame fires at once.
+        self.assertTrue(state.set_continuous_detection(False))
+        self.assertFalse(state.set_continuous_detection(True))
         state.on_frame(2500, 1, copy)
         self.assertEqual([item.pts for item in state.take_continuous()], [2500])
 
@@ -452,13 +454,46 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual(state.continuous_depth(), 0)
         self.assertEqual([item.pts for item in state.take_pending()], [3000])
 
-        # OFF stops auto-enqueue.
-        self.assertIs(state.set_mode(Mode.OFF), Mode.DETECT)
+        # Detection off stops auto-enqueue.
+        self.assertTrue(state.set_continuous_detection(False))
         before = copy.count
         for pts in (4000, 4001, 4002):
             state.on_frame(pts, 1, copy)
         self.assertEqual(copy.count, before)
         self.assertEqual(state.continuous_depth(), 0)
+
+    def test_detection_and_assessment_toggles_are_independent(self):
+        """The two toggle services own one flag each. Neither reaches into the
+        other's: toggling detection never changes the assessment setting, and
+        toggling assessment never starts or stops the stream."""
+        state, _ = _grab_state(continuous_stride=1)
+        copy = _CopySpy()
+
+        # Assessment armed while the stream is stopped is REMEMBERED, and
+        # nothing starts running because of it.
+        self.assertFalse(state.set_continuous_assessment(True))
+        self.assertTrue(state.continuous_assess)
+        self.assertFalse(state.continuous_on)
+        self.assertIs(state.mode, Mode.OFF)
+        state.on_frame(100, 1, copy)
+        self.assertEqual(state.continuous_depth(), 0, "stream ran while off")
+
+        # Starting detection picks up the remembered setting.
+        state.set_continuous_detection(True)
+        self.assertIs(state.mode, Mode.DETECT_ASSESS)
+
+        # Stopping and restarting detection preserves it — the stop does not
+        # silently clear the assessment flag.
+        state.set_continuous_detection(False)
+        self.assertTrue(state.continuous_assess)
+        self.assertIs(state.mode, Mode.OFF)
+        state.set_continuous_detection(True)
+        self.assertIs(state.mode, Mode.DETECT_ASSESS)
+
+        # Retracting assessment leaves the stream running.
+        self.assertTrue(state.set_continuous_assessment(False))
+        self.assertTrue(state.continuous_on)
+        self.assertIs(state.mode, Mode.DETECT)
 
     def test_take_selects_newest_but_returns_stamp_order(self):
         """A queue longer than one run: the run must take the FRESHEST frames
@@ -495,7 +530,7 @@ class TestGrabState(unittest.TestCase):
         is why the two cannot share one policy."""
         state, _ = _grab_state(continuous_stride=1, continuous_capacity=2)
         copy = _CopySpy()
-        state.set_mode(Mode.DETECT)
+        state.set_continuous_detection(True)
 
         for pts in (1, 2):
             state.on_frame(pts, 1, copy)
@@ -519,7 +554,7 @@ class TestGrabState(unittest.TestCase):
         them as continuous output."""
         state, _ = _grab_state(continuous_stride=2)
         copy = _CopySpy()
-        state.set_mode(Mode.DETECT)
+        state.set_continuous_detection(True)
 
         # Frame 100: stride fire (counter 0). Frame 101: manual takes
         # precedence over the counter, and the counter still advances.
@@ -537,8 +572,8 @@ class TestGrabState(unittest.TestCase):
         # Turning the mode off discards the stream's leftovers but keeps the
         # operator's frames (ros_io._set_continuous relies on exactly this).
         # OFF -> DETECT resets the stride clock, so 200 is a fire frame.
-        state.set_mode(Mode.OFF)
-        state.set_mode(Mode.DETECT)
+        state.set_continuous_detection(False)
+        state.set_continuous_detection(True)
         state.on_frame(200, 1, copy)
         self.assertTrue(state.request_enqueue()[0])
         state.on_frame(201, 1, copy)
@@ -717,7 +752,7 @@ class TestBatchPublishDispatch(unittest.TestCase):
     def _queue_continuous(self, n):
         """Fill the continuous deque with n stride-fired frames."""
         copy = _CopySpy()
-        self.grab.set_mode(Mode.DETECT)
+        self.grab.set_continuous_detection(True)
         stride = PipelineConfig().continuous_stride
         for index in range(n * stride):
             self.grab.on_frame(5000 + index, 1, copy)

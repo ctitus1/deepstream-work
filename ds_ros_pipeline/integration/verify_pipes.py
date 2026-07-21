@@ -4,10 +4,11 @@ Subscribes to both TargetBoxArray topics, drives the services, and asserts the
 published shape: per-frame message count, detection bboxes, annotations, and
 the use_for_assessment flag.
 
-The last section asserts the concurrency contract instead of message shape:
-one-shot captures and recording are served while a continuous stream runs,
-and the two continuous services move the assessment flag on that one stream
-rather than stopping and restarting it.
+The last sections assert the concurrency contract instead of message shape:
+one-shot captures and recording are served while a continuous stream runs;
+toggle_assessment moves only the assessment flag without stopping the stream;
+and a manual batch run takes priority over the stream and gets exactly the
+frames the operator enqueued.
 """
 import os
 import sys
@@ -416,8 +417,8 @@ def main():
 
     # ---- pipe 4: everything at once ----
     print("\n== pipe 4: concurrent operation ==")
-    resp = node.set_bool("/ds/mode/continuous_detect", True)
-    check("continuous detect starts", resp.success, resp.message)
+    resp = node.set_bool("/ds/mode/toggle_detection", True)
+    check("toggle_detection starts the stream", resp.success, resp.message)
     check("/ds/status reports mode detect",
           node.await_status("mode", "detect"), f"mode={node.mode}")
     node.batch.clear()
@@ -447,16 +448,15 @@ def main():
     check("the vlm array still landed on its own topic", len(node.vlm) == 1,
           f"{len(node.vlm)} messages")
 
-    # Asking for the other continuous mode moves the assessment flag on the
-    # running stream; it must not stop it, so arrays keep arriving across the
-    # switch and start carrying annotations.
+    # toggle_assessment moves only the assessment flag; it must not stop the
+    # stream, so arrays keep arriving across the switch and start carrying
+    # annotations.
     node.batch.clear()
-    resp = node.set_bool("/ds/mode/continuous_detect_assess", True)
-    check("continuous_detect_assess accepted while detect runs",
+    resp = node.set_bool("/ds/mode/toggle_assessment", True)
+    check("toggle_assessment accepted while detection runs",
           resp.success, resp.message)
     check("response says the stream kept running",
-          "still running" in resp.message and "enabled" in resp.message,
-          resp.message)
+          "still running" in resp.message, resp.message)
     check("/ds/status reports mode detect_assess",
           node.await_status("mode", "detect_assess"), f"mode={node.mode}")
     time.sleep(3.0)
@@ -470,10 +470,9 @@ def main():
 
     # ...and retracting it drops back to plain detect WITHOUT stopping.
     node.batch.clear()
-    resp = node.set_bool("/ds/mode/continuous_detect_assess", False)
-    check("continuous_detect_assess=false only retracts the assessment",
-          resp.success and "still running" in resp.message
-          and "disabled" in resp.message, resp.message)
+    resp = node.set_bool("/ds/mode/toggle_assessment", False)
+    check("toggle_assessment=false only retracts the assessment",
+          resp.success and "still running" in resp.message, resp.message)
     check("/ds/status reports mode detect again",
           node.await_status("mode", "detect"), f"mode={node.mode}")
     time.sleep(2.0)
@@ -511,8 +510,8 @@ def main():
 
     resp = node.call("/ds/record/stop")
     check("record/stop succeeds", resp.success, resp.message)
-    resp = node.set_bool("/ds/mode/continuous_detect", False)
-    check("continuous_detect=false stops the stream outright",
+    resp = node.set_bool("/ds/mode/toggle_detection", False)
+    check("toggle_detection=false stops the stream outright",
           resp.success and "off" in resp.message, resp.message)
     check("/ds/status reports mode off",
           node.await_status("mode", "off"), f"mode={node.mode}")

@@ -58,7 +58,7 @@ import disk
 import frames
 import timestamps
 from config import PipelineConfig
-from frames import CaptureKind, Mode
+from frames import CaptureKind
 
 CAPTURE_TIMEOUT_S = 2.0  # Sec 4: capture/snapshot block <= ~2 s for a frame
 SNAPSHOT_WRITE_TIMEOUT_S = 10.0  # bound the disk-worker wait (PNG ~0.2-0.6 s)
@@ -214,8 +214,8 @@ class DsRosNode(Node):
             (Trigger, "/ds/snapshot", self.on_snapshot, self._grp_capture),
             (Trigger, "/ds/batch/enqueue", self.on_enqueue, self._grp_fast),
             (Trigger, "/ds/batch/clear", self.on_clear, self._grp_fast),
-            (SetBool, "/ds/mode/continuous_detect", self.on_continuous_detect, self._grp_fast),
-            (SetBool, "/ds/mode/continuous_detect_assess", self.on_continuous_detect_assess, self._grp_fast),
+            (SetBool, "/ds/mode/toggle_detection", self.on_toggle_detection, self._grp_fast),
+            (SetBool, "/ds/mode/toggle_assessment", self.on_toggle_assessment, self._grp_fast),
             (Trigger, "/ds/batch/run_detect", self.on_run_detect, self._grp_batch),
             (Trigger, "/ds/batch/run_detect_assess", self.on_run_detect_assess, self._grp_batch),
             (Trigger, "/ds/record/start", self.on_record_start, self._grp_record),
@@ -424,7 +424,7 @@ class DsRosNode(Node):
         return detections
 
     def publish_detections(self, result: batch_pipeline.FrameResult) -> None:
-        """run_detect / continuous_detect output: one TargetBoxArray per
+        """run_detect / continuous detection output: one TargetBoxArray per
         batched frame on /uas4/target_detections — detections only (every
         box's annotations empty) plus the compressed frame image; all stamps
         = result.item.ntp_ns. Called from the batch worker thread."""
@@ -555,71 +555,62 @@ class DsRosNode(Node):
         additionally published."""
         return self._answer(response, lambda: self._worker.run_once(assess=True))
 
-    def _set_continuous(self, active: bool, assess: bool) -> tuple[bool, str]:
-        """Shared toggle body: continuous is ONE stream of auto-runs carrying
-        an assessment flag, not two rival modes competing for a single slot.
+    def _toggle_detection(self, on: bool) -> tuple[bool, str]:
+        """/ds/mode/toggle_detection body: start or stop the stream.
 
-        So asking for the mode that is not currently running never stops
-        anything — it just moves the flag on the running stream:
+        Touches ONLY the detection flag — the assessment flag is the other
+        toggle's business and survives untouched, so stopping and restarting
+        the stream resumes with whatever assessment setting was in force.
 
-          detect running,        continuous_detect_assess=true  -> assess on
-          detect_assess running, continuous_detect=true         -> assess off
-          detect_assess running, continuous_detect_assess=false -> assess off
-                                                                  (keeps
-                                                                   streaming)
-          anything running,      continuous_detect=false        -> stream off
-
-        Only ``continuous_detect=false`` stops the stream outright; it also
-        discards the stream's own pending auto-enqueued frames, so leftovers
-        cannot surface later inside an unrelated run (a run already in flight
-        still completes). Manually enqueued frames are deliberately left
-        alone — turning a mode off must not throw away frames the operator
-        picked by hand.
-
-        Reading grab.mode and then setting it is safe without a lock of its
-        own: both toggle callbacks live in grp_fast (MutuallyExclusive), so
-        no second toggle can interleave between the two calls.
+        Stopping also discards the stream's own pending auto-enqueued frames,
+        so leftovers cannot surface later inside an unrelated run (a run
+        already in flight still completes). Manually enqueued frames are
+        deliberately left alone: stopping the stream must not throw away
+        frames the operator picked by hand.
         """
-        current = self._grab.mode
-        if active:
-            target = Mode.DETECT_ASSESS if assess else Mode.DETECT
-        elif assess:
-            # Retracting only the assessment: a running stream drops back to
-            # plain detect rather than stopping.
-            target = Mode.DETECT if current is Mode.DETECT_ASSESS else current
-        else:
-            target = Mode.OFF
-
-        previous = self._grab.set_mode(target)
-        self._worker.set_continuous(target is not Mode.OFF,
-                                    target is Mode.DETECT_ASSESS)
-        if target is Mode.OFF:
+        previous = self._grab.set_continuous_detection(on)
+        self._worker.set_continuous(on, self._grab.continuous_assess)
+        assessing = "with" if self._grab.continuous_assess else "without"
+        if not on:
             discarded = self._grab.clear_continuous()
-            if previous is Mode.OFF:
-                return True, "continuous already off"
-            return True, f"continuous off ({discarded} pending frames discarded)"
-        if previous is Mode.OFF:
-            return True, f"continuous {target.value} on"
-        if previous is target:
-            return True, f"continuous {target.value} unchanged"
-        return True, ("continuous still running, assessment "
-                      + ("enabled" if target is Mode.DETECT_ASSESS
-                         else "disabled"))
+            if not previous:
+                return True, "detection already off"
+            return True, f"detection off ({discarded} pending frames discarded)"
+        if previous:
+            return True, f"detection already on, {assessing} assessment"
+        return True, f"detection on, {assessing} assessment"
 
-    def on_continuous_detect(self, request, response):
-        """/ds/mode/continuous_detect (SetBool, grp_fast): true starts the
-        continuous stream without assessment (disabling it on a stream
-        already running); false stops the stream."""
-        return self._answer(
-            response, lambda: self._set_continuous(request.data, assess=False))
+    def _toggle_assessment(self, on: bool) -> tuple[bool, str]:
+        """/ds/mode/toggle_assessment body: enable or disable assessment.
 
-    def on_continuous_detect_assess(self, request, response):
-        """/ds/mode/continuous_detect_assess (SetBool, grp_fast): true starts
-        the continuous stream with assessment (enabling it on a stream already
-        running); false only retracts the assessment, leaving the stream
-        running as plain detect."""
+        Touches ONLY the assessment flag. It never starts or stops the
+        stream, and never disturbs the stride cadence — mid-stream it just
+        changes whether the next run opens the assess valve. Set while
+        detection is off it is remembered, and applies when detection starts.
+        """
+        previous = self._grab.set_continuous_assessment(on)
+        running = self._grab.continuous_on
+        self._worker.set_continuous(running, on)
+        state = "on" if on else "off"
+        if previous == on:
+            return True, f"assessment already {state}"
+        if running:
+            return True, f"assessment {state} (stream still running)"
+        return True, f"assessment {state} (applies when detection starts)"
+
+    def on_toggle_detection(self, request, response):
+        """/ds/mode/toggle_detection (SetBool, grp_fast): true auto-enqueues
+        every continuous.stride-th frame and auto-runs; false stops that.
+        Independent of /ds/mode/toggle_assessment."""
         return self._answer(
-            response, lambda: self._set_continuous(request.data, assess=True))
+            response, lambda: self._toggle_detection(request.data))
+
+    def on_toggle_assessment(self, request, response):
+        """/ds/mode/toggle_assessment (SetBool, grp_fast): true opens the
+        assess valve on continuous runs, false closes it. Independent of
+        /ds/mode/toggle_detection — it neither starts nor stops the stream."""
+        return self._answer(
+            response, lambda: self._toggle_assessment(request.data))
 
     def _record_start(self) -> tuple[bool, str]:
         reason = self._lifecycle.guard("record_start")

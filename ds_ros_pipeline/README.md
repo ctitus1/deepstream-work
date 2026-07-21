@@ -64,13 +64,30 @@ seamless looping trivial and why the decoder never sees a loop boundary.
 
 ## Bring-up
 
+Pipeline only:
+
 ```bash
 docker compose -f ds_ros_pipeline/compose.yaml up --build ds-ros-pipeline
 ```
 
-That builds `deepstream-work:ds-ros` (a ROS2 Humble layer on top of the
-existing `deepstream-work:7.1` — the base image and every existing compose
-service are untouched) and starts the node via `run.sh`.
+Pipeline **plus a Foxglove bridge**, ready to connect Studio to
+`ws://localhost:8765` — this is the one to use when you want to watch and
+click rather than script:
+
+```bash
+docker compose -f ds_ros_pipeline/compose.yaml up --build
+```
+
+Omitting the service name starts everything in the file; naming
+`ds-ros-pipeline` starts only the pipeline, so the DESIGN.md §10 test
+commands behave exactly as they always did. See
+[Foxglove Studio](#foxglove-studio) below for what to do once connected.
+
+Either command builds `deepstream-work:ds-ros` (a ROS2 Humble layer on top of
+the existing `deepstream-work:7.1` — the base image and every existing compose
+service are untouched) and starts the node via `run.sh`. The second also
+builds `deepstream-work:ros-humble` for the bridge if it is not already
+present.
 
 **First run builds the batch-8 yolo12x TensorRT engine (~1–3 min).** Watch
 the log; services are advertised but detection runs wait until nvinfer
@@ -97,26 +114,92 @@ docker compose -f ds_ros_pipeline/compose.yaml run --rm ds-ros-pipeline \
 The full validated test matrix (16 scripted checks, one observable each) is
 DESIGN.md §10.
 
-## Poking around with Foxglove Studio
+## Foxglove Studio
 
-A second, optional service serves the whole ROS graph over a websocket:
+A second, optional service (`ds-ros-foxglove`) serves the whole ROS graph over
+a websocket, so you can watch the streams and fire the signals by hand.
+
+### Launching it
+
+1. **Start the stack with the bridge.** Either bring both up together, or add
+   the bridge to a pipeline that is already running — DDS discovery makes the
+   order irrelevant, and the bridge can be restarted on its own at any time:
+
+   ```bash
+   # both, from cold
+   docker compose -f ds_ros_pipeline/compose.yaml up --build
+
+   # or: pipeline already up, add the bridge
+   docker compose -f ds_ros_pipeline/compose.yaml up -d ds-ros-foxglove
+   ```
+
+2. **Check it is listening.** The log should end with a line naming the port,
+   followed by one `Advertising new channel` line per topic:
+
+   ```bash
+   docker logs ds-ros-foxglove | grep -E 'Server listening|Advertising'
+   ```
+
+3. **Connect a Foxglove app** to **`ws://localhost:8765`** — see
+   [Viewing from a desktop app](#viewing-from-a-desktop-app) below.
+
+4. **Stop it** without touching the pipeline:
+
+   ```bash
+   docker compose -f ds_ros_pipeline/compose.yaml stop ds-ros-foxglove
+   ```
+
+`FOXGLOVE_PORT` moves the websocket off 8765; any other `foxglove_bridge`
+launch argument goes through `FOXGLOVE_ARGS` (example under *Large raw
+frames* below). Neither needs a file edit:
 
 ```bash
-docker compose -f ds_ros_pipeline/compose.yaml up          # pipeline + bridge
-docker compose -f ds_ros_pipeline/compose.yaml up ds-ros-foxglove   # bridge alone
+FOXGLOVE_PORT=9000 docker compose -f ds_ros_pipeline/compose.yaml up -d ds-ros-foxglove
 ```
 
-Then connect Foxglove Studio to **`ws://localhost:8765`**. Naming
-`ds-ros-pipeline` explicitly still starts only the pipeline, so nothing about
-the §10 test commands changes.
+### Viewing from a desktop app
 
-The bridge runs in the existing `deepstream-work:ros-humble` image, which
-already carries `foxglove_bridge` — layering it onto the 21.6 GB DeepStream
-image for a pure-visualization add-on would be the expensive way round. The
-two containers find each other over host networking and host IPC, the same
-way the root compose's ROS services already do.
+The bridge listens on `0.0.0.0:8765` of the **host** (the service uses
+`network_mode: host`, so there is no port to publish and no container
+address to look up).
 
-What is usable once connected (all verified against a live pipeline):
+**On this machine.** Foxglove Studio is already installed here (2.57.0):
+
+```bash
+foxglove-studio        # or launch "Foxglove" from the desktop
+```
+
+In the app: *Open connection… → Foxglove WebSocket →* `ws://localhost:8765`
+*→ Open*. The connection dialog remembers it, so later sessions are one
+click.
+
+**From another machine on the LAN.** Use the host's address instead of
+`localhost` — this host is `192.168.1.3`:
+
+```
+ws://192.168.1.3:8765
+```
+
+Nothing needs to change server-side; just make sure port 8765 is not blocked
+by a firewall between the two machines.
+
+**In a browser** (`app.foxglove.dev`) the same `ws://localhost:8765` works,
+because browsers exempt localhost from the mixed-content rule that otherwise
+blocks an insecure websocket from an HTTPS page. That exemption does *not*
+extend to a remote host, so use the desktop app when connecting to
+`192.168.1.3`.
+
+**Version note:** this bridge (3.4.2) speaks only the newer
+`foxglove.sdk.v1` subprotocol and rejects a client offering just the legacy
+`foxglove.websocket.v1` with `400 Bad Request`. Studio 2.x offers both and
+negotiates `foxglove.sdk.v1` — verified against the installed 2.57.0, whose
+bundle declares `SUPPORTED_SUBPROTOCOLS = ["foxglove.websocket.v1",
+"foxglove.sdk.v1"]`. Only a genuinely old (1.x-era) build would fail to
+connect, and the fix there is updating Studio, not a bridge flag.
+
+### Once connected
+
+Both of these are verified working against a live pipeline:
 
 - **Every topic**, including the two `cdcl_umd_msgs` ones —
   `/ds/detections` and `/ds/assessments` deserialize because the colcon
@@ -129,12 +212,8 @@ What is usable once connected (all verified against a live pipeline):
   fastest way to drive the pipeline by hand: fire `/ds/capture/mosaic` and
   watch exactly one frame appear.
 
-Two things worth knowing:
+One thing worth knowing:
 
-- **Studio version.** This bridge (3.4.2) speaks only the newer
-  `foxglove.sdk.v1` websocket subprotocol; it answers `400 Bad Request` to a
-  client offering the older `foxglove.websocket.v1`. An old Studio build that
-  cannot connect needs updating, not a bridge flag.
 - **Large raw frames.** `/vlm_raw` messages are 11,059,256 B, just over
   `foxglove_bridge`'s 10 MB `send_buffer_limit` default — but that limit caps
   a per-client *backlog*, not one message, and an A/B against a stock bridge
@@ -145,11 +224,15 @@ Two things worth knowing:
 
   ```bash
   FOXGLOVE_ARGS="send_buffer_limit:=67108864" \
-    docker compose -f ds_ros_pipeline/compose.yaml up ds-ros-foxglove
+    docker compose -f ds_ros_pipeline/compose.yaml up -d ds-ros-foxglove
   ```
 
-`FOXGLOVE_PORT` moves the websocket off 8765; any other launch argument goes
-through `FOXGLOVE_ARGS`.
+The bridge itself runs in the existing `deepstream-work:ros-humble` image,
+which already carries `foxglove_bridge` — layering it onto the 21.6 GB
+DeepStream image for a pure-visualization add-on would be the expensive way
+round. The two containers find each other over host networking and host IPC,
+the same way the root compose's ROS services already do, which is why the
+bridge needs no GPU and can come and go independently of the pipeline.
 
 ## Services
 
@@ -298,6 +381,17 @@ queued. The process runs until SIGINT.
   `cdcl_umd_msgs` workspace is missing or mounted at the wrong path. Set
   `CDCL_ROS_WS` to the workspace root (the directory containing
   `install/setup.bash`); compose mounts it read-only at that same path.
+- **`ds-ros-pipeline` exits 139 (SIGSEGV) seconds after starting, with
+  `N zombie ports cleaned` in the log** — a Fast DDS participant was killed
+  without releasing its shared-memory segments (`docker kill`, or killing a
+  `ros2` process by hand), and the next participant can fault on the
+  leftovers during `rclpy` node construction. `run.sh` runs `fastdds shm
+  clean` at startup precisely for this, which handles it in almost every
+  case; observed once in 11 starts while processes were being killed
+  manually. Just relaunch — `up -d` again succeeds, and 4/4 deliberate
+  kill-then-relaunch cycles came up clean. If it ever repeats, `docker
+  compose ... down` and confirm no stray participant is holding
+  `/dev/shm/fastrtps_*`.
 - **Long pause before the first detection run** — the one-time b8 engine
   build (~1–3 min). Subsequent starts load the cached engine from `models/`.
 - **First loop is 16 frames short** — expected cold-start RASL discard, once

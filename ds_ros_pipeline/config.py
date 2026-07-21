@@ -24,10 +24,16 @@ class PipelineConfig:
     source_uri: str = DEFAULT_SOURCE_URI          # source.uri
     source_loop: bool = True                      # source.loop (AU-replay loop, Sec 3.1/5)
     source_max_preload_mb: int = 1024             # source.max_preload_mb guard (Sec 11 risk 6)
-    batch_capacity: int = 16                      # batch.capacity (BatchItem deque cap)
+    batch_capacity: int = 16                      # batch.capacity (manual BatchItem deque cap)
     batch_engine_batch: int = 8                   # batch.engine_batch (b8 engine / mux batch-size)
     continuous_stride: int = 3                    # continuous.stride
     continuous_run_size: int = 4                  # continuous.run_size
+    # continuous.capacity — the continuous deque's cap, separate from
+    # batch.capacity so the stream cannot eat the operator's enqueue budget.
+    # Small on purpose: the deque drops its OLDEST entry when full, so a deep
+    # buffer would only hold frames too stale to be worth inferring. At the
+    # default stride (~10 Hz) and run_size 4 the depth rarely exceeds 4.
+    continuous_capacity: int = 8
     preview_width: int = 640                      # preview.width
     preview_height: int = 360                     # preview.height
     preview_quality: int = 75                     # preview.quality
@@ -54,6 +60,7 @@ PARAMETER_MAP: dict[str, str] = {
     "batch.engine_batch": "batch_engine_batch",
     "continuous.stride": "continuous_stride",
     "continuous.run_size": "continuous_run_size",
+    "continuous.capacity": "continuous_capacity",
     "preview.width": "preview_width",
     "preview.height": "preview_height",
     "preview.quality": "preview_quality",

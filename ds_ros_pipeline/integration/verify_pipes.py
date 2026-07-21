@@ -1,8 +1,13 @@
-"""End-to-end verification of the three request pipes against the live node.
+"""End-to-end verification of the request pipes against the live node.
 
 Subscribes to both TargetBoxArray topics, drives the services, and asserts the
 published shape: per-frame message count, detection bboxes, annotations, and
 the use_for_assessment flag.
+
+The last section asserts the concurrency contract instead of message shape:
+one-shot captures and recording are served while a continuous stream runs,
+and the two continuous services move the assessment flag on that one stream
+rather than stopping and restarting it.
 """
 import os
 import sys
@@ -13,7 +18,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 from diagnostic_msgs.msg import DiagnosticArray
 
@@ -48,6 +53,8 @@ class Verifier(Node):
                                  self.vlm.append, qos(True))
         self._srv_clients = {}
         self.queue_depth = None
+        self.mode = None
+        self.recording = None
         self.create_subscription(DiagnosticArray, "/ds/status",
                                  self._on_status, qos(False))
 
@@ -56,6 +63,21 @@ class Verifier(Node):
             for kv in status.values:
                 if kv.key == "queue_depth":
                     self.queue_depth = int(kv.value)
+                elif kv.key == "mode":
+                    self.mode = kv.value
+                elif kv.key == "recording":
+                    self.recording = kv.value
+
+    def await_status(self, attr, want, timeout=10.0):
+        """Block until /ds/status reports ``attr == want``. The status timer
+        is 1 Hz, so a toggle is only observable a beat after the service
+        returns; polling here keeps the assertions off that race."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if getattr(self, attr) == want:
+                return True
+            time.sleep(0.05)
+        return False
 
     def enqueue_frames(self, n, timeout=30.0):
         """Enqueue is asynchronous: each call arms the grab for a LATER frame,
@@ -76,6 +98,22 @@ class Verifier(Node):
             if not self._srv_clients[name].wait_for_service(timeout_sec=10.0):
                 raise RuntimeError(f"service {name} not available")
         future = self._srv_clients[name].call_async(Trigger.Request())
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            raise RuntimeError(f"service {name} timed out")
+        return future.result()
+
+    def set_bool(self, name, value, timeout=60.0):
+        key = ("SetBool", name)
+        if key not in self._srv_clients:
+            self._srv_clients[key] = self.create_client(SetBool, name)
+            if not self._srv_clients[key].wait_for_service(timeout_sec=10.0):
+                raise RuntimeError(f"service {name} not available")
+        request = SetBool.Request()
+        request.data = bool(value)
+        future = self._srv_clients[key].call_async(request)
         deadline = time.time() + timeout
         while not future.done() and time.time() < deadline:
             time.sleep(0.02)
@@ -375,6 +413,113 @@ def main():
     time.sleep(2.0)
     check("late subscriber receives the latched vlm array", len(late) >= 1,
           f"{len(late)} messages")
+
+    # ---- pipe 4: everything at once ----
+    print("\n== pipe 4: concurrent operation ==")
+    resp = node.set_bool("/ds/mode/continuous_detect", True)
+    check("continuous detect starts", resp.success, resp.message)
+    check("/ds/status reports mode detect",
+          node.await_status("mode", "detect"), f"mode={node.mode}")
+    node.batch.clear()
+    time.sleep(2.0)
+    streaming = len(node.batch)
+    check("continuous stream is publishing", streaming > 0,
+          f"{streaming} arrays in 2 s")
+
+    # The whole point: one-shots are served WHILE that stream runs.
+    resp = node.call("/ds/record/start")
+    check("record/start accepted during continuous", resp.success, resp.message)
+    check("/ds/status reports recording",
+          node.await_status("recording", "recording"),
+          f"recording={node.recording}")
+
+    node.vlm.clear()
+    resp = node.call("/ds/capture/vlm")
+    check("capture/vlm accepted during continuous + recording",
+          resp.success, resp.message)
+    resp = node.call("/ds/capture/mosaic")
+    check("capture/mosaic accepted during continuous + recording",
+          resp.success, resp.message)
+    resp = node.call("/ds/snapshot")
+    check("snapshot accepted during continuous + recording",
+          resp.success, resp.message)
+    time.sleep(1.0)
+    check("the vlm array still landed on its own topic", len(node.vlm) == 1,
+          f"{len(node.vlm)} messages")
+
+    # Asking for the other continuous mode moves the assessment flag on the
+    # running stream; it must not stop it, so arrays keep arriving across the
+    # switch and start carrying annotations.
+    node.batch.clear()
+    resp = node.set_bool("/ds/mode/continuous_detect_assess", True)
+    check("continuous_detect_assess accepted while detect runs",
+          resp.success, resp.message)
+    check("response says the stream kept running",
+          "still running" in resp.message and "enabled" in resp.message,
+          resp.message)
+    check("/ds/status reports mode detect_assess",
+          node.await_status("mode", "detect_assess"), f"mode={node.mode}")
+    time.sleep(3.0)
+    across = list(node.batch)
+    check("stream never stopped across the switch", len(across) > 0,
+          f"{len(across)} arrays after the switch")
+    check("assessment is now running",
+          any(b.annotations for m in across for b in m.uav_target_boxes),
+          f"{sum(1 for b in all_boxes(across) if b.annotations)} annotated of "
+          f"{len(all_boxes(across))} boxes")
+
+    # ...and retracting it drops back to plain detect WITHOUT stopping.
+    node.batch.clear()
+    resp = node.set_bool("/ds/mode/continuous_detect_assess", False)
+    check("continuous_detect_assess=false only retracts the assessment",
+          resp.success and "still running" in resp.message
+          and "disabled" in resp.message, resp.message)
+    check("/ds/status reports mode detect again",
+          node.await_status("mode", "detect"), f"mode={node.mode}")
+    time.sleep(2.0)
+    check("stream still publishing after retracting assessment",
+          len(node.batch) > 0, f"{len(node.batch)} arrays")
+
+    # ---- pipe 5: manual batch priority + queue separation ----
+    # The stream is still running here, which is the point: a manual run must
+    # get exactly the frames the operator enqueued, and must not have to wait
+    # for the stream to stop.
+    print("\n== pipe 5: manual batch priority (continuous still running) ==")
+    n_manual = 3
+    check("/ds/batch/clear accepted", node.call("/ds/batch/clear").success)
+    filled = node.enqueue_frames(n_manual)
+    check("queue_depth counts ONLY the manually enqueued frames", filled,
+          f"queue_depth={node.queue_depth}, wanted {n_manual}"
+          " (a shared depth would never settle while continuous runs)")
+
+    node.batch.clear()
+    started = time.time()
+    resp = node.call("/ds/batch/run_detect")
+    elapsed = time.time() - started
+    check("run_detect succeeds while continuous is running",
+          resp.success, resp.message)
+    # The decisive assertion: exactly n_manual frames, not a mix. Before the
+    # queues were split, a continuous auto-run would have consumed some of
+    # these and this run would report fewer (or stale) frames.
+    check(f"the manual run covers exactly the {n_manual} enqueued frames",
+          f"{n_manual}/{n_manual} frames" in resp.message, resp.message)
+    # Priority: it waits for at most the one auto-run already in flight.
+    check("manual run was not made to wait for the stream", elapsed < 10.0,
+          f"{elapsed:.2f}s to complete")
+    check("queue_depth back to 0", node.await_status("queue_depth", 0),
+          f"queue_depth={node.queue_depth}")
+
+    resp = node.call("/ds/record/stop")
+    check("record/stop succeeds", resp.success, resp.message)
+    resp = node.set_bool("/ds/mode/continuous_detect", False)
+    check("continuous_detect=false stops the stream outright",
+          resp.success and "off" in resp.message, resp.message)
+    check("/ds/status reports mode off",
+          node.await_status("mode", "off"), f"mode={node.mode}")
+    node.batch.clear()
+    time.sleep(2.0)
+    check("nothing publishes once continuous is off", len(node.batch) == 0,
+          f"{len(node.batch)} arrays")
 
     print("\n" + ("ALL CHECKS PASSED" if not FAILURES
                   else f"FAILURES: {FAILURES}"))

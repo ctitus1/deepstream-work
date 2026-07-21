@@ -9,7 +9,7 @@ with use_for_assessment=True on every box, on the sibling topic
 /uas4/target_detections/vlm. /ds/capture/mosaic publishes a TargetBoxArray
 with no boxes and use_for_mosaic=True on /uas4/target_detections/mosaic.
 /mosaic_compressed, /casualty_image/compressed/vlm and /vlm_raw no longer
-exist. Node name ``ds_pipeline``. Thirteen services in
+exist. Node name ``ds_pipeline``. Eleven services in
 four callback groups (grp_fast MutuallyExclusive; grp_capture REENTRANT;
 grp_record MutuallyExclusive; grp_batch MutuallyExclusive — Sec 4 table),
 five publishers with the exact QoS of the README topics table, a 1 Hz
@@ -212,7 +212,6 @@ class DsRosNode(Node):
             (Trigger, "/ds/capture/mosaic", self.on_capture_mosaic, self._grp_capture),
             (Trigger, "/ds/capture/vlm", self.on_capture_vlm, self._grp_capture),
             (Trigger, "/ds/snapshot", self.on_snapshot, self._grp_capture),
-            (Trigger, "/ds/snapshot_raw", self.on_snapshot_raw, self._grp_capture),
             (Trigger, "/ds/batch/enqueue", self.on_enqueue, self._grp_fast),
             (Trigger, "/ds/batch/clear", self.on_clear, self._grp_fast),
             (SetBool, "/ds/mode/continuous_detect", self.on_continuous_detect, self._grp_fast),
@@ -220,7 +219,6 @@ class DsRosNode(Node):
             (Trigger, "/ds/batch/run_detect", self.on_run_detect, self._grp_batch),
             (Trigger, "/ds/batch/run_detect_assess", self.on_run_detect_assess, self._grp_batch),
             (Trigger, "/ds/record/start", self.on_record_start, self._grp_record),
-            (Trigger, "/ds/record/start_raw", self.on_record_start_raw, self._grp_record),
             (Trigger, "/ds/record/stop", self.on_record_stop, self._grp_record),
         ):
             self.create_service(srv_type, name, callback, callback_group=group)
@@ -504,7 +502,8 @@ class DsRosNode(Node):
         """/ds/capture/vlm (Trigger, grp_capture): arm VLM, wait <= 2 s for
         the next frame, run DETECTION over just that frame via
         worker.run_capture (bypasses the pending queue; serialized with
-        other runs; rejected while a continuous mode is on), and publish the
+        other runs, but accepted whatever else is going on — continuous mode
+        and recording included), and publish the
         detect-run TargetBoxArray with use_for_assessment=True on
         /uas4/target_detections/vlm. Blocks until published
         (capture wait + <= 10 s run). Coalesced calls share one frame and
@@ -532,10 +531,16 @@ class DsRosNode(Node):
         return self._answer(response, body)
 
     def on_clear(self, request, response):
-        """/ds/batch/clear (Trigger, grp_fast): grab.clear() — pending deque
-        only (Sec 4)."""
-        return self._answer(
-            response, lambda: (True, f"cleared {self._grab.clear()} frames"))
+        """/ds/batch/clear (Trigger, grp_fast): empty BOTH pending deques —
+        a literal clear-everything button. Counts are reported separately so
+        it is unambiguous which queue lost what. A snapshot already claimed by
+        a run in flight is unaffected (Sec 4)."""
+        def body() -> tuple[bool, str]:
+            manual, continuous = self._grab.clear()
+            return True, (f"cleared {manual} manual,"
+                          f" {continuous} continuous frames")
+
+        return self._answer(response, body)
 
     def on_run_detect(self, request, response):
         """/ds/batch/run_detect (Trigger, grp_batch): worker.run_once(
@@ -551,46 +556,83 @@ class DsRosNode(Node):
         return self._answer(response, lambda: self._worker.run_once(assess=True))
 
     def _set_continuous(self, active: bool, assess: bool) -> tuple[bool, str]:
-        """Shared toggle body (Sec 4): turning either mode on turns the other
-        off (grab.set_mode does that atomically); off restores Mode.OFF and
-        discards pending auto-enqueued frames so a later manual run starts
-        from a clean queue (a run already in flight still completes)."""
-        mode = Mode.DETECT_ASSESS if assess else Mode.DETECT
+        """Shared toggle body: continuous is ONE stream of auto-runs carrying
+        an assessment flag, not two rival modes competing for a single slot.
+
+        So asking for the mode that is not currently running never stops
+        anything — it just moves the flag on the running stream:
+
+          detect running,        continuous_detect_assess=true  -> assess on
+          detect_assess running, continuous_detect=true         -> assess off
+          detect_assess running, continuous_detect_assess=false -> assess off
+                                                                  (keeps
+                                                                   streaming)
+          anything running,      continuous_detect=false        -> stream off
+
+        Only ``continuous_detect=false`` stops the stream outright; it also
+        discards the stream's own pending auto-enqueued frames, so leftovers
+        cannot surface later inside an unrelated run (a run already in flight
+        still completes). Manually enqueued frames are deliberately left
+        alone — turning a mode off must not throw away frames the operator
+        picked by hand.
+
+        Reading grab.mode and then setting it is safe without a lock of its
+        own: both toggle callbacks live in grp_fast (MutuallyExclusive), so
+        no second toggle can interleave between the two calls.
+        """
+        current = self._grab.mode
         if active:
-            self._grab.set_mode(mode)
-            self._worker.set_continuous(True, assess)
-            return True, f"continuous {mode.value} on"
-        self._grab.set_mode(Mode.OFF)
-        self._worker.set_continuous(False, assess)
-        discarded = self._grab.clear()
-        return True, f"continuous {mode.value} off ({discarded} pending frames discarded)"
+            target = Mode.DETECT_ASSESS if assess else Mode.DETECT
+        elif assess:
+            # Retracting only the assessment: a running stream drops back to
+            # plain detect rather than stopping.
+            target = Mode.DETECT if current is Mode.DETECT_ASSESS else current
+        else:
+            target = Mode.OFF
+
+        previous = self._grab.set_mode(target)
+        self._worker.set_continuous(target is not Mode.OFF,
+                                    target is Mode.DETECT_ASSESS)
+        if target is Mode.OFF:
+            discarded = self._grab.clear_continuous()
+            if previous is Mode.OFF:
+                return True, "continuous already off"
+            return True, f"continuous off ({discarded} pending frames discarded)"
+        if previous is Mode.OFF:
+            return True, f"continuous {target.value} on"
+        if previous is target:
+            return True, f"continuous {target.value} unchanged"
+        return True, ("continuous still running, assessment "
+                      + ("enabled" if target is Mode.DETECT_ASSESS
+                         else "disabled"))
 
     def on_continuous_detect(self, request, response):
-        """/ds/mode/continuous_detect (SetBool, grp_fast): grab.set_mode +
-        worker.set_continuous; turning either mode on turns the other off."""
+        """/ds/mode/continuous_detect (SetBool, grp_fast): true starts the
+        continuous stream without assessment (disabling it on a stream
+        already running); false stops the stream."""
         return self._answer(
             response, lambda: self._set_continuous(request.data, assess=False))
 
     def on_continuous_detect_assess(self, request, response):
-        """/ds/mode/continuous_detect_assess (SetBool, grp_fast): same with
-        the valve open."""
+        """/ds/mode/continuous_detect_assess (SetBool, grp_fast): true starts
+        the continuous stream with assessment (enabling it on a stream already
+        running); false only retracts the assessment, leaving the stream
+        running as plain detect."""
         return self._answer(
             response, lambda: self._set_continuous(request.data, assess=True))
 
-    def _record_start(self, raw: bool) -> tuple[bool, str]:
+    def _record_start(self) -> tuple[bool, str]:
         reason = self._lifecycle.guard("record_start")
         if reason is not None:
             return False, reason
-        return self._recorder.start(raw=raw)
+        return self._recorder.start()
 
     def on_record_start(self, request, response):
-        """/ds/record/start (Trigger, grp_record): recorder.start(raw=False);
-        message = file path; success=false if recording or ended."""
-        return self._answer(response, lambda: self._record_start(raw=False))
-
-    def on_record_start_raw(self, request, response):
-        """/ds/record/start_raw (Trigger, grp_record): raw I420 variant."""
-        return self._answer(response, lambda: self._record_start(raw=True))
+        """/ds/record/start (Trigger, grp_record): recorder.start(); message =
+        file path; success=false if recording or ended. Independent of every
+        capture and batch service — recording occupies its own tee branch and
+        its own callback group, so it neither blocks nor is blocked by them."""
+        return self._answer(response, self._record_start)
 
     def on_record_stop(self, request, response):
         """/ds/record/stop (Trigger, grp_record): recorder.stop(); message =
@@ -608,16 +650,16 @@ class DsRosNode(Node):
 
         return self._answer(response, body)
 
-    def _snapshot(self, raw: bool) -> tuple[bool, str]:
-        kind = CaptureKind.SNAPSHOT_RAW if raw else CaptureKind.SNAPSHOT_PNG
-
+    def on_snapshot(self, request, response):
+        """/ds/snapshot (Trigger, grp_capture): arm SNAPSHOT_PNG, wait for
+        the frame, submit write_png to the disk worker, block until the file
+        is closed; message = path."""
         def produce(captured: frames.CapturedFrame) -> tuple[bool, str]:
             output_dir = Path(self._config.snapshot_output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            path = disk.snapshot_path(output_dir, captured.ntp_ns, raw=raw)
-            writer = disk.write_ppm_with_sidecar if raw else disk.write_png
+            path = disk.snapshot_path(output_dir, captured.ntp_ns)
             done = self._disk_worker.submit(partial(
-                writer, captured.frame_rgba, path, captured.pts,
+                disk.write_png, captured.frame_rgba, path, captured.pts,
                 captured.ntp_ns))
             if not done.wait(SNAPSHOT_WRITE_TIMEOUT_S):
                 return False, f"snapshot write timed out ({path})"
@@ -625,30 +667,29 @@ class DsRosNode(Node):
                 return False, f"snapshot write failed ({path})"
             return True, str(path)
 
-        return self._capture(kind, "snapshot", produce)
-
-    def on_snapshot(self, request, response):
-        """/ds/snapshot (Trigger, grp_capture): arm SNAPSHOT_PNG, wait for
-        the frame, submit write_png to the disk worker, block until the file
-        is closed; message = path."""
-        return self._answer(response, lambda: self._snapshot(raw=False))
-
-    def on_snapshot_raw(self, request, response):
-        """/ds/snapshot_raw (Trigger, grp_capture): .ppm + .json sidecar."""
-        return self._answer(response, lambda: self._snapshot(raw=True))
+        return self._answer(
+            response,
+            lambda: self._capture(CaptureKind.SNAPSHOT_PNG, "snapshot", produce))
 
     def on_status_timer(self) -> None:
         """1 Hz /ds/status (DiagnosticArray, Sec 4): state running|ended,
-        mode, queue depth, recording state, drop counters, loop count
-        (loop_count_fn). grp_fast; non-blocking."""
+        mode, both queue depths, recording state, drop counters, stale
+        results, loop count (loop_count_fn). grp_fast; non-blocking.
+
+        ``queue_depth`` is the MANUAL queue — the number a caller of
+        /ds/batch/enqueue is counting. The continuous stream's buffer is
+        reported separately as ``continuous_queue_depth`` rather than folded
+        in, so N enqueues always report N."""
         state = self._lifecycle.state
         counters = self._grab.counters()
         values = {
             "state": state,
             "mode": self._grab.mode.value,
             "queue_depth": str(self._grab.pending_depth()),
+            "continuous_queue_depth": str(self._grab.continuous_depth()),
             "recording": self._recorder.state,
             "loop_count": str(self._loop_count_fn()),
+            "stale_results": str(self._worker.collector_stale()),
         }
         values.update({key: str(count) for key, count in counters.items()})
 

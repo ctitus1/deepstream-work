@@ -271,12 +271,14 @@ class TestGrabState(unittest.TestCase):
 
         # All armed kinds are served from the same frame with ONE copy.
         mosaic = state.arm(CaptureKind.MOSAIC)
-        snap_raw = state.arm(CaptureKind.SNAPSHOT_RAW)
-        self.assertIsNot(mosaic, snap_raw)
+        snap = state.arm(CaptureKind.SNAPSHOT_PNG)
+        vlm = state.arm(CaptureKind.VLM)
+        self.assertEqual(len({id(mosaic), id(snap), id(vlm)}), 3)
         state.on_frame(166, 333, copy)
         self.assertEqual(copy.count, 3)
         self.assertIs(mosaic.wait(0).frame_rgba, copy.frames[2])
-        self.assertIs(snap_raw.wait(0).frame_rgba, copy.frames[2])
+        self.assertIs(snap.wait(0).frame_rgba, copy.frames[2])
+        self.assertIs(vlm.wait(0).frame_rgba, copy.frames[2])
 
         # Idle frame: nothing armed, no copy.
         state.on_frame(200, 444, copy)
@@ -307,7 +309,7 @@ class TestGrabState(unittest.TestCase):
             state.on_frame(1000 + index * 10, 42 + index, copy)
         self.assertEqual(copy.count, 3)
         self.assertEqual(state.pending_depth(), 3)
-        items = state.swap_pending()
+        items = state.take_pending()
         self.assertEqual([item.pts for item in items], [1000, 1010, 1020])
         self.assertEqual([item.ntp_ns for item in items], [42, 43, 44])
         self.assertEqual([item.frame_rgba for item in items], copy.frames)
@@ -326,7 +328,9 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual(state.pending_depth(), 4)
         self.assertEqual(state.request_enqueue(), (False, 4))
 
-        self.assertEqual(state.clear(), 4)
+        # clear() empties both deques and reports them separately; nothing
+        # was ever auto-enqueued here, so the continuous count is 0.
+        self.assertEqual(state.clear(), (4, 0))
         self.assertEqual(state.pending_depth(), 0)
         self.assertEqual(state.request_enqueue(), (True, 1))
 
@@ -355,11 +359,11 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual(mid_copy, [(False, 2)])
         self.assertEqual(state.pending_depth(), 2)
         self.assertEqual(state.counters()["enqueue_drops"], 0)
-        self.assertEqual([item.pts for item in state.swap_pending()],
+        self.assertEqual([item.pts for item in state.take_pending()],
                          [100, 133])
 
     def test_snapshot_and_swap(self):
-        """swap_pending returns the snapshot; enqueues during a 'run' land in the
+        """take_pending returns the claimed frames; enqueues during a 'run' land in the
         fresh deque and survive; clear empties only the pending deque (Sec 4/6)."""
         state, _ = _grab_state()
         copy = _CopySpy()
@@ -367,7 +371,7 @@ class TestGrabState(unittest.TestCase):
         for pts in (100, 133):
             self.assertTrue(state.request_enqueue()[0])
             state.on_frame(pts, pts * 2, copy)
-        snapshot = state.swap_pending()
+        snapshot = state.take_pending()
         self.assertEqual([item.pts for item in snapshot], [100, 133])
         self.assertEqual(state.pending_depth(), 0)
 
@@ -377,50 +381,76 @@ class TestGrabState(unittest.TestCase):
         self.assertEqual(state.pending_depth(), 1)
         self.assertEqual([item.pts for item in snapshot], [100, 133])
 
-        # clear touches only the pending deque, never the snapshot.
-        self.assertEqual(state.clear(), 1)
+        # clear touches only the live deques, never the snapshot.
+        self.assertEqual(state.clear(), (1, 0))
         self.assertEqual(state.pending_depth(), 0)
         self.assertEqual(len(snapshot), 2)
-        self.assertEqual(state.swap_pending(), [])
+        self.assertEqual(state.take_pending(), [])
 
     def test_continuous_stride_auto_enqueue(self):
-        """Mode.DETECT auto-enqueues every stride-th frame; switching modes is
-        mutually exclusive (Sec 4)."""
+        """Mode.DETECT auto-enqueues every stride-th frame INTO THE CONTINUOUS
+        deque; a DETECT <-> DETECT_ASSESS swap does not interrupt that
+        cadence, only OFF does."""
         state, _ = _grab_state(continuous_stride=3)
         copy = _CopySpy()
 
         self.assertIs(state.set_mode(Mode.DETECT), Mode.OFF)
         self.assertIs(state.mode, Mode.DETECT)
         # 8 frames, deliberately NOT a multiple of the stride: the counter is
-        # left mid-cycle (8 % 3 == 2), so the post-switch immediate fire below
-        # can only pass if set_mode really resets the stride clock.
+        # left mid-cycle (8 % 3 == 2), so the cadence assertions below can
+        # tell a preserved stride clock from a reset one.
         for index in range(8):
             state.on_frame(1000 + index, 1, copy)
-        self.assertEqual([item.pts for item in state.swap_pending()],
+        # Continuous frames land in their OWN deque: the manual queue, which a
+        # manual run_detect would swap, stays empty throughout.
+        self.assertEqual(state.pending_depth(), 0)
+        self.assertEqual([item.pts for item in state.take_continuous()],
                          [1000, 1003, 1006])
 
-        # Turning the other mode on turns this one off (single mode slot)
-        # and resets the stride clock: the next frame fires immediately.
+        # Enabling assessment on a running stream only moves the valve flag:
+        # the stride clock carries on mid-cycle, so the NEXT fire lands on
+        # the 9th frame of the sequence (index 9 % 3 == 0), not immediately.
         self.assertIs(state.set_mode(Mode.DETECT_ASSESS), Mode.DETECT)
         self.assertIs(state.mode, Mode.DETECT_ASSESS)
-        state.on_frame(2000, 1, copy)
-        self.assertEqual([item.pts for item in state.swap_pending()], [2000])
+        state.on_frame(2000, 1, copy)          # counter 8 -> no fire
+        self.assertEqual(state.continuous_depth(), 0)
+        state.on_frame(2001, 1, copy)          # counter 9 -> fire
+        self.assertEqual([item.pts for item in state.take_continuous()], [2001])
 
         # Same-mode set is a no-op: the stride clock keeps running.
         self.assertIs(state.set_mode(Mode.DETECT_ASSESS), Mode.DETECT_ASSESS)
-        for pts in (2001, 2002):
+        for pts in (2002, 2003):
             state.on_frame(pts, 1, copy)
-        self.assertEqual(state.pending_depth(), 0)
-        state.on_frame(2003, 1, copy)
-        self.assertEqual([item.pts for item in state.swap_pending()], [2003])
+        self.assertEqual(state.continuous_depth(), 0)
+        state.on_frame(2004, 1, copy)
+        self.assertEqual([item.pts for item in state.take_continuous()], [2004])
 
-        # Manual enqueue on a stride-fire frame: at most one item per frame.
+        # Disabling assessment likewise leaves the cadence untouched.
         self.assertIs(state.set_mode(Mode.DETECT), Mode.DETECT_ASSESS)
+        for pts in (2005, 2006):
+            state.on_frame(pts, 1, copy)
+        self.assertEqual(state.continuous_depth(), 0)
+        state.on_frame(2007, 1, copy)
+        self.assertEqual([item.pts for item in state.take_continuous()], [2007])
+
+        # OFF and back on DOES reset the clock: the next frame fires at once.
+        self.assertIs(state.set_mode(Mode.OFF), Mode.DETECT)
+        self.assertIs(state.set_mode(Mode.DETECT), Mode.OFF)
+        state.on_frame(2500, 1, copy)
+        self.assertEqual([item.pts for item in state.take_continuous()], [2500])
+
+        # Manual enqueue on a stride-fire frame: at most one item per frame,
+        # and it goes to the MANUAL deque, not the continuous one.
+        # Walk the clock back around so 3000 is genuinely a fire frame.
+        for pts in (2501, 2502):
+            state.on_frame(pts, 1, copy)
+        self.assertEqual(state.continuous_depth(), 0)
         before = copy.count
         self.assertTrue(state.request_enqueue()[0])
         state.on_frame(3000, 1, copy)
         self.assertEqual(copy.count, before + 1)
-        self.assertEqual([item.pts for item in state.swap_pending()], [3000])
+        self.assertEqual(state.continuous_depth(), 0)
+        self.assertEqual([item.pts for item in state.take_pending()], [3000])
 
         # OFF stops auto-enqueue.
         self.assertIs(state.set_mode(Mode.OFF), Mode.DETECT)
@@ -428,15 +458,93 @@ class TestGrabState(unittest.TestCase):
         for pts in (4000, 4001, 4002):
             state.on_frame(pts, 1, copy)
         self.assertEqual(copy.count, before)
-        self.assertEqual(state.pending_depth(), 0)
+        self.assertEqual(state.continuous_depth(), 0)
 
-        # Deque at capacity: continuous mode skips and counts, never blocks.
-        tight, _ = _grab_state(continuous_stride=1, batch_capacity=1)
-        tight.set_mode(Mode.DETECT)
-        tight.on_frame(1, 1, copy)
-        tight.on_frame(2, 1, copy)
-        self.assertEqual(tight.pending_depth(), 1)
-        self.assertEqual(tight.counters()["continuous_skips"], 1)
+    def test_take_selects_newest_but_returns_stamp_order(self):
+        """A queue longer than one run: the run must take the FRESHEST frames
+        (selection from the newest end), yet hand them back oldest-first so
+        the published TargetBoxArray stamps never move backwards while seq
+        moves forwards. Duplicate pts are dropped — the collector joins
+        results to items by pts, so two items sharing one would collide."""
+        state, _ = _grab_state(batch_capacity=8)
+        copy = _CopySpy()
+        for pts in (100, 200, 300, 400, 500):
+            self.assertTrue(state.request_enqueue()[0])
+            state.on_frame(pts, pts, copy)
+        self.assertEqual(state.pending_depth(), 5)
+
+        # Newest three selected...
+        batch = state.take_pending(3)
+        self.assertEqual([item.pts for item in batch], [300, 400, 500])
+        # ...and the stale tail is still queued for the next run, not dropped.
+        self.assertEqual(state.pending_depth(), 2)
+        self.assertEqual([item.pts for item in state.take_pending()],
+                         [100, 200])
+
+        # limit=None takes everything, same ordering rule.
+        for pts in (10, 20):
+            self.assertTrue(state.request_enqueue()[0])
+            state.on_frame(pts, pts, copy)
+        self.assertEqual([item.pts for item in state.take_pending()], [10, 20])
+
+    def test_continuous_deque_drops_the_oldest_when_full(self):
+        """The continuous deque is a live buffer: at capacity it EVICTS THE
+        OLDEST so the stream never infers a stale backlog, and counts the
+        eviction as continuous_skips. The manual deque does the opposite (see
+        test_enqueue_counter_does_not_coalesce: it refuses at capacity), which
+        is why the two cannot share one policy."""
+        state, _ = _grab_state(continuous_stride=1, continuous_capacity=2)
+        copy = _CopySpy()
+        state.set_mode(Mode.DETECT)
+
+        for pts in (1, 2):
+            state.on_frame(pts, 1, copy)
+        self.assertEqual(state.continuous_depth(), 2)
+        self.assertEqual(state.counters()["continuous_skips"], 0)
+
+        state.on_frame(3, 1, copy)
+        self.assertEqual(state.continuous_depth(), 2)
+        self.assertEqual(state.counters()["continuous_skips"], 1)
+        # pts 1 evicted, the two NEWEST survive.
+        self.assertEqual([item.pts for item in state.take_continuous()], [2, 3])
+        # The eviction is charged to the continuous stream, not to the
+        # operator's manual enqueue budget.
+        self.assertEqual(state.counters()["enqueue_drops"], 0)
+
+    def test_manual_and_continuous_queues_are_independent(self):
+        """The separation contract: a continuous auto-run must never consume a
+        hand-picked frame, and a manual run must never consume a strided one.
+        Regression for the long-standing bug where one shared deque let a
+        continuous auto-run swallow manually enqueued frames and republish
+        them as continuous output."""
+        state, _ = _grab_state(continuous_stride=2)
+        copy = _CopySpy()
+        state.set_mode(Mode.DETECT)
+
+        # Frame 100: stride fire (counter 0). Frame 101: manual takes
+        # precedence over the counter, and the counter still advances.
+        state.on_frame(100, 1, copy)
+        self.assertTrue(state.request_enqueue()[0])
+        state.on_frame(101, 1, copy)
+        state.on_frame(102, 1, copy)      # counter 2 -> fire
+
+        self.assertEqual(state.pending_depth(), 1)
+        self.assertEqual(state.continuous_depth(), 2)
+        self.assertEqual([item.pts for item in state.take_pending()], [101])
+        self.assertEqual([item.pts for item in state.take_continuous()],
+                         [100, 102])
+
+        # Turning the mode off discards the stream's leftovers but keeps the
+        # operator's frames (ros_io._set_continuous relies on exactly this).
+        # OFF -> DETECT resets the stride clock, so 200 is a fire frame.
+        state.set_mode(Mode.OFF)
+        state.set_mode(Mode.DETECT)
+        state.on_frame(200, 1, copy)
+        self.assertTrue(state.request_enqueue()[0])
+        state.on_frame(201, 1, copy)
+        self.assertEqual(state.clear_continuous(), 1)
+        self.assertEqual(state.continuous_depth(), 0)
+        self.assertEqual([item.pts for item in state.take_pending()], [201])
 
     def test_ended_state_machine(self):
         """frames.Lifecycle: guard fail-fast set (capture/snapshot/enqueue/
@@ -469,7 +577,7 @@ class TestGrabState(unittest.TestCase):
         self.assertIsNone(waiter.wait(0))
 
         # Arming after ended returns an already-resolved None waiter.
-        late = state.arm(CaptureKind.SNAPSHOT_RAW)
+        late = state.arm(CaptureKind.SNAPSHOT_PNG)
         self.assertTrue(late._event.is_set())
         self.assertIsNone(late.wait(0))
 
@@ -558,6 +666,12 @@ class TestBatchPublishDispatch(unittest.TestCase):
             return True
 
         self.worker._push_items = fake_push
+        self.grab = grab
+
+    def tearDown(self) -> None:
+        # The worker is the sole runner now, so any test that started it must
+        # stop it; stop() also resolves anything still queued.
+        self.worker.stop()
 
     def test_detect_only_publishes_detections(self):
         """assess=False -> publish_detections alone; the valve stays dropping
@@ -582,18 +696,108 @@ class TestBatchPublishDispatch(unittest.TestCase):
     def test_capture_vlm_publishes_only_the_vlm_box_array(self):
         """run_capture -> the /uas4/target_detections/vlm TargetBoxArray and
         nothing else, detection-only (valve dropping throughout)."""
-        success, _ = self.worker.run_capture(self.item, timeout=1.0)
+        self.worker.start()
+        success, _ = self.worker.run_capture(self.item, timeout=5.0)
         self.assertTrue(success)
         self.assertEqual(self.calls, ["vlm"])
         self.assertEqual(self.valve.drop_history, [True, True])
 
-    def test_capture_vlm_rejected_in_continuous_mode(self):
-        """Continuous mode owns the batch pipeline; the vlm pipe refuses
-        rather than interleaving a run."""
+    def test_capture_vlm_accepted_in_continuous_mode(self):
+        """A one-shot capture run is served whatever else is running: it has
+        its own frame already, so continuous mode only makes it queue behind
+        at most one auto-run rather than refusing it."""
+        self.worker.start()
         self.worker.set_continuous(True, assess=False)
-        success, message = self.worker.run_capture(self.item, timeout=1.0)
+        success, _ = self.worker.run_capture(self.item, timeout=5.0)
+        self.assertTrue(success)
+        self.assertEqual(self.calls, ["vlm"])
+        # Detection-only regardless of the continuous stream's assess flag.
+        self.assertEqual(self.valve.drop_history, [True, True])
+
+    def _queue_continuous(self, n):
+        """Fill the continuous deque with n stride-fired frames."""
+        copy = _CopySpy()
+        self.grab.set_mode(Mode.DETECT)
+        stride = PipelineConfig().continuous_stride
+        for index in range(n * stride):
+            self.grab.on_frame(5000 + index, 1, copy)
+        self.assertEqual(self.grab.continuous_depth(), n)
+
+    def _submit_async(self, fn):
+        """Run a blocking submit on its own thread; wait until it is queued."""
+        out: list = []
+        thread = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with self.worker._cond:
+                if self.worker._manual:
+                    return thread, out
+            time.sleep(0.005)
+        self.fail("request was never queued")
+
+    def test_manual_requests_are_dispatched_ahead_of_continuous(self):
+        """THE priority contract. With both a manual run and a due continuous
+        backlog waiting, the worker's first dispatch must be the manual one.
+
+        Both work sources are made ready BEFORE the worker starts, so the very
+        first dispatch decision is the one under test — no timing race. The
+        continuous stream is set to assess so its publishes ("assessments")
+        are distinguishable from the manual run's ("detections")."""
+        self._queue_continuous(PipelineConfig().continuous_run_size)
+        self.assertTrue(self.grab.request_enqueue()[0])
+        self.grab.on_frame(9000, 1, _CopySpy())
+        self.assertEqual(self.grab.pending_depth(), 1)
+
+        self.worker.set_continuous(True, assess=True)
+        thread, out = self._submit_async(
+            lambda: self.worker.run_once(assess=False, timeout=5.0))
+
+        self.worker.start()
+        thread.join(5.0)
+        self.assertTrue(out and out[0][0], f"manual run failed: {out}")
+        # Manual first, continuous after — not the other way round.
+        self.assertEqual(self.calls[0], "detections")
+        self.assertIn("assessments", self.calls)
+
+    def test_manual_request_swaps_the_queue_at_dispatch_not_at_submit(self):
+        """A queued request carries an intent, not frames: it picks up
+        everything enqueued while it waited. So a frame enqueued AFTER
+        run_once was called still lands in that run, and pending_depth()
+        never reports frames that are queued-but-invisible."""
+        thread, out = self._submit_async(
+            lambda: self.worker.run_once(assess=False, timeout=5.0))
+        # Enqueued after submit, before dispatch.
+        for pts in (7001, 7002):
+            self.assertTrue(self.grab.request_enqueue()[0])
+            self.grab.on_frame(pts, 1, _CopySpy())
+        self.assertEqual(self.grab.pending_depth(), 2)
+
+        self.worker.start()
+        thread.join(5.0)
+        self.assertTrue(out and out[0][0], f"manual run failed: {out}")
+        self.assertIn("2 frames", out[0][1])
+        self.assertEqual(self.calls, ["detections", "detections"])
+
+    def test_run_once_reports_an_empty_queue(self):
+        """Nothing enqueued -> the run is not attempted and says so."""
+        self.worker.start()
+        success, message = self.worker.run_once(assess=False, timeout=5.0)
         self.assertFalse(success)
-        self.assertEqual(message, "continuous mode active")
+        self.assertEqual(message, "batch queue empty")
+        self.assertEqual(self.calls, [])
+
+    def test_stop_releases_a_queued_request(self):
+        """Shutdown must not leave a service thread blocked waiting out its
+        own timeout: the worker resolves everything still queued on the way
+        out. This is the hazard that a priority LOCK would have introduced
+        and that the single-runner design avoids."""
+        thread, out = self._submit_async(
+            lambda: self.worker.run_once(assess=False, timeout=30.0))
+        self.worker.stop()
+        thread.join(5.0)
+        self.assertFalse(thread.is_alive(), "caller was left blocked")
+        self.assertEqual(out, [(False, "batch worker stopped")])
         self.assertEqual(self.calls, [])
 
     def test_every_batched_frame_gets_its_own_message(self):

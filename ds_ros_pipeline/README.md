@@ -71,10 +71,9 @@ seamless looping trivial and why the decoder never sees a loop boundary.
   published stamp is `time.time_ns()` at ingest — if the host loses NTP sync,
   every stamp is wrong. This is an operational prerequisite, not something
   the node can detect for you.
-- **Disk speed for recording.** H.265 at 200 Mbps CBR is 25 MB/s (1.5 GB/min)
-  — any SSD. Raw I420 at 2560×1440×30 fps is **166 MB/s** — a real SSD (SATA
-  is OK, NVMe comfortable, HDD not viable). The recorder's disk queue rides
-  out ~1.5 s stalls; beyond that, whole frames are dropped and counted.
+- **Disk speed for recording.** H.265 at 200 Mbps CBR is 25 MB/s
+  (1.5 GB/min) — any SSD. The recorder's disk queue rides out ~1.5 s stalls;
+  beyond that, whole frames are dropped and counted.
 - A test video, default `streams/lorton-d4-rgb-nano.mp4` (2560×1440, 30 fps,
   HEVC; 287 frames / 9.564 s per loop as the pipeline sees it).
 
@@ -304,24 +303,49 @@ exception.
 | Service | Semantics |
 |---|---|
 | `/ds/capture/mosaic` | Arm one-shot: the **next** frame is JPEG-encoded full-res (q90) and published once as a `TargetBoxArray` on `/uas4/target_detections/mosaic` — the image and its stamp, an **empty** `uav_target_boxes` (nothing is inferred on this path), and `use_for_mosaic=true`. Blocks ≤2 s; `message` = the stamp used. |
-| `/ds/capture/vlm` | Arm one-shot: the **next** frame is run through **detection** (bypassing the batch queue), then one `TargetBoxArray` is published on `/uas4/target_detections/vlm` — field-for-field what `run_detect` would publish for that frame, except every box has `use_for_assessment=true`. Nothing else is published. Blocks for the capture (≤2 s) plus the run (≤10 s); rejected while a continuous mode is on; `message` = the stamp used + run counts. |
-| `/ds/batch/enqueue` | Queue the next frame for batch inference. `message` = resulting depth; `success=false` if the queue (cap `batch.capacity`) is full. N calls queue N distinct frames. |
-| `/ds/batch/clear` | Empty the *pending* queue (a snapshot already taken by a running batch is unaffected). |
-| `/ds/batch/run_detect` | Run detection over everything queued; one **detection** `TargetBoxArray` per frame (boxes with empty `annotations` + compressed frame image) on `/uas4/target_detections`. Blocks ≤30 s. `success=false` if the queue is empty or a continuous mode is on. |
+| `/ds/capture/vlm` | Arm one-shot: the **next** frame is run through **detection** (bypassing the batch queue), then one `TargetBoxArray` is published on `/uas4/target_detections/vlm` — field-for-field what `run_detect` would publish for that frame, except every box has `use_for_assessment=true`. Nothing else is published. Blocks for the capture (≤2 s) plus the run (≤10 s); accepted whatever else is running — continuous mode and recording included, it just queues behind an in-flight batch run; `message` = the stamp used + run counts. |
+| `/ds/batch/enqueue` | Queue the next frame for batch inference **on the manual queue**. `message` = resulting depth; `success=false` if it is full (cap `batch.capacity`). N calls queue N distinct frames — the continuous stream has its own queue and can never consume this budget. |
+| `/ds/batch/clear` | Empty **both** pending queues; `message` reports each count. A snapshot already claimed by a running batch is unaffected. |
+| `/ds/batch/run_detect` | Run detection over everything queued; one **detection** `TargetBoxArray` per frame (boxes with empty `annotations` + compressed frame image) on `/uas4/target_detections`. Blocks ≤30 s. Runs **exactly** the frames you enqueued — never a continuous stride frame — and is dispatched **ahead of** the continuous stream. Drains the manual queue `batch.engine_batch` frames at a time, newest first, so a long queue costs more batches rather than one long run. `message` = frames and batches run; `success=false` only if the manual queue is empty. |
 | `/ds/batch/run_detect_assess` | Same, plus injury assessment; per frame one **assessment** `TargetBoxArray` on `/uas4/target_detections` — the same boxes, with the 8 `clip_rgb_*` heads filled into the `annotations` of every assessed box (the plain detection array is not additionally published). Assessment runs **only** here / in continuous-assess mode. Every detection is a person (see Detection scope), so in practice every box is assessed. |
-| `/ds/mode/continuous_detect` (`SetBool`) | `true`: auto-enqueue every `continuous.stride`-th frame (default 3 ≈ 10 Hz) and auto-run. `false`: stop and discard any not-yet-run pending frames (count reported in the response; a run already in flight completes). Manual run services are rejected while on. |
-| `/ds/mode/continuous_detect_assess` (`SetBool`) | Same with assessment. Turning either mode on turns the other off. |
+| `/ds/mode/continuous_detect` (`SetBool`) | `true`: auto-enqueue every `continuous.stride`-th frame (default 3 ≈ 10 Hz) onto the **continuous** queue and auto-run, with assessment **off** — if the stream is already running with assessment, this just turns that off and keeps streaming. `false`: stop the stream and discard *its own* not-yet-run frames (count in the response; manually enqueued frames are kept, and a run already in flight completes). Manual runs stay available throughout and take priority. |
+| `/ds/mode/continuous_detect_assess` (`SetBool`) | `true`: the same stream with assessment **on** — if it is already running, this just turns assessment on without interrupting it. `false`: retract only the assessment, leaving the stream running as plain detect. The two services are one stream plus an assessment flag, not two rival modes: only `continuous_detect=false` stops it. |
 | `/ds/record/start` | Attach the H.265/MPEG-TS recorder branch. `message` = file path. `success=false` if already recording or the source ended. Records seamlessly across loop wraps. |
-| `/ds/record/start_raw` | Attach the raw I420 recorder branch instead. |
 | `/ds/record/stop` | Detach and drain the recorder. `message` = path, frames written, frames dropped, `drained=true|false`. `drained=false` means the drain timed out (`record.stop_timeout`) and the file was force-finalized — still playable by container choice. The live pipeline is never stalled by a stop. Idempotent after a source-EOS finalization. |
 | `/ds/snapshot` | Next frame → full-res PNG in `snapshot.output_dir`. Blocks until the file is closed; `message` = path. |
-| `/ds/snapshot_raw` | Same as `.ppm` (raw RGB, trivially parseable) + `.json` sidecar with the stamp. |
 
 Two capture calls arriving before the next frame **coalesce**: one message,
 both callers succeed with the same stamp. `enqueue` deliberately does not —
 it is a counter. Blocking services do not serialize unrelated ones (four
 callback groups; a snapshot in flight does not delay a `record/start`, an
 `enqueue`, or a concurrent `capture/mosaic`).
+
+**Everything runs concurrently.** Recording, the preview, the continuous
+stream and the one-shot captures are independent: each capture kind is armed
+separately and the grab probe serves every armed kind from one frame copy, and
+the recorder lives on its own tee branch. No service is refused because
+another is in progress.
+
+**...except the batch pipeline, where manual work has priority.** One appsrc
+feeding one nvinfer behind a valve is the single genuinely exclusive resource,
+so `run_detect`, `run_detect_assess`, `capture/vlm` and the continuous
+auto-runs take turns on it. Two things make that fair:
+
+- **Separate queues.** Manually enqueued frames and continuous stride frames
+  live in different queues, so neither run can consume the other's work. A
+  `run_detect` publishes exactly the frames you enqueued; a continuous
+  auto-run never swallows one of them.
+- **Manual first.** The "batch" worker thread is the sole runner, and it
+  dispatches queued manual requests ahead of the continuous stream. A manual
+  run therefore waits only for the auto-run already in flight — one run, about
+  150 ms at the default `continuous.run_size` — and never for the stream as a
+  whole. When nothing manual is pending, continuous gets the engine to itself;
+  there is no static split of compute.
+
+Priority is exercised at run *boundaries* only: `nvinfer` has no cancellation,
+so an in-flight run always finishes. Running a second `nvinfer` for manual work
+would not help — it would double engine VRAM (already the tight constraint
+here) and leave the ordering to the GPU's own time-slicing rather than to us.
 
 ## Topics
 
@@ -436,13 +460,15 @@ after the source ended. Key/values:
 |---|---|
 | `state` | `running` or `ended` (non-looping source hit EOS; node stays alive) |
 | `mode` | continuous mode: `off`, `detect`, or `detect_assess` |
-| `queue_depth` | pending batch-queue depth |
+| `queue_depth` | **manual** batch-queue depth — what `/ds/batch/enqueue` counts, so N enqueues always report N |
+| `continuous_queue_depth` | continuous batch-queue depth (the stream's own buffer) |
 | `recording` | recorder state: `idle`, `recording`, or `finalized` (source EOS finalized it) |
 | `loop_count` | the feeder's loop counter — increments every ~9.6 s with the default clip; its steady cadence is the pacing observable |
 | `enqueue_drops` | manual enqueues refused because the queue was full |
-| `continuous_skips` | continuous-mode frames skipped because the queue was full |
+| `continuous_skips` | continuous frames evicted because its queue was full (the **oldest** is dropped, so the stream never infers a stale backlog) |
 | `copy_failures` | surface→numpy copy failures |
 | `resolve_skips` | frames skipped for an unresolvable ntp stamp |
+| `stale_results` | inference results that arrived for a run that had already timed out. Non-zero means a run overran its 10 s collector budget; the pts join discards the strays, so results stay correct |
 
 ## Parameters
 
@@ -453,11 +479,23 @@ All declared by `config.py`, all overridable via `--ros-args -p name:=value`.
 | `source.uri` | `file://streams/lorton-d4-rgb-nano.mp4` | `file://` or `rtsp(s)://`; the source bin is the single swap point |
 | `source.loop` | `true` | file variant only: seamless AU-replay loop; `false` = one pass then EOS (see below) |
 | `source.max_preload_mb` | `1024` | refuse (with a clear log) to preload an AU list bigger than this; use `loop:=false` for long files |
-| `batch.capacity` | `16` | batch queue cap (~236 MB host RAM at full) |
-| `batch.engine_batch` | `8` | engine batch size; drop to 4 if VRAM is tight. Not the mux batch size — see Architecture |
+| `batch.capacity` | `16` | **manual** queue cap. Full ⇒ `enqueue` refuses; frames you picked are never silently evicted. Budget ~14.75 MB per queued frame at 2560×1440 RGBA — on Jetson that comes out of the *same* unified pool as the engines (see below) |
+| `batch.engine_batch` | `8` | engine batch size, and the **max frames per run**: it bounds both how much one nvinfer submission carries and how long the sole runner commits before re-checking for higher-priority work. Lower it on constrained parts (Orin NX: 4). Not the mux batch size — see Architecture |
 | `detect.min_confidence` | `0.4` | minimum YOLO confidence for a person detection. Applied **inside** nvinfer (`[class-attrs-0] pre-cluster-threshold`), so weaker boxes never become object meta. Baked into the generated config at startup — setting it at runtime does nothing |
 | `continuous.stride` | `3` | continuous mode samples every Nth frame (3 ≈ 10 Hz at paced 30 fps) |
-| `continuous.run_size` | `4` | continuous worker auto-runs at this queue depth |
+| `continuous.run_size` | `4` | continuous worker auto-runs at this depth of its own queue |
+| `continuous.capacity` | `8` | **continuous** queue cap, separate from `batch.capacity` so the stream cannot eat the manual enqueue budget. Full ⇒ the **oldest** frame is evicted (it is a live buffer; a deep queue would only hold frames too stale to infer) |
+
+Both queues select **newest-first** when a run claims frames, so a queue longer
+than one batch infers the freshest frames rather than working through a stale
+backlog. Each batch is then published in stamp order, so `header.stamp` never
+moves backwards while `seq` moves forwards.
+
+> **Jetson (Orin NX) memory note.** Jetson has *unified* memory: queued frames,
+> TensorRT engines, and decoder surfaces all draw on the one pool. A longer
+> queue is not free the way it is on a discrete-GPU host with separate system
+> RAM — `batch.capacity × 14.75 MB` competes directly with the engines. Size
+> the queues and `batch.engine_batch` together, not independently.
 | `preview.width` / `preview.height` / `preview.quality` | `640` / `360` / `75` | preview branch geometry / JPEG quality |
 | `record.bitrate` | `200000000` | H.265 CBR bitrate (bps) |
 | `record.output_dir` | `outputs/ds_ros` | recordings + sidecars |
@@ -474,26 +512,15 @@ of the first frame (`20260720T153001.123Z` format).
 | Output | Files | Format |
 |---|---|---|
 | `/ds/record/start` | `rec_<UTC>.ts` + `rec_<UTC>.jsonl` | H.265 in MPEG-TS, CBR 200 Mbps, 1 s closed GOPs, parameter sets repeated at every IDR |
-| `/ds/record/start_raw` | `rec_<UTC>_2560x1440_I420.yuv` + `.jsonl` | headerless raw I420 frames |
 | `/ds/snapshot` | `snap_<UTC>.png` + `snap_<UTC>.json` | lossless full-res PNG |
-| `/ds/snapshot_raw` | `snap_<UTC>.ppm` + `.json` | P6 PPM (header + RGB pixels) |
 
 The `.jsonl` sidecar has one `{"pts": …, "ntp_ns": …, "utc": "…"}` line per
 frame **actually written** (frames dropped under disk pressure are counted in
 the stop response, not in the sidecar); snapshot `.json` sidecars carry the
 same fields.
 
-Both recording containers are chosen for crash tolerance: `kill -9` (or a
-drain timeout) loses at most the ~1 s tail after the last flushed GOP of a
-`.ts`, and any frame-aligned prefix of the raw `.yuv` is valid. Play the raw
-file with:
-
-```bash
-ffplay -f rawvideo -pixel_format yuv420p -video_size 2560x1440 \
-  outputs/ds_ros/rec_<UTC>_2560x1440_I420.yuv
-```
-
-(Adjust `-video_size` to the source resolution baked into the filename.)
+The MPEG-TS container is chosen for crash tolerance: `kill -9` (or a drain
+timeout) loses at most the ~1 s tail after the last flushed GOP.
 
 ## Where files land (the one-folder rule and its exception)
 
@@ -552,15 +579,17 @@ queued. The process runs until SIGINT.
   (above); timing and counts are unaffected.
 - **`enqueue` returns `success=false`** — batch queue full
   (`batch.capacity`); run or clear it, or lower the enqueue rate.
-- **`run_detect` returns `success=false`** — empty queue, or a continuous
-  mode is on (manual runs are rejected while it is).
+- **`run_detect` returns `success=false`** — nothing is on the manual queue.
+  A running continuous stream is not the cause: it drains its own queue, not
+  yours. Check that `/ds/batch/enqueue` returned `success=true` and that
+  `/ds/status` `queue_depth` (manual only) is non-zero before running.
 - **`record/stop` reports `drained=false`** — the drain hit
-  `record.stop_timeout` (wedged disk, usually with the raw variant). The
-  file is force-finalized and every byte on disk is still playable.
+  `record.stop_timeout` (wedged disk). The file is force-finalized and every
+  byte on disk is still playable.
 - **Frames dropped during recording** — the disk could not sustain the rate;
   drops are whole raw frames counted in the stop response, and the `.jsonl`
   sidecar matches what is actually in the file. Check the disk-speed
-  prerequisite (raw needs 166 MB/s).
+  prerequisite.
 - **Stamps look wrong / offset from wall clock** — check host NTP sync
   (`chronyc tracking` / `timedatectl`); the node stamps from the system
   clock and cannot correct an unsynced host.

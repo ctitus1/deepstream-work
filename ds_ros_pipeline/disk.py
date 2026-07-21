@@ -11,7 +11,7 @@ GStreamer. ``Recorder`` binds that machine to real Gst elements.
 Threads: attach/stop run on the grp_record service thread (MutuallyExclusive
 — start/stop serialize with each other only); the IDLE probe callback runs on
 the trunk streaming thread for microseconds; the EOS probe on sink_rec.sink
-runs on the branch's own streaming thread; PNG/PPM/sidecar writes run on the
+runs on the branch's own streaming thread; PNG/sidecar writes run on the
 "disk" worker thread (Sec 2).
 
 Gst imports are deferred into the methods that touch elements so tests.py can
@@ -36,7 +36,6 @@ from timestamps import TimestampRegistry, utc_tag
 
 Q_REC_MAX_BUFFERS = 30                    # Sec 3.1: 1 s at 30 fps, leaky=2
 Q_DISK_BYTES_TS = 64 * 1024 * 1024        # Sec 3.1: non-leaky, byte-bounded
-Q_DISK_BYTES_RAW = 256 * 1024 * 1024      # Sec 3.1 raw variant
 IFRAME_INTERVAL = 30                      # Sec 3.1/7: 1 s closed GOPs
 IDR_INTERVAL = 30
 CONTROL_RATE_CBR = 1
@@ -125,7 +124,7 @@ class _Branch:
 
 
 class Recorder:
-    """Dynamic Branch R owner: h265/MPEG-TS and raw-I420 variants (Sec 3.1/7).
+    """Dynamic Branch R owner: h265/MPEG-TS (Sec 3.1/7).
 
     One instance per process. State: 'idle' | 'recording' | 'finalized'
     ('finalized' = the loop=false source EOS already drained the branch —
@@ -147,9 +146,9 @@ class Recorder:
         self._final_message = ""
         self._final_stats: RecordStats | None = None
 
-    def start(self, raw: bool) -> tuple[bool, str]:
+    def start(self) -> tuple[bool, str]:
         """Attach the recorder branch (Sec 7 Start): request a t_ingest pad,
-        build Branch R (h265 variant, or raw when ``raw``) with Sec 3.1's
+        build Branch R with Sec 3.1's
         exact properties, add to pipeline, sync_state_with_parent, link;
         install the rec_sidecar probe (q_rec src pad — counts/writes only
         frames that survived the leaky queue) and the EOS probe on
@@ -166,7 +165,7 @@ class Recorder:
                 return False, "source ended"
             if self._finalize_pending:
                 return False, "previous recording still finalizing"
-            branch = self._attach(raw)
+            branch = self._attach()
             self._branch = branch
             self._state = "recording"
             return True, str(branch.path)
@@ -223,16 +222,14 @@ class Recorder:
 
     # -- Gst binding ---------------------------------------------------------
 
-    def _attach(self, raw: bool) -> _Branch:
+    def _attach(self) -> _Branch:
         from gi.repository import Gst
 
         config = self._config
         live = self._live
-        width = live.source.width
-        height = live.source.height
         output_dir = Path(config.record_output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        path = record_path(output_dir, time.time_ns(), raw, width, height)
+        path = record_path(output_dir, time.time_ns())
         sidecar_path = path.with_suffix(".jsonl")
 
         tee_pad = live.t_ingest.request_pad_simple("src_%u")
@@ -258,26 +255,20 @@ class Recorder:
         sink_rec.set_property("sync", False)
         sink_rec.set_property("async", False)
 
-        if raw:
-            caps_rec.set_property(
-                "caps", Gst.Caps.from_string("video/x-raw,format=I420"))
-            q_disk.set_property("max-size-bytes", Q_DISK_BYTES_RAW)
-            elements = [q_rec, conv_rec, caps_rec, q_disk, sink_rec]
-        else:
-            caps_rec.set_property(
-                "caps",
-                Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12"))
-            q_disk.set_property("max-size-bytes", Q_DISK_BYTES_TS)
-            enc_rec = _make("nvv4l2h265enc", "enc_rec")
-            enc_rec.set_property("bitrate", config.record_bitrate)
-            enc_rec.set_property("control-rate", CONTROL_RATE_CBR)
-            enc_rec.set_property("iframeinterval", IFRAME_INTERVAL)
-            enc_rec.set_property("idrinterval", IDR_INTERVAL)
-            parse_rec = _make("h265parse", "parse_rec")
-            parse_rec.set_property("config-interval", -1)
-            mux_rec = _make("mpegtsmux", "mux_rec")
-            elements = [q_rec, conv_rec, caps_rec, enc_rec, parse_rec,
-                        mux_rec, q_disk, sink_rec]
+        caps_rec.set_property(
+            "caps",
+            Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12"))
+        q_disk.set_property("max-size-bytes", Q_DISK_BYTES_TS)
+        enc_rec = _make("nvv4l2h265enc", "enc_rec")
+        enc_rec.set_property("bitrate", config.record_bitrate)
+        enc_rec.set_property("control-rate", CONTROL_RATE_CBR)
+        enc_rec.set_property("iframeinterval", IFRAME_INTERVAL)
+        enc_rec.set_property("idrinterval", IDR_INTERVAL)
+        parse_rec = _make("h265parse", "parse_rec")
+        parse_rec.set_property("config-interval", -1)
+        mux_rec = _make("mpegtsmux", "mux_rec")
+        elements = [q_rec, conv_rec, caps_rec, enc_rec, parse_rec,
+                    mux_rec, q_disk, sink_rec]
 
         for element in elements:
             live.pipeline.add(element)
@@ -399,7 +390,7 @@ def _make(factory: str, name: str):
 
 
 class DiskWorker:
-    """The "disk" thread (Sec 2): serializes PNG/PPM encodes and file writes
+    """The "disk" thread (Sec 2): serializes PNG encodes and file writes
     off the streaming and service threads.
 
     ``submit(fn) -> wait()``-style: submit returns a handle whose
@@ -446,20 +437,14 @@ class DiskWorker:
                 done.set()
 
 
-def record_path(output_dir: Path, ntp_ns: int, raw: bool,
-                width: int, height: int) -> Path:
-    """Pure: recording filename (Sec 5) — ``rec_<utc_tag>.ts`` or
-    ``rec_<utc_tag>_WxH_I420.yuv``."""
-    tag = utc_tag(ntp_ns)
-    if raw:
-        return output_dir / f"rec_{tag}_{width}x{height}_I420.yuv"
-    return output_dir / f"rec_{tag}.ts"
+def record_path(output_dir: Path, ntp_ns: int) -> Path:
+    """Pure: recording filename (Sec 5) — ``rec_<utc_tag>.ts``."""
+    return output_dir / f"rec_{utc_tag(ntp_ns)}.ts"
 
 
-def snapshot_path(output_dir: Path, ntp_ns: int, raw: bool) -> Path:
-    """Pure: ``snap_<utc_tag>.png`` or ``snap_<utc_tag>.ppm``."""
-    suffix = "ppm" if raw else "png"
-    return output_dir / f"snap_{utc_tag(ntp_ns)}.{suffix}"
+def snapshot_path(output_dir: Path, ntp_ns: int) -> Path:
+    """Pure: ``snap_<utc_tag>.png``."""
+    return output_dir / f"snap_{utc_tag(ntp_ns)}.png"
 
 
 def append_sidecar_line(jsonl_path: Path, pts: int, ntp_ns: int) -> None:
@@ -489,16 +474,3 @@ def write_png(frame_rgba, path: Path, pts: int | None = None,
         raise RuntimeError(f"cv2.imwrite failed for {path}")
     if pts is not None and ntp_ns is not None:
         _write_json_sidecar(path, pts, ntp_ns)
-
-
-def write_ppm_with_sidecar(frame_rgba, path: Path, pts: int, ntp_ns: int) -> None:
-    """Raw snapshot: .ppm (P6 header + RGB pixels) plus the .json sidecar
-    with the same stamp fields (Sec 4/5). Disk worker thread only."""
-    import numpy as np
-
-    rgb = np.ascontiguousarray(frame_rgba[..., :3])
-    height, width = rgb.shape[:2]
-    with open(path, "wb") as handle:
-        handle.write(b"P6\n%d %d\n255\n" % (width, height))
-        handle.write(rgb.tobytes())
-    _write_json_sidecar(path, pts, ntp_ns)

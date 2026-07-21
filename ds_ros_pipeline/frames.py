@@ -31,18 +31,22 @@ ENDED_MESSAGE = "source ended"
 
 
 class CaptureKind(enum.Enum):
-    """The four independently armed one-shot captures (grp_capture, Sec 4)."""
+    """The three independently armed one-shot captures (grp_capture, Sec 4)."""
 
     MOSAIC = "mosaic"          # -> /uas4/target_detections/mosaic (q90 full res)
     VLM = "vlm"                # -> detection over the captured frame, then
     #                               one CasualtyImageCompressed (PNG crop +
     #                               detection_id) per detected box
     SNAPSHOT_PNG = "snapshot"  # -> PNG file
-    SNAPSHOT_RAW = "snapshot_raw"  # -> .ppm + .json sidecar
 
 
 class Mode(enum.Enum):
-    """Continuous-mode flag (Sec 4 toggles). Turning one on turns the other off."""
+    """Continuous-run state: off, or on with assessment off/on.
+
+    DETECT and DETECT_ASSESS are the SAME stream of auto-runs differing only
+    in whether the assess valve opens — not two competing modes. Moving
+    between them therefore keeps the stream running (see ``set_mode``).
+    """
 
     OFF = "off"
     DETECT = "detect"
@@ -146,19 +150,33 @@ class Lifecycle:
 
 
 class GrabState:
-    """Pure grab-probe state machine + batch queue (Sec 4/6).
+    """Pure grab-probe state machine + batch queues (Sec 4/6).
 
     Constructed once with the config; wired to a Lifecycle so ending wakes
     waiters. All public methods are non-blocking except CaptureWaiter.wait.
 
+    TWO pending deques, not one. Manually enqueued frames (``request_enqueue``,
+    i.e. frames the operator deliberately picked) and continuous stride-fired
+    frames are kept apart so neither run can consume the other's work — a
+    continuous auto-run used to swallow hand-picked frames and publish them as
+    part of the continuous stream. They differ in overflow policy too, because
+    they mean different things:
+
+      manual      -- bounded by batch.capacity; a full queue REFUSES the new
+                     frame (request_enqueue returns success=false). Frames the
+                     operator chose are never silently evicted.
+      continuous  -- bounded by continuous.capacity; a full queue EVICTS THE
+                     OLDEST (deque maxlen). It is a live buffer, so a backlog
+                     must never make the continuous detections stale.
+
     Callers by thread:
-      on_frame            -- Gst streaming thread (grab probe), one call/frame
-      arm                 -- grp_capture service threads
-      request_enqueue     -- grp_fast service thread
-      clear               -- grp_fast service thread
-      set_mode            -- grp_fast service thread
-      swap_pending        -- batch worker thread / grp_batch service thread
-      pending_depth, counters -- /ds/status timer thread
+      on_frame                 -- Gst streaming thread (grab probe), 1/frame
+      arm                      -- grp_capture service threads
+      request_enqueue, clear   -- grp_fast service thread
+      set_mode                 -- grp_fast service thread
+      take_pending             -- batch worker thread (manual run dispatch)
+      take_continuous, continuous_depth -- batch worker thread
+      pending_depth, counters  -- /ds/status timer thread
     """
 
     def __init__(self, config: PipelineConfig, lifecycle: Lifecycle) -> None:
@@ -168,8 +186,15 @@ class GrabState:
         self._armed: dict[CaptureKind, CaptureWaiter] = {}
         self._pending_enqueues = 0
         self._pending: deque[BatchItem] = deque()
+        self._pending_continuous: deque[BatchItem] = deque(
+            maxlen=config.continuous_capacity)
         self._mode = Mode.OFF
         self._stride_count = 0
+        # Manual only: it exists solely so request_enqueue's admission check
+        # cannot over-admit during the copy window. Tracking continuous frames
+        # here too would UNDER-admit manual ones — refusing a manual slot for a
+        # continuous copy that will never occupy the manual deque (the mirror
+        # of the over-admission bug this counter was added to fix).
         self._in_flight = 0
         self._ended = False
         self._enqueue_drops = 0
@@ -187,11 +212,13 @@ class GrabState:
         auto-enqueue for the active Mode. If any consumer needs pixels, call
         ``copy()`` exactly once (outside the mutex) — it returns an owned
         RGBA numpy array — then fulfill waiters with a CapturedFrame and
-        append BatchItems to the pending deque (respecting batch_capacity:
-        a full deque counts a drop instead of appending; continuous mode
-        skips, manual enqueue decrements remain consumed). When nothing is
-        armed/pending and mode is OFF this returns immediately (near-zero
-        idle cost, Sec 3.1). Never blocks, never raises.
+        append ONE BatchItem to whichever pending deque claimed the frame,
+        under that deque's overflow policy (see the class docstring: manual
+        refuses and counts enqueue_drops, continuous evicts the oldest and
+        counts continuous_skips). A consumed manual enqueue decrement stays
+        consumed either way. When nothing is armed/pending and mode is OFF
+        this returns immediately (near-zero idle cost, Sec 3.1). Never
+        blocks, never raises.
         """
         if ntp_ns is None:
             # Unresolvable stamp (registry rolled + no stream NTP, Sec 5):
@@ -211,7 +238,8 @@ class GrabState:
             if self._armed:
                 waiters = list(self._armed.values())
                 self._armed.clear()
-            enqueue = False
+            take_manual = False
+            take_continuous = False
             manual = self._pending_enqueues > 0
             if manual:
                 self._pending_enqueues -= 1
@@ -224,27 +252,28 @@ class GrabState:
             if manual:
                 # Manual decrement takes precedence over a same-frame stride
                 # fire: at most one BatchItem per frame (unique pts, Sec 6).
+                # Exactly one of take_* is ever true, so the in-flight
+                # accounting below can never double-count a frame.
                 if len(self._pending) >= self._config.batch_capacity:
                     self._enqueue_drops += 1
                 else:
-                    enqueue = True
+                    take_manual = True
+                    # Counted in request_enqueue's depth so the copy window
+                    # cannot over-admit at the capacity boundary.
+                    self._in_flight += 1
             elif fire:
-                if len(self._pending) >= self._config.batch_capacity:
-                    self._continuous_skips += 1
-                else:
-                    enqueue = True
-            if enqueue:
-                # Counted in request_enqueue's depth so the copy window
-                # cannot over-admit at the capacity boundary.
-                self._in_flight += 1
-        if not waiters and not enqueue:
+                # No capacity gate: the continuous deque is maxlen-bounded and
+                # evicts its oldest entry on append, so a stride fire is always
+                # admitted and the buffer always holds the most recent frames.
+                take_continuous = True
+        if not waiters and not take_manual and not take_continuous:
             return
         try:
             frame = copy()
         except Exception:
             with self._lock:
                 self._copy_failures += 1
-                if enqueue:
+                if take_manual:
                     self._in_flight -= 1
             _LOG.exception("surface copy failed (pts=%d)", pts)
             for waiter in waiters:
@@ -253,14 +282,25 @@ class GrabState:
         captured = CapturedFrame(frame_rgba=frame, pts=pts, ntp_ns=ntp_ns)
         for waiter in waiters:
             waiter._fulfill(captured)
-        if enqueue:
+        item = BatchItem(frame_rgba=frame, ntp_ns=ntp_ns, pts=pts)
+        if take_manual:
             with self._lock:
                 self._in_flight -= 1
+                # Defensive: only take_pending/clear touch this deque and both
+                # shrink it, so the reservation above is what actually keeps
+                # the capacity exact — this branch is not the guard.
                 if len(self._pending) < self._config.batch_capacity:
-                    self._pending.append(
-                        BatchItem(frame_rgba=frame, ntp_ns=ntp_ns, pts=pts))
+                    self._pending.append(item)
                 else:
                     self._enqueue_drops += 1
+        elif take_continuous:
+            with self._lock:
+                if len(self._pending_continuous) == self._pending_continuous.maxlen:
+                    # maxlen makes the append itself evict the oldest; count it
+                    # against the continuous stream, which is whose frame is
+                    # being dropped (this used to charge enqueue_drops).
+                    self._continuous_skips += 1
+                self._pending_continuous.append(item)
 
     def arm(self, kind: CaptureKind) -> CaptureWaiter:
         """Arm a one-shot capture; returns the waiter to block on.
@@ -293,11 +333,14 @@ class GrabState:
         """Increment the pending-enqueue counter (never coalesces, Sec 4).
 
         Returns (success, resulting_queue_depth_message_value): success=False
-        if pending deque is already at batch_capacity. The depth counts both
-        queued frames and not-yet-consumed pending requests, so N back-to-back
-        calls report 1..N (Sec 10 test 5). Frames mid-copy (consumed but not
-        yet appended) count too, so the copy window cannot over-admit at the
-        capacity boundary. Non-blocking.
+        if the MANUAL deque is already at batch_capacity. The depth counts
+        both queued frames and not-yet-consumed pending requests, so N
+        back-to-back calls report 1..N (Sec 10 test 5). Frames mid-copy
+        (consumed but not yet appended) count too, so the copy window cannot
+        over-admit at the capacity boundary. The continuous deque is not part
+        of this arithmetic at all — it has its own capacity, so a busy
+        continuous stream can never consume the operator's enqueue budget.
+        Non-blocking.
         """
         with self._lock:
             depth = (len(self._pending) + self._pending_enqueues
@@ -307,23 +350,50 @@ class GrabState:
             self._pending_enqueues += 1
             return True, depth + 1
 
-    def clear(self) -> int:
-        """Empty the *pending* deque only (Sec 4); returns frames removed."""
+    def clear(self) -> tuple[int, int]:
+        """Empty BOTH pending deques; returns (manual, continuous) removed.
+
+        The /ds/batch/clear service is a literal clear-everything button, so
+        it does not privilege either queue. A snapshot already claimed by a
+        run in flight is unaffected (Sec 4) — this only empties what is still
+        pending. Continuous refills within a stride or two, so wiping it
+        mid-stream is close to invisible.
+        """
         with self._lock:
             removed = len(self._pending)
+            removed_continuous = len(self._pending_continuous)
             self._pending.clear()
+            self._pending_continuous.clear()
+            return removed, removed_continuous
+
+    def clear_continuous(self) -> int:
+        """Empty the continuous deque only; returns frames removed.
+
+        Used when continuous mode is switched off, so the stream's leftover
+        auto-enqueued frames cannot surface later inside an unrelated manual
+        run. Deliberately leaves the manual deque alone: turning a mode off
+        must not discard frames the operator enqueued by hand.
+        """
+        with self._lock:
+            removed = len(self._pending_continuous)
+            self._pending_continuous.clear()
             return removed
 
     def set_mode(self, mode: Mode) -> Mode:
-        """Set continuous mode; turning either on turns the other off (Sec 4).
+        """Set the continuous-run mode; returns the previous one.
 
-        Returns the previous mode. The stride counter resets on transition.
+        The stride clock resets only when continuous starts or stops, NOT
+        when DETECT and DETECT_ASSESS swap: that swap only decides whether
+        the worker opens the assess valve, so the auto-enqueue cadence
+        carries straight through it. Resetting there would put a seam in what
+        is meant to be one uninterrupted stream.
         """
         with self._lock:
             previous = self._mode
             if mode is not previous:
+                if previous is Mode.OFF or mode is Mode.OFF:
+                    self._stride_count = 0
                 self._mode = mode
-                self._stride_count = 0
             return previous
 
     @property
@@ -331,27 +401,81 @@ class GrabState:
         with self._lock:
             return self._mode
 
-    def swap_pending(self) -> list[BatchItem]:
-        """Atomically swap the pending deque for a fresh empty one (Sec 4/6).
+    @staticmethod
+    def _take_newest(queue: "deque[BatchItem]",
+                     limit: int | None) -> list[BatchItem]:
+        """Remove up to ``limit`` NEWEST items; return them oldest-first.
 
-        Returns the swapped-out snapshot (possibly empty). Enqueues during a
-        run land in the new deque and are never destroyed; there is no
-        post-run clear.
+        Both ends are load-bearing, and they serve different purposes:
+
+        *Selection* is newest-first (pop from the right, where append puts the
+        most recent frame). When the queue is longer than one run — which is
+        the point of a long queue — the run should infer the freshest frames
+        available, not work through a stale backlog front-to-back.
+
+        *Publish order* is oldest-first (the reverse below). All items in a
+        run are inferred together, so their relative order costs nothing to
+        fix, and emitting a TargetBoxArray whose header.stamp moves backwards
+        while seq moves forwards is a trap for every downstream consumer.
+        Selecting newest and publishing in stamp order gives both.
+
+        Duplicate pts are dropped: the collector joins results back to items
+        by pts (Sec 6), so two items sharing one would collide. Admission
+        already makes this impossible (a frame is offered to exactly one
+        queue, once) — this keeps the join's precondition true by
+        construction rather than by that argument holding forever.
+        """
+        taken: list[BatchItem] = []
+        seen: set[int] = set()
+        while queue and (limit is None or len(taken) < limit):
+            item = queue.pop()
+            if item.pts in seen:
+                continue
+            seen.add(item.pts)
+            taken.append(item)
+        taken.reverse()
+        return taken
+
+    def take_pending(self, limit: int | None = None) -> list[BatchItem]:
+        """Claim up to ``limit`` newest MANUAL items (see _take_newest).
+
+        Frames enqueued after this returns land in the queue as usual and are
+        never destroyed; there is no post-run clear. Continuous frames are
+        never returned here — a manual run publishes exactly the frames the
+        operator enqueued.
         """
         with self._lock:
-            snapshot = list(self._pending)
-            self._pending = deque()
-            return snapshot
+            return self._take_newest(self._pending, limit)
+
+    def take_continuous(self, limit: int | None = None) -> list[BatchItem]:
+        """Claim up to ``limit`` newest CONTINUOUS items (see _take_newest).
+
+        The counterpart of take_pending for the auto-run path; symmetrically,
+        it never returns a manually enqueued frame.
+        """
+        with self._lock:
+            return self._take_newest(self._pending_continuous, limit)
 
     def pending_depth(self) -> int:
-        """Current pending-deque depth (for /ds/status and enqueue replies)."""
+        """MANUAL pending-deque depth (/ds/status queue_depth, enqueue reply).
+
+        Deliberately still the manual depth alone: it is the number a caller
+        of /ds/batch/enqueue is counting, and mixing the continuous stream's
+        buffer into it would make N enqueues report something other than N.
+        """
         with self._lock:
             return len(self._pending)
 
+    def continuous_depth(self) -> int:
+        """Continuous pending-deque depth (/ds/status, batch worker tick)."""
+        with self._lock:
+            return len(self._pending_continuous)
+
     def counters(self) -> dict[str, int]:
-        """Drop counters for /ds/status: manual-enqueue drops (deque full),
-        continuous-mode skips (deque full), surface-copy failures, and
-        frames skipped for an unresolvable ntp stamp."""
+        """Drop counters for /ds/status: manual-enqueue drops (manual deque
+        full), continuous-mode skips (oldest evicted from the full continuous
+        deque), surface-copy failures, and frames skipped for an unresolvable
+        ntp stamp."""
         with self._lock:
             return {
                 "enqueue_drops": self._enqueue_drops,

@@ -11,11 +11,15 @@ process-mode=2 output-tensor-meta=true) -> fakesink sync=false async=false.
 The pool sizes are load-bearing (empirically validated wedge fix, Sec 3.3) —
 implement verbatim.
 
-The worker thread ("batch", Sec 2) serializes runs: push k buffers
-(re-stamped with each item's feeder-assigned pts) -> wait for k collected
-frames or 10 s -> publish via injected callbacks -> next run. Valve toggling
-only happens between runs (race-free). Continuous mode auto-runs when
->= continuous.run_size frames pend or the oldest is > 200 ms (Sec 4).
+The worker thread ("batch", Sec 2) is the sole runner and therefore serializes
+runs by construction: push k buffers (re-stamped with each item's
+feeder-assigned pts) -> wait for k collected frames or 10 s -> publish via
+injected callbacks -> next run. Valve toggling only happens between runs
+(race-free). Service threads submit a RunRequest and block on it; the worker
+dispatches manual requests ahead of continuous auto-runs, which is how manual
+work gets priority on the one shared inference pipeline. Continuous auto-runs
+when >= continuous.run_size frames pend in ITS deque or the oldest is > 200 ms
+(Sec 4) and nothing manual is waiting.
 
 Gst/pyds imports live inside builders/probes; result dataclasses and the
 collector's join-by-pts logic are importable without them.
@@ -26,6 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -85,6 +90,33 @@ def indexed_detections(detections: "tuple[Detection, ...] | list[Detection]",
             "annotations still follow object_id, but array position no "
             "longer equals detection_id")
     return ordered, None
+
+
+@dataclass
+class RunRequest:
+    """One queued intent to run the batch pipeline, submitted by a service
+    thread and executed by the "batch" worker.
+
+    Deliberately an INTENT, not a batch of frames: ``source="manual"`` carries
+    no items and swaps the manual deque at the moment it is dispatched, so a
+    request that waits its turn picks up everything enqueued meanwhile,
+    ``pending_depth()`` never reports frames that are queued-but-invisible,
+    and shutdown drains no 14.75 MB arrays. ``source="item"`` (capture/vlm)
+    is the exception — it already holds its one frame and bypasses both
+    deques.
+    """
+
+    source: str                     # "manual" | "item"
+    assess: bool
+    publish: str | None = None      # None => chosen from assess
+    item: "BatchItem | None" = None
+    timeout: float = COLLECT_TIMEOUT_S
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple[bool, str] | None = None
+
+    def resolve(self, success: bool, message: str) -> None:
+        self.result = (success, message)
+        self.done.set()
 
 
 @dataclass(frozen=True)
@@ -174,6 +206,18 @@ class ResultCollector:
             for item in items
             if item.pts in detections
         ]
+
+    def stale(self) -> int:
+        """Results that arrived for a pts no run was expecting (any thread).
+
+        Non-zero means a run timed out and its frames finished traversing
+        afterwards, landing while a later run owned the collector. The join is
+        keyed on pts so those strays are discarded rather than mis-attributed
+        — but without surfacing this counter the fact that it happened at all
+        was invisible in the field. Published as /ds/status stale_results.
+        """
+        with self._cond:
+            return self._stale
 
     def _complete_locked(self) -> bool:
         return all(
@@ -410,11 +454,34 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
 
 
 class BatchWorker:
-    """The "batch" thread (Sec 2): serializes all runs, owns appsrc pushing.
+    """The "batch" thread (Sec 2): the SOLE runner, and owns appsrc pushing.
 
-    Constructed with the grab state (source of swap_pending), the parts, the
-    collector, and publish callbacks injected by ros_io — the run's trigger
-    selects which fire per frame result:
+    Every run goes through this one thread. Service threads do not execute
+    runs; they submit a RunRequest and block on its completion event. That
+    makes the thread the single place where "what runs next" is decided, and
+    manual work is prioritized there with one branch:
+
+        if a manual request is queued -> run it
+        else                          -> evaluate the continuous auto-run tick
+
+    Why the arbitration lives here rather than in a priority-aware lock around
+    _execute_run: the decision to start a continuous run happens in
+    _continuous_tick, ABOVE the run itself, because the tick has to swap the
+    continuous deque before it can run anything. A lock further down could
+    only observe that decision after the frames had already been claimed —
+    it would have to run them anyway or push them back and break pts order.
+    Moving all arbitration onto one thread makes "manual first" a property of
+    the code's shape instead of an invariant maintained by a counter, and it
+    adds no second condition variable for stop() to have to notify.
+
+    Priority is exercised only at run boundaries: nvinfer has no cancellation,
+    so an in-flight run always completes. With the mux at batch-size=1 a run
+    is k sequential ~35 ms inferences, so a manual request waits at most one
+    continuous run (~150 ms at the default run_size=4).
+
+    Constructed with the grab state (source of take_pending/take_continuous),
+    the parts, the collector, and publish callbacks injected by ros_io — the
+    run's trigger selects which fire per frame result:
       publish_detections(result) -> None   run_detect / continuous_detect:
                                       one TargetBoxArray, annotations empty
       publish_assessments(result) -> None  run_detect_assess / continuous:
@@ -440,11 +507,13 @@ class BatchWorker:
         self._publish_detections = publish_detections
         self._publish_assessments = publish_assessments
         self._publish_vlm_detections = publish_vlm_detections
-        # _cond guards the continuous flags and stop flag; _run_lock
-        # serializes run execution so the valve never toggles mid-run even in
-        # the set_continuous(False)-during-auto-run / run_once race window.
+        # One condition guards everything the worker waits on: the manual
+        # request queue, the continuous flags, and the stop flag. There is no
+        # separate run lock — runs never overlap because only this thread
+        # executes them, which is also what keeps the valve from toggling with
+        # buffers in flight.
         self._cond = threading.Condition()
-        self._run_lock = threading.Lock()
+        self._manual: deque[RunRequest] = deque()
         self._stop = False
         self._continuous = False
         self._continuous_assess = False
@@ -459,75 +528,194 @@ class BatchWorker:
 
     def stop(self) -> None:
         """Signal and join the worker (main thread, shutdown). Blocks until a
-        run in flight finishes or its 10 s collector timeout fires."""
+        run in flight finishes or its 10 s collector timeout fires.
+
+        The worker resolves every still-queued request on its way out, so a
+        service thread blocked in run_once/run_capture is released with a
+        failure rather than waiting out its own timeout."""
         with self._cond:
             self._stop = True
             self._cond.notify_all()
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+        # start() was never called (unit tests, or a failed bring-up): nobody
+        # will drain the queue, so do it here rather than leave a caller
+        # blocked on an event that can no longer be set.
+        self._drain_requests()
 
     def run_once(self, assess: bool, timeout: float = 30.0) -> tuple[bool, str]:
-        """Execute one manual run (grp_batch service thread; MutuallyExclusive
-        so runs serialize with each other by construction).
+        """Submit one manual run and block until it finishes (grp_batch
+        service thread; MutuallyExclusive so these serialize with each other
+        by construction).
 
-        Steps (Sec 4/6): reject with (False, reason) if continuous mode is
-        active or the pending queue is empty; set the valve for ``assess``;
-        swap_pending(); push each item's RGBA buffer re-stamped with its
-        feeder-assigned pts (appsrc block=true: a saturated GPU blocks THIS
-        thread only, never the live pipeline); wait_complete; publish
-        results via the callbacks; restore valve drop=true. Blocks up to
-        ``timeout``. Returns (success, message: frame/box counts or reason).
+        Queued ahead of the continuous stream's auto-runs, so it waits at most
+        for the one run already in flight. The queued request carries no
+        frames: the worker calls swap_pending() at dispatch, so the run covers
+        everything enqueued up to the moment it actually starts, and it never
+        picks up a continuous stride frame.
+
+        Returns (False, "batch queue empty") if nothing was enqueued, or
+        (False, ...) if the run did not complete within ``timeout``.
         """
-        with self._cond:
-            if self._continuous:
-                return False, "continuous mode active"
-        items = self._grab.swap_pending()
-        if not items:
-            return False, "batch queue empty"
-        return self._execute_run(items, assess, min(timeout, COLLECT_TIMEOUT_S))
+        return self._submit(RunRequest(
+            source="manual", assess=assess,
+            timeout=min(timeout, COLLECT_TIMEOUT_S)), timeout)
 
     def run_capture(self, item: BatchItem,
                     timeout: float = COLLECT_TIMEOUT_S) -> tuple[bool, str]:
-        """Run detection over ONE captured frame, bypassing the pending queue,
-        and publish the vlm TargetBoxArray (the capture/vlm path;
-        grp_capture service thread). Serialized with every other run by
-        _run_lock; the pending queue and any run in flight are untouched.
-        Rejected while a continuous mode is on, like the manual runs."""
+        """Run detection over ONE captured frame, bypassing both pending
+        queues, and publish the vlm TargetBoxArray (the capture/vlm path;
+        grp_capture service thread).
+
+        Carries its frame with it — the grab probe already served the capture
+        regardless of mode — so this only waits its turn behind at most one
+        in-flight run, and is prioritized over the continuous stream like
+        every other manual request. Neither pending queue is touched.
+        """
+        return self._submit(RunRequest(
+            source="item", assess=False, publish="vlm", item=item,
+            timeout=timeout), timeout)
+
+    def _submit(self, request: RunRequest, timeout: float) -> tuple[bool, str]:
+        """Queue a manual request for the worker and wait for its result.
+
+        A timeout here does NOT cancel the request — the worker may still run
+        and publish it. That is deliberate: for capture/vlm publishing is the
+        whole point, and a half-cancelled run would need to be torn out of the
+        collector mid-flight.
+        """
         with self._cond:
-            if self._continuous:
-                return False, "continuous mode active"
-        return self._execute_run([item], assess=False, wait_timeout=timeout,
-                                 publish="vlm")
+            if self._stop:
+                return False, "batch worker stopped"
+            self._manual.append(request)
+            self._cond.notify_all()
+        if not request.done.wait(timeout):
+            return False, f"run did not complete within {timeout:.0f}s"
+        return request.result or (False, "run produced no result")
+
+    def _run_limit(self) -> int:
+        """Max frames per run — the engine's batch size (batch.engine_batch).
+
+        This bounds two things at once: how much work the sole runner commits
+        to before it can re-check for a higher-priority request, and how many
+        frames one nvinfer submission is asked to carry. Keeping the two equal
+        means a long queue costs more runs, never a longer run.
+        """
+        return max(1, self._config.batch_engine_batch)
+
+    def collector_stale(self) -> int:
+        """ResultCollector.stale() for /ds/status (status timer thread)."""
+        return self._collector.stale()
+
+    def _drain_requests(self) -> None:
+        """Fail every queued request (worker exit / stop before start)."""
+        with self._cond:
+            pending, self._manual = list(self._manual), deque()
+        for request in pending:
+            request.resolve(False, "batch worker stopped")
 
     def set_continuous(self, active: bool, assess: bool) -> None:
         """Enable/disable auto-runs (grp_fast service thread, non-blocking).
 
-        While active the worker thread runs whenever grab.pending_depth() >=
+        While active the worker runs whenever grab.continuous_depth() >=
         continuous.run_size or the oldest pending item is > 200 ms old
-        (Sec 4); manual run_once is rejected. Same machinery as run_once —
-        no second code path (Sec 6).
+        (Sec 4) — but only when no manual request is waiting, which is what
+        gives manual work priority. Manual run_once and run_capture stay
+        available throughout. Same _execute_run machinery either way — no
+        second code path (Sec 6).
+
+        ``assess`` only selects the valve position for subsequent auto-runs,
+        so flipping it while active neither stops nor restarts the stream.
         """
         with self._cond:
+            # The age clock is only reset when the stream itself starts or
+            # stops; a mid-stream assess flip leaves it running, so an item
+            # already waiting still ages out on schedule.
+            if active is not self._continuous:
+                self._oldest_since = None
             self._continuous = active
             self._continuous_assess = assess if active else False
-            self._oldest_since = None
             self._cond.notify_all()
 
     # -- worker internals ---------------------------------------------------
 
     def _worker_loop(self) -> None:
+        """Dispatch loop: manual requests first, continuous otherwise.
+
+        This branch IS the priority mechanism (see the class docstring). Both
+        arms run on this thread, so a run never overlaps another and the valve
+        is never touched with buffers in flight.
+        """
+        try:
+            while True:
+                with self._cond:
+                    while (not self._stop and not self._manual
+                           and not self._continuous):
+                        self._cond.wait()
+                    if self._stop:
+                        return
+                    # Manual work always wins the next slot. Continuous is only
+                    # considered when nothing manual is waiting, so a stream at
+                    # full tilt can delay a manual run by one run, never more.
+                    request = self._manual.popleft() if self._manual else None
+                    assess = self._continuous_assess
+                try:
+                    if request is not None:
+                        self._serve(request)
+                    else:
+                        self._continuous_tick(assess)
+                except Exception:
+                    _LOG.exception("batch run failed")
+                    if request is not None and not request.done.is_set():
+                        request.resolve(False, "run raised")
+        finally:
+            # Release anyone blocked in _submit rather than making them wait
+            # out their own timeout (shutdown, or a crash in the loop).
+            self._drain_requests()
+
+    def _serve(self, request: RunRequest) -> None:
+        """Execute one dispatched manual request and resolve its waiter."""
+        if request.source == "item":
+            success, message = self._execute_run(
+                [request.item], request.assess, request.timeout,
+                publish=request.publish)
+            request.resolve(success, message)
+            return
+
+        # Claimed HERE, not at submit time: the run covers everything enqueued
+        # while the request waited, and pending_depth() never reports frames
+        # that are queued-but-invisible.
+        #
+        # Drained a batch at a time rather than in one giant run: with a queue
+        # deliberately longer than a batch, a single all-in run would occupy
+        # the sole runner for depth x per-frame time, which is exactly the
+        # window a manual request is not supposed to have to wait through. One
+        # bounded run per iteration keeps that window at one batch, and any
+        # remainder is picked up by the next iteration of the loop below.
+        frames_run = 0
+        runs = 0
+        failures: list[str] = []
         while True:
-            with self._cond:
-                while not self._stop and not self._continuous:
-                    self._cond.wait()
-                if self._stop:
-                    return
-                assess = self._continuous_assess
-            try:
-                self._continuous_tick(assess)
-            except Exception:
-                _LOG.exception("continuous batch run failed")
+            items = self._grab.take_pending(self._run_limit())
+            if not items:
+                break
+            success, message = self._execute_run(
+                items, request.assess, request.timeout,
+                publish=request.publish)
+            frames_run += len(items)
+            runs += 1
+            if not success:
+                failures.append(message)
+                break
+        if not frames_run:
+            request.resolve(False, "batch queue empty")
+            return
+        summary = f"{frames_run} frames in {runs} batch{'es' if runs > 1 else ''}"
+        if failures:
+            request.resolve(False, f"{summary}; {failures[-1]}")
+        else:
+            request.resolve(True, summary)
 
     def _continuous_tick(self, assess: bool) -> None:
         """One poll of the Sec 4 auto-run condition; runs when due.
@@ -536,7 +724,7 @@ class BatchWorker:
         so the age of the oldest pending item is measured from the poll that
         first observed a non-empty queue (<= 50 ms coarse — see review notes).
         """
-        depth = self._grab.pending_depth()
+        depth = self._grab.continuous_depth()
         now = time.monotonic()
         if depth == 0:
             self._oldest_since = None
@@ -546,7 +734,11 @@ class BatchWorker:
             self._oldest_since is not None
             and now - self._oldest_since >= CONTINUOUS_MAX_WAIT_S)
         if due:
-            items = self._grab.swap_pending()
+            # One bounded batch per tick. The loop comes straight back here if
+            # more is queued, but re-checks for manual work in between — so a
+            # deep continuous backlog can never delay a manual request by more
+            # than a single batch.
+            items = self._grab.take_continuous(self._run_limit())
             self._oldest_since = None
             if items:
                 success, message = self._execute_run(
@@ -555,7 +747,9 @@ class BatchWorker:
                     _LOG.warning("continuous run incomplete: %s", message)
             return
         with self._cond:
-            if not self._stop and self._continuous:
+            # Wake early if a manual request arrives, so it is not stuck behind
+            # the remainder of this poll interval.
+            if not self._stop and self._continuous and not self._manual:
                 self._cond.wait(_POLL_INTERVAL_S)
 
     def _execute_run(self, items: list[BatchItem], assess: bool,
@@ -563,43 +757,44 @@ class BatchWorker:
                      publish: str | None = None) -> tuple[bool, str]:
         """Sec 3.3/6 run: valve -> push k -> wait k or timeout -> publish.
 
-        Serialized by _run_lock; the valve is set before the first push and
-        restored after collection, so it never toggles with buffers in
-        flight (runs never overlap). ``publish`` selects which callbacks are
-        invoked per frame result — "detections" (default for assess=False),
-        "assessments" (default for assess=True), or "vlm" (the capture/vlm
-        path: the vlm TargetBoxArray).
+        WORKER THREAD ONLY (or a test driving it directly). It carries no lock
+        of its own: runs cannot overlap because _worker_loop is the only
+        caller, which is what lets the valve be set before the first push and
+        restored after collection without ever toggling mid-run.
+
+        ``publish`` selects which callbacks are invoked per frame result —
+        "detections" (default for assess=False), "assessments" (default for
+        assess=True), or "vlm" (the capture/vlm path: the vlm TargetBoxArray).
         """
         if publish is None:
             publish = "assessments" if assess else "detections"
-        with self._run_lock:
-            self._collector.start_run([item.pts for item in items], assess)
-            self._parts.v_assess.set_property("drop", not assess)
-            try:
-                pushed = self._push_items(items)
-                complete = self._collector.wait_complete(wait_timeout)
-            finally:
-                self._parts.v_assess.set_property("drop", True)
-            results = self._collector.results(items)
-            boxes = 0
-            assessed = 0
-            for result in results:
-                boxes += len(result.detections)
-                if publish == "assessments":
-                    self._publish_assessments(result)
-                    assessed += len(result.assessments)
-                elif publish == "vlm":
-                    self._publish_vlm_detections(result)
-                else:
-                    self._publish_detections(result)
-            message = f"{len(results)}/{len(items)} frames, {boxes} boxes"
-            if assess:
-                message += f", {assessed} assessed"
-            if not pushed:
-                message += " (appsrc push failed)"
-            elif not complete:
-                message += " (collector timeout)"
-            return pushed and complete, message
+        self._collector.start_run([item.pts for item in items], assess)
+        self._parts.v_assess.set_property("drop", not assess)
+        try:
+            pushed = self._push_items(items)
+            complete = self._collector.wait_complete(wait_timeout)
+        finally:
+            self._parts.v_assess.set_property("drop", True)
+        results = self._collector.results(items)
+        boxes = 0
+        assessed = 0
+        for result in results:
+            boxes += len(result.detections)
+            if publish == "assessments":
+                self._publish_assessments(result)
+                assessed += len(result.assessments)
+            elif publish == "vlm":
+                self._publish_vlm_detections(result)
+            else:
+                self._publish_detections(result)
+        message = f"{len(results)}/{len(items)} frames, {boxes} boxes"
+        if assess:
+            message += f", {assessed} assessed"
+        if not pushed:
+            message += " (appsrc push failed)"
+        elif not complete:
+            message += " (collector timeout)"
+        return pushed and complete, message
 
     def _push_items(self, items: list[BatchItem]) -> bool:
         """Push every item re-stamped with its feeder-assigned pts (Sec 5).

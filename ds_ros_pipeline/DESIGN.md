@@ -234,11 +234,6 @@ container, 287 is what the pipeline sees, and all loop/rate math below uses
           ! queue name=q_disk      leaky=0 max-size-bytes=67108864(64MiB)
                max-size-buffers=0 max-size-time=0
           ! filesink name=sink_rec sync=false async=false location=<outputs>/rec_<UTC>.ts
-
-          (raw variant swaps everything after q_rec for:)
-          ! nvvideoconvert name=conv_rec ! capsfilter caps=video/x-raw,format=I420
-          ! queue name=q_disk leaky=0 max-size-bytes=268435456(256MiB)
-          ! filesink name=sink_rec location=<outputs>/rec_<UTC>_WxH_I420.yuv
 ```
 
 **Why AU replay instead of seek-based looping.** Round 2 looped by segment
@@ -415,25 +410,23 @@ so cross-callback concurrency is safe:
 | Group | Type | Services | Why |
 |---|---|---|---|
 | `grp_fast` | MutuallyExclusive | `enqueue`, `clear`, both `continuous_*` toggles | Non-blocking flag/counter flips; sub-ms |
-| `grp_capture` | **Reentrant** | `capture/mosaic`, `capture/vlm`, `snapshot`, `snapshot_raw` | Each blocks up to ~2 s waiting for a frame (plus 200–600 ms PNG write for snapshots). Reentrant so a `capture/vlm` issued during a snapshot's write is served immediately — the arm/probe machinery can serve all four from the same frame; per-signal state is independently mutex-guarded, and file writes happen on the disk worker |
-| `grp_record` | MutuallyExclusive | `record/start`, `record/start_raw`, `record/stop` | `stop` waits (bounded, `record.stop_timeout` default 5 s) on the branch's **asynchronous** drain — the wait occupies this service thread only, never the pipeline (§7); start/stop must serialize with each other only |
+| `grp_capture` | **Reentrant** | `capture/mosaic`, `capture/vlm`, `snapshot` | Each blocks up to ~2 s waiting for a frame (plus 200–600 ms PNG write for snapshots). Reentrant so a `capture/vlm` issued during a snapshot's write is served immediately — the arm/probe machinery can serve all three from the same frame; per-signal state is independently mutex-guarded, and file writes happen on the disk worker |
+| `grp_record` | MutuallyExclusive | `record/start`, `record/stop` | `stop` waits (bounded, `record.stop_timeout` default 5 s) on the branch's **asynchronous** drain — the wait occupies this service thread only, never the pipeline (§7); start/stop must serialize with each other only |
 | `grp_batch` | MutuallyExclusive | `run_detect`, `run_detect_assess` | A 30 s batch must not block anything else |
 
 | Name | Type | Semantics |
 |---|---|---|
 | `/ds/capture/mosaic` | `std_srvs/srv/Trigger` | Arm one-shot; the **next** frame through the grab probe is JPEG-encoded (full-res, quality 90) and published **once** on `/mosaic_compressed`. Call blocks (≤2 s) until published; `message` = the stamp used. |
 | `/ds/capture/vlm` | `std_srvs/srv/Trigger` | Same, but publishes raw `rgb8` on `/vlm_raw`. |
-| `/ds/batch/enqueue` | `std_srvs/srv/Trigger` | Increment pending-enqueue counter; each subsequent grab-probe frame is copied (RGBA numpy + its ntp stamp) into the batch queue until the counter drains. Response `message` = resulting queue depth; `success=false` if the queue (cap: `batch.capacity`, default 16) is already full. |
-| `/ds/batch/clear` | `std_srvs/srv/Trigger` | Empty the batch queue (the *pending* queue only — a snapshot already taken by a running batch is unaffected, see race handling). |
-| `/ds/batch/run_detect` | `std_srvs/srv/Trigger` | Valve `drop=true`; atomically **swap** the queue for a fresh empty one, run the swapped snapshot through the batch pipeline, publish one `TargetBoxArray` per frame on `/ds/detections`. Blocks until published (≤30 s). `success=false` if queue empty or continuous mode active. |
+| `/ds/batch/enqueue` | `std_srvs/srv/Trigger` | Increment pending-enqueue counter; each subsequent grab-probe frame is copied (RGBA numpy + its ntp stamp) into the batch queue until the counter drains. Copied into the **manual** queue. Response `message` = resulting manual depth; `success=false` if it is already full (cap: `batch.capacity`, default 16). The continuous stream has its own queue and cannot consume this budget. |
+| `/ds/batch/clear` | `std_srvs/srv/Trigger` | Empty **both** pending queues, reporting each count — frames already claimed by a running batch are unaffected (see race handling). |
+| `/ds/batch/run_detect` | `std_srvs/srv/Trigger` | Valve `drop=true`; submit a manual run intent to the batch worker, which drains the **manual** queue `batch.engine_batch` frames at a time (newest first, each batch published in stamp order) and emits one `TargetBoxArray` per frame on `/ds/detections`. Blocks until published (≤30 s). `success=false` if the manual queue is empty. Never refused while continuous mode runs — and dispatched **ahead of** it, so it waits at most for the one batch already in flight. |
 | `/ds/batch/run_detect_assess` | `std_srvs/srv/Trigger` | Same, valve `drop=false`; additionally publish `CasualtyImageCompressed` per detected person on `/ds/assessments`. Assessment runs **only** here / in continuous-assess mode. |
-| `/ds/mode/continuous_detect` | `std_srvs/srv/SetBool` | `data=true`: grab probe auto-enqueues every `continuous.stride`-th frame (default 3 ≈ 10 Hz at the paced 30 fps); batch worker auto-runs whenever ≥`continuous.run_size` (default 4) frames queued or the oldest is >200 ms. `data=false`: stop. Manual run services are rejected while on. |
-| `/ds/mode/continuous_detect_assess` | `std_srvs/srv/SetBool` | Same with the valve open. Turning either mode on turns the other off. |
+| `/ds/mode/continuous_detect` | `std_srvs/srv/SetBool` | `data=true`: run the continuous stream with assessment **off** — grab probe auto-enqueues every `continuous.stride`-th frame (default 3 ≈ 10 Hz at the paced 30 fps); batch worker auto-runs whenever ≥`continuous.run_size` (default 4) frames queued or the oldest is >200 ms. `data=false`: stop the stream. Manual run services stay available throughout. |
+| `/ds/mode/continuous_detect_assess` | `std_srvs/srv/SetBool` | The same stream with the valve open. `data=true` on an already-running stream only turns assessment **on** (and `continuous_detect=true` only turns it off); `data=false` only retracts the assessment and keeps streaming. Continuous is one stream carrying an assessment flag, not two rival modes — only `continuous_detect=false` stops it, and the stride clock is untouched by a flag change. |
 | `/ds/record/start` | `std_srvs/srv/Trigger` | Attach the H.265/MPEG-TS branch (§7). `message` = file path. `success=false` if already recording or source ended. Recording runs seamlessly across loop boundaries (§5, §7). |
-| `/ds/record/start_raw` | `std_srvs/srv/Trigger` | Attach the raw I420 branch instead. |
 | `/ds/record/stop` | `std_srvs/srv/Trigger` | Momentary-block detach + asynchronous branch drain (§7) — the trunk is never stalled; `message` = path, frames written, frames dropped, and `drained=true|false` (false = drain timed out and the file was force-finalized, still valid by container choice). Idempotent after source-EOS finalization (§5): returns `success=true` with the stats of the already-finalized file. |
 | `/ds/snapshot` | `std_srvs/srv/Trigger` | Next grab-probe frame → full-res PNG in `snapshot.output_dir`. Blocks until the file is closed; `message` = path. |
-| `/ds/snapshot_raw` | `std_srvs/srv/Trigger` | Same, written as `.ppm` (raw RGB, header + pixels — trivially parseable, viewable) + `.json` sidecar with the stamp. |
 
 Topics published:
 
@@ -595,8 +588,14 @@ before force-finalizing, §7),
 
 - **Queueing**: the grab probe (Branch G) copies the mapped unified-memory
   RGBA surface (`pyds.get_nvds_buf_surface` → `np.array(..., copy=True)`,
-  ~14.75 MB/frame, a few ms) into a `deque` capped at `batch.capacity=16`
-  (≈236 MB host RAM). Memory format: system-memory RGBA numpy + stamp +
+  ~14.75 MB/frame, a few ms) into one of **two** deques — manual
+  (`request_enqueue`, capped at `batch.capacity=16`, refuses when full) or
+  continuous (stride-fired, capped at `continuous.capacity=8`, evicts its
+  **oldest** when full). Keeping them apart is what stops a continuous
+  auto-run consuming hand-picked frames. Runs claim **newest-first** and
+  publish each batch in stamp order. On Jetson these copies share one unified
+  pool with the engines, so queue depth and `batch.engine_batch` must be sized
+  together. Memory format: system-memory RGBA numpy + stamp +
   feeder-assigned pts. Copies happen **only** for signalled/continuous-strided
   frames.
 - **Feeding**: appsrc → `nvvideoconvert` (host→NVMM) → `nvstreammux
@@ -640,12 +639,23 @@ before force-finalizing, §7),
   pts (globally unique, §5) and publishes with each item's own ntp stamp.
   Assessment parsing reuses `parse_assessment_tensor_meta` (8 heads, softmax)
   unchanged.
-- **Run lifecycle & races**: at run start the worker atomically
-  snapshot-and-swaps the deque (§4); enqueues during the run land in the fresh
-  deque and are never destroyed. There is no post-run clear.
-- **Continuous modes**: same machinery — the mode flag makes the grab probe
-  auto-enqueue every `continuous.stride`-th frame and the worker auto-run;
-  no second code path. Stride default 3 (~10 Hz at the paced 30 fps) because
+- **Run lifecycle & races**: the "batch" worker thread is the **sole runner**;
+  service threads submit a `RunRequest` and block on it. The worker claims
+  frames at *dispatch*, not at submit, so a queued request covers everything
+  enqueued while it waited and the reported depth never hides frames. Enqueues
+  during a run are never destroyed; there is no post-run clear. Because only
+  one thread ever executes a run, runs cannot overlap and the valve is never
+  toggled with buffers in flight — no run lock is needed.
+- **Priority**: the worker dispatches queued manual requests ahead of the
+  continuous stream — one branch, not a lock. A lock could not express this:
+  the decision to start a continuous run happens in the tick, *above* the run,
+  where the frames have already been claimed. Runs are capped at
+  `batch.engine_batch` frames so a long queue costs more batches rather than
+  one long run, which bounds how long a manual request can be made to wait.
+  `nvinfer` has no cancellation, so priority applies at run boundaries only.
+- **Continuous modes**: same `_execute_run` machinery — the mode flag makes the
+  grab probe auto-enqueue every `continuous.stride`-th frame and the worker
+  auto-run; one runner, two intent sources, no second execution path. Stride default 3 (~10 Hz at the paced 30 fps) because
   yolo12x on an RTX 3070 is ~30–40 ms/frame — full 30 fps continuous is
   possible but leaves no GPU headroom (tunable to 1).
 - **Isolation**: separate pipeline + `block=true` appsrc pushed only from the
@@ -701,7 +711,7 @@ before force-finalizing, §7),
      wedged under non-leaky `q_disk`), the service thread sets the branch to
      NULL anyway and reports `success=true, drained=false`. This is safe
      *because of* the container choices below: every byte that reached disk
-     remains a valid playable TS (or raw-I420) prefix — the drain timeout
+     remains a valid playable TS prefix — the drain timeout
      path is deliberately identical in effect to the crash the formats were
      chosen to survive. The trunk never waited in either outcome.
 
@@ -726,27 +736,17 @@ before force-finalizing, §7),
   `h265parse config-interval=-1` repeats VPS/SPS/PPS at every IDR and
   `idrinterval=30` gives 1 s closed GOPs, so a truncated file loses ≤1 s.
   CBR 200 Mbps (`control-rate=1`) keeps the disk load flat.
-- **Raw variant** (`/ds/record/start_raw`): same dynamic attach and the same
-  momentary-block detach/async-drain (the drain is longer — up to ~1.5 s of
-  buffered raw at 166 MB/s — which is exactly why it must not run under a
-  trunk block), branch tail =
-  `nvvideoconvert → video/x-raw,I420 → q_disk → filesink *.yuv` + the same
-  `.jsonl` sidecar. A headerless I420 stream is the ultimate crash-tolerant
-  container: any 5,529,600-byte-aligned prefix is valid; the sidecar gives
-  frame count/stamps; README documents the ffplay incantation
-  (`-f rawvideo -pixel_format yuv420p -video_size 2560x1440`).
 - **Disk math** (valid because the pipeline is paced to 30 fps — §3.1):
-  H.265 200 Mbps = **25 MB/s** (1.5 GB/min, 90 GB/h) — any SSD; fine. Raw
-  I420 2560×1440×1.5 B×30 fps = **166 MB/s** — needs a real SSD (SATA
-  ~500 MB/s OK, NVMe comfortable, HDD not viable); `q_disk` (256 MiB) rides
-  out ~1.5 s stalls, beyond that `q_rec` drops whole frames and counts them.
+  H.265 200 Mbps = **25 MB/s** (1.5 GB/min, 90 GB/h) — any SSD; fine.
+  `q_disk` (64 MiB) rides out a stall, beyond that `q_rec` drops whole frames
+  and counts them.
   NVENC on the RTX 3070 encodes 1440p **at the paced 30 fps** HEVC in hardware
   with ample headroom; 200 Mbps at 1440p30 is ~1.8 bits/px — visually
   lossless territory. (Unpaced, decode outruns NVENC at this bitrate — one
   more reason `pace` exists.)
 - **Snapshot**: grab-probe copy → "disk" worker thread → `cv2.imwrite` PNG
   (lossless, ~200–600 ms for 2560×1440 — off the streaming thread, so
-  harmless) or `.ppm` for raw. Filename + sidecar carry the stamp (§5).
+  harmless). Filename + sidecar carry the stamp (§5).
 
 ## 8. Low-res continuous stream
 
@@ -816,13 +816,13 @@ loop only (leading-picture discard at cold start, §5) — it is not a drop bug.
 | 7 | Continuous mode | `ros2 service call /ds/mode/continuous_detect std_srvs/srv/SetBool "{data: true}"` | `/ds/detections` at ~10 Hz (stride 3 of paced 30 fps); preview hz unchanged at ~30 (isolation, §3.2); SetBool false stops it |
 | 8 | Recording + crash tolerance | `/ds/record/start`; after ~6 s `docker kill ds-ros-pipeline` (SIGKILL, no drain; name is fixed by `container_name`) | `ffprobe outputs/ds_ros/rec_*.ts` → playable HEVC 2560×1440; duration within 1 s (one GOP) of kill−start wall time; sidecar line count ≈ ffprobe frame count |
 | 9 | Recording clean stop **across a loop boundary** | start; wait 15 s (guaranteed ≥1 loop wrap at 9.56 s/loop); `/ds/record/stop` **while `ros2 topic hz /ds/preview/compressed` runs in a third shell** | Response reports path + frames ≈ 450 (15 s × 30 fps; §5 measured the wrap gapless, so no boundary tolerance needed beyond leaky-queue drops, which the response counts separately) and `drained=true`; `ffprobe` duration ≈15 s with a monotonic timeline (no discontinuity error at the wrap); bitrate ≈200 Mbps (`ffprobe -show_format` bit_rate ≈ 2.0e8); **preview hz never dips through the stop** (the round-3 drain-under-block design measurably dropped it to ~0.5 Hz — this observable pins the fix) |
-| 10 | Raw recording | `/ds/record/start_raw`, 3 s, stop | File size ≈ 3×30×5,529,600 B (≈498 MB — valid math because paced); `ffplay -f rawvideo -pixel_format yuv420p -video_size 2560x1440 rec_*.yuv` shows the clip |
-| 11 | Snapshot | `/ds/snapshot` and `/ds/snapshot_raw` | `snap_*.png` opens, 2560×1440; `.ppm` + `.json` sidecar stamp matches response |
+| 10 | Everything at once | With `continuous_detect` on and `record/start` active, call `capture/vlm`, `capture/mosaic` and `snapshot`; then `continuous_detect_assess true`, then `false` | Every one-shot returns `success=true` while the stream and the recording run; the assess toggles report "still running, assessment enabled/disabled", `/ds/status` `mode` follows, and `/uas4/target_detections` never stops arriving across either switch (`integration/verify_pipes.py` pipe 4) |
+| 11 | Snapshot | `/ds/snapshot` | `snap_*.png` opens, 2560×1440; `.json` sidecar stamp matches response |
 | 12 | Timestamp propagation | Compare stamp of a mosaic, a detection for the same signalled frame, and the snapshot sidecar taken in the same second | Same clock domain (unix now), monotonic per source frame — including across a loop wrap (feeder-assigned pts never repeats) |
 | 13 | Backpressure immunity | While recording *and* running continuous_detect_assess *and* echoing `/vlm_raw`, watch `/ds/status` and preview hz; also `nvidia-smi` for the VRAM budget | Preview stays ~30 Hz; loop cadence stays ~9.6 s (decoder pool never starves — proves the num-extra-surfaces accounting); drop counters may rise on recorder/batch only |
 | 14 | Signal-timing independence | While a `snapshot` call is in flight (blocks ~0.5 s), fire `record/start`, `enqueue`, **and a `capture/vlm`** | All three return without waiting for the snapshot (separate groups for record/enqueue; Reentrant `grp_capture` for the concurrent capture, §4) |
 | 15 | Non-looping EOS behavior (fallback mode, §5) | Relaunch with `-p source.loop:=false`; `/ds/record/start` at t≈2 s; wait past end of media (~10 s); then `/ds/capture/mosaic` and `/ds/record/stop` | `/ds/status` state flips to `ended` (still publishing at 1 Hz); the recording was finalized by the source EOS — `ffprobe` shows a valid ~8 s file; `capture/mosaic` returns `success=false, "source ended"` immediately (no 2 s hang); `record/stop` returns `success=true` with the finalized stats; process still alive |
-| 16 | Stop under raw-drain load never stalls the trunk (§7) | `/ds/record/start_raw`; wait 3 s; `/ds/record/stop` while `ros2 topic hz /ds/preview/compressed` runs — the raw drain (up to ~1.5 s of buffered I420 at 166 MB/s) is the longest drain the design can produce | Preview hz shows no gap >~100 ms across the stop instant (the drain runs detached from the tee); loop cadence in `/ds/status` unperturbed; stop response arrives with `drained=true` ≤ `record.stop_timeout`. (The timeout/force-finalize path itself — a wedged disk — is exercised at the unit seam below, not with real hardware) |
+| 16 | Stop under drain load never stalls the trunk (§7) | `/ds/record/start`; wait 3 s; `/ds/record/stop` while `ros2 topic hz /ds/preview/compressed` runs | Preview hz shows no gap >~100 ms across the stop instant (the drain runs detached from the tee); loop cadence in `/ds/status` unperturbed; stop response arrives with `drained=true` ≤ `record.stop_timeout`. (The timeout/force-finalize path itself — a wedged disk — is exercised at the unit seam below, not with real hardware) |
 
 **GPU/ROS-free seams** (run anywhere: `python3 -m pytest
 ds_ros_pipeline/tests.py`): `TimestampRegistry` bounding and resolve-fallback
@@ -926,7 +926,7 @@ in-container.
   {"path": "ds_ros_pipeline/frames.py", "purpose": "Grab probe state machine: one-shot flags with coalescing, enqueue counter, BatchItem deque with snapshot-and-swap, surface->numpy copy", "depends_on": ["ds_ros_pipeline/timestamps.py", "ds_ros_pipeline/config.py"]},
   {"path": "ds_ros_pipeline/batch_pipeline.py", "purpose": "Batch pipeline (appsrc->mux->pgie->valve->sgie) with explicit pool sizing, serialized worker, detection/assessment collectors keyed by feeder-assigned pts", "depends_on": ["ds_ros_pipeline/infer_configs.py", "ds_ros_pipeline/frames.py"]},
   {"path": "ds_ros_pipeline/infer_configs.py", "purpose": "Writes the batch-N yolo12x nvinfer config into ds_ros_pipeline/generated/ reusing existing ONNX/labels/custom parser; injury b8 config reused as-is", "depends_on": ["ds_ros_pipeline/config.py"]},
-  {"path": "ds_ros_pipeline/disk.py", "purpose": "Dynamic record branch (H.265 MPEG-TS + raw I420): attach, momentary-block IDLE-probe detach with async drain and timeout force-finalize (unit-testable state machine), jsonl sidecars, PNG/PPM snapshot writers, disk worker", "depends_on": ["ds_ros_pipeline/live_pipeline.py", "ds_ros_pipeline/timestamps.py", "ds_ros_pipeline/config.py"]},
+  {"path": "ds_ros_pipeline/disk.py", "purpose": "Dynamic record branch (H.265 MPEG-TS): attach, momentary-block IDLE-probe detach with async drain and timeout force-finalize (unit-testable state machine), jsonl sidecars, PNG snapshot writer, disk worker", "depends_on": ["ds_ros_pipeline/live_pipeline.py", "ds_ros_pipeline/timestamps.py", "ds_ros_pipeline/config.py"]},
   {"path": "ds_ros_pipeline/ros_io.py", "purpose": "rclpy node: services, publishers, QoS (incl. TRANSIENT_LOCAL one-shots), four callback groups (Reentrant grp_capture), ended-state fail-fast, message builders, /ds/status", "depends_on": ["ds_ros_pipeline/config.py", "ds_ros_pipeline/frames.py", "ds_ros_pipeline/disk.py", "ds_ros_pipeline/batch_pipeline.py"]},
   {"path": "ds_ros_pipeline/ds_node.py", "purpose": "Entrypoint: builds both pipelines, wires probes to the node, bus handling incl. EOS->ended transition, thread lifecycle", "depends_on": ["ds_ros_pipeline/live_pipeline.py", "ds_ros_pipeline/batch_pipeline.py", "ds_ros_pipeline/ros_io.py", "ds_ros_pipeline/disk.py"]},
   {"path": "ds_ros_pipeline/tests.py", "purpose": "GPU/ROS-free unit tests: registry, feeder pts-schedule (monotonic/unique across wraps), arm/coalesce/swap logic, ended-state machine, config writer golden test, source selection", "depends_on": ["ds_ros_pipeline/timestamps.py", "ds_ros_pipeline/frames.py", "ds_ros_pipeline/source.py", "ds_ros_pipeline/infer_configs.py"]}

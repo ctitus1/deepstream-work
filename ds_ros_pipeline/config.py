@@ -25,7 +25,7 @@ class PipelineConfig:
     source_loop: bool = True                      # source.loop (AU-replay loop, Sec 3.1/5)
     source_max_preload_mb: int = 1024             # source.max_preload_mb guard (Sec 11 risk 6)
     batch_capacity: int = 16                      # batch.capacity (manual BatchItem deque cap)
-    batch_engine_batch: int = 8                   # batch.engine_batch (b8 engine / mux batch-size)
+    batch_engine_batch: int = 8                   # batch.engine_batch (b8 engine; frames per RUN, not the mux batch-size — the mux is 1)
     continuous_stride: int = 3                    # continuous.stride
     continuous_run_size: int = 4                  # continuous.run_size
     # continuous.capacity — the continuous deque's cap, separate from

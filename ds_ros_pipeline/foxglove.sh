@@ -35,18 +35,19 @@ if [ -n "${CDCL_ROS_SETUP:-}" ] && [ -f "$CDCL_ROS_SETUP" ]; then
 else
     echo "ds_ros_pipeline/foxglove.sh: CDCL_ROS_SETUP unset or missing" >&2
     echo "  (${CDCL_ROS_SETUP:-<unset>})" >&2
-    echo "Continuing without cdcl_umd_msgs: /ds/detections and" >&2
-    echo "/ds/assessments will be advertised but cannot be deserialized." >&2
+    echo "Continuing without cdcl_umd_msgs: the /uas4/target_detections" >&2
+    echo "topics will be advertised but cannot be deserialized." >&2
 fi
 
-# Stock launch arguments only. /vlm_raw messages (11,059,256 B of raw rgb8)
-# sit just above foxglove_bridge's 10 MB send_buffer_limit default, so raising
-# that looked necessary -- but an A/B against a stock bridge on a second port
+# Stock launch arguments only. This once mattered because /vlm_raw messages
+# (11,059,256 B of raw rgb8) sat just above foxglove_bridge's 10 MB
+# send_buffer_limit default; an A/B against a stock bridge on a second port
 # delivered every raw frame either way, including a 6-deep burst against a
-# deliberately non-reading client: the limit caps a per-client *backlog*, and
-# on localhost the socket drains faster than one accumulates. The knob is left
-# at its default rather than tuned on a guess; a genuinely slow or remote
-# viewer that drops raw frames is the case to revisit it, via FOXGLOVE_ARGS:
+# deliberately non-reading client, because the limit caps a per-client
+# *backlog* and on localhost the socket drains faster than one accumulates.
+# That topic is gone -- the largest message now is the full-res mosaic JPEG at
+# ~1-2 MB -- so the default has margin to spare. Kept as the knob to reach for
+# if a genuinely slow or remote viewer ever drops frames, via FOXGLOVE_ARGS:
 #
 #   FOXGLOVE_ARGS="send_buffer_limit:=67108864" docker compose ... up
 exec ros2 launch foxglove_bridge foxglove_bridge_launch.xml \

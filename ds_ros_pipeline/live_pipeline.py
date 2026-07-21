@@ -12,7 +12,8 @@ preview.width x preview.height -> nvjpegenc quality=preview.quality ->
 appsink emit-signals=true sync=false max-buffers=1 drop=true). Every element
 name and property value in Sec 3.1 is load-bearing (empirically validated) —
 implement them verbatim. Branch R is NOT built here; disk.py attaches it
-dynamically to ``t_ingest`` via ``request_tee_pad``/``release_tee_pad``.
+dynamically to ``t_ingest`` via ``request_tee_pad`` and releases the pad
+itself on the detach and source-EOS paths.
 
 Gst imports are performed inside the builder functions so tests.py can import
 sibling modules without GStreamer present.
@@ -79,11 +80,6 @@ def request_tee_pad(t_ingest):
     if pad is None:
         raise RuntimeError("t_ingest refused a src_%u request pad")
     return pad
-
-
-def release_tee_pad(t_ingest, pad) -> None:
-    """Release a previously requested tee pad (Sec 7 detach callback)."""
-    t_ingest.release_request_pad(pad)
 
 
 def build_live_pipeline(config: PipelineConfig, source: SourceBin) -> LiveParts:

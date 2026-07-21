@@ -65,7 +65,7 @@ Chosen over the existing two-container TCP-bridge split. Justification:
 
 | Criterion | Single container (chosen) | TCP-bridge split (existing) |
 |---|---|---|
-| `/vlm_raw` (raw `sensor_msgs/Image`, ~11 MB/frame at 2560×1440 rgb8) | Direct `publisher.publish()`; DDS handles it | frame_wire protocol is JPEG-oriented; raw frames would add a serialize+copy+socket hop and a protocol extension |
+| `/vlm_raw` (raw `sensor_msgs/Image`, ~11 MB/frame at 2560×1440 rgb8) — *superseded: `capture/vlm` now publishes a JPEG-bearing `TargetBoxArray`, so no raw-frame topic exists. Retained as the rationale that stood when the choice was made.* | Direct `publisher.publish()`; DDS handles it | frame_wire protocol is JPEG-oriented; raw frames would add a serialize+copy+socket hop and a protocol extension |
 | Signal latency ("publish the *next* frame") | Service callback flips a flag read by a pad probe in the same process — deterministic next-frame semantics | Signal must cross TCP; "next frame" becomes "next frame after a socket round-trip", racy |
 | Recording/snapshot control | Service directly attaches/detaches Gst branches | Would need a new control channel in the wire protocol |
 | Feasibility | DS 7.1 image is Ubuntu 22.04 (jammy) — exactly the distro ROS2 Humble targets; `apt install ros-humble-ros-base` is supported. Python 3.10 on both sides, so `rclpy` and `pyds` 1.2.0 coexist in one interpreter | Already works, but only for the JPEG-metadata flow |
@@ -191,7 +191,7 @@ container, 287 is what the pipeline sees, and all loop/rate math below uses
       │                requested src_%u pad, each behind its own leaky queue —
       │                the tee itself therefore never blocks)
       │
-      ├──[Branch G: grabber — serves mosaic / vlm_raw / enqueue / snapshot]────
+      ├──[Branch G: grabber — serves mosaic / vlm / enqueue / snapshot]────────
       │   queue name=q_grab        leaky=2(downstream) max-size-buffers=4
       │                            max-size-bytes=0 max-size-time=0
       │   ! nvstreammux name=mux_grab batch-size=1 width=W height=H
@@ -349,7 +349,8 @@ appsrc name=src_batch is-live=true format=time block=true do-timestamp=false
      caps=video/x-raw,format=RGBA,width=W,height=H,framerate=0/1
 ! nvvideoconvert name=conv_batch output-buffers=16
 ! capsfilter name=caps_batch caps=video/x-raw(memory:NVMM),format=RGBA
-! nvstreammux name=mux_batch batch-size=8 width=W height=H
+! nvstreammux name=mux_batch batch-size=1 width=W height=H
+     (NOT batch.engine_batch — see "The mux is batch-size=1" below)
      batched-push-timeout=100000 attach-sys-ts=false live-source=false
 ! nvinfer name=pgie_batch config-file-path=ds_ros_pipeline/generated/ds_ros_infer_batch_yolo12x_640_640x384_b8.txt
      ◄── PROBE det_collect (src pad): reads obj metas per frame_meta,
@@ -363,25 +364,41 @@ appsrc name=src_batch is-live=true format=time block=true do-timestamp=false
 ! fakesink name=sink_batch sync=false async=false
 ```
 
-**Pool sizing is load-bearing, not tuning.** `nvstreammux batch-size=8`
-accumulates up to 8 input buffers inside the mux before pushing a batch, and
-those inputs are `conv_batch`'s pool buffers. `nvvideoconvert`'s default
+**The mux is `batch-size=1`, not `batch.engine_batch`.** This section
+originally specified `batch-size=8`; bring-up proved that wrong. Every frame
+here enters on the one `sink_0` pad, so the legacy `nvstreammux` stamps them
+all `source_id=0`; when it packs several into one batch, `nvinfer` annotates
+only `batch_id=0` and every later frame emerges with zero objects (measured: a
+6-frame run published boxes on frame 0 and empty arrays on frames 1–5, even
+when all six buffers were byte-identical copies). `batch-size=1` makes the mux
+emit one frame per batch — the case `nvinfer` handles correctly for a single
+source. The pgie config stays b8 (the engine accepts any batch in [1, 8]) and
+the run still streams back-to-back; it just no longer infers 8-up. So
+`batch.engine_batch` bounds how many frames a *run* drains, not the mux batch.
+Recovering true batched inference needs one mux sink pad per frame — deferred,
+see README.
+
+**Pool sizing is still load-bearing, not tuning.** `nvvideoconvert`'s default
 output pool is 4 buffers — empirically (reproduced in `deepstream-work:7.1`
 with a batch-size-counting probe), pushing 32 buffers through
 `videotestsrc ! nvvideoconvert ! nvstreammux(batch-size=8) ! fakesink` with
 default pools yields one partial batch `[4]` and then a permanent wedge (the
 mux pins all 4 pool buffers waiting for 8; upstream blocks forever), while the
-same pipeline with `output-buffers=16` produces clean `[8, 8, 8, 8]`.
-`output-buffers=16` = 8 pinned in the mux + 8 for the next batch in flight.
-Without this property the design's own `run_detect` with >4 queued frames
-would hit the collector timeout and leave the persistent batch pipeline wedged
-for every subsequent run.
+same pipeline with `output-buffers=16` produces clean `[8, 8, 8, 8]`. That
+experiment is what fixed `CONV_OUTPUT_BUFFERS = 16`, and the property is still
+set — but note the wedge it defends against was a `batch-size=8` failure mode.
+At `batch-size=1` the mux pins one buffer at a time, so 16 is now generous
+headroom rather than the minimum viable pool. Left at 16 deliberately: it costs
+little, and it is the value that must be restored to spec if the multi-sink-pad
+fix ever lands.
 
 The batch worker serializes runs: push k buffers → wait until `det_collect`
 (and `assess_collect` if valve open) has seen k frames or a 10 s timeout →
 publish → flip valve for the next run if needed. Because runs never overlap,
-valve toggling is race-free. Queues of k>8 run as successive ≤8-frame batches;
-a trailing partial batch is flushed by `batched-push-timeout=100000` (100 ms).
+valve toggling is race-free. A run of k frames therefore goes through as k
+single-frame batches; `batched-push-timeout=100000` (100 ms) bounds how long
+the mux waits before pushing rather than flushing partial batches, since at
+`batch-size=1` no batch is ever partial.
 
 ---
 
@@ -409,19 +426,19 @@ so cross-callback concurrency is safe:
 
 | Group | Type | Services | Why |
 |---|---|---|---|
-| `grp_fast` | MutuallyExclusive | `enqueue`, `clear`, both `continuous_*` toggles | Non-blocking flag/counter flips; sub-ms |
+| `grp_fast` | MutuallyExclusive | `enqueue`, `clear`, `mode/toggle_detection`, `mode/toggle_assessment` | Non-blocking flag/counter flips; sub-ms |
 | `grp_capture` | **Reentrant** | `capture/mosaic`, `capture/vlm`, `snapshot` | Each blocks up to ~2 s waiting for a frame (plus 200–600 ms PNG write for snapshots). Reentrant so a `capture/vlm` issued during a snapshot's write is served immediately — the arm/probe machinery can serve all three from the same frame; per-signal state is independently mutex-guarded, and file writes happen on the disk worker |
 | `grp_record` | MutuallyExclusive | `record/start`, `record/stop` | `stop` waits (bounded, `record.stop_timeout` default 5 s) on the branch's **asynchronous** drain — the wait occupies this service thread only, never the pipeline (§7); start/stop must serialize with each other only |
 | `grp_batch` | MutuallyExclusive | `run_detect`, `run_detect_assess` | A 30 s batch must not block anything else |
 
 | Name | Type | Semantics |
 |---|---|---|
-| `/ds/capture/mosaic` | `std_srvs/srv/Trigger` | Arm one-shot; the **next** frame through the grab probe is JPEG-encoded (full-res, quality 90) and published **once** on `/mosaic_compressed`. Call blocks (≤2 s) until published; `message` = the stamp used. |
-| `/ds/capture/vlm` | `std_srvs/srv/Trigger` | Same, but publishes raw `rgb8` on `/vlm_raw`. |
+| `/ds/capture/mosaic` | `std_srvs/srv/Trigger` | Arm one-shot; the **next** frame through the grab probe is JPEG-encoded (full-res, quality 90) and published **once** as a `TargetBoxArray` on `/uas4/target_detections/mosaic` — the image and its stamp, an **empty** `uav_target_boxes` (nothing is inferred on this path), and `use_for_mosaic=true`. Call blocks (≤2 s) until published; `message` = the stamp used. |
+| `/ds/capture/vlm` | `std_srvs/srv/Trigger` | Arm one-shot; the **next** frame is run through **detection** (bypassing the batch queue), then one `TargetBoxArray` is published on `/uas4/target_detections/vlm` — field-for-field what `run_detect` would publish for that frame, except `use_for_assessment=true` on every box and `do_assessment=true` on the array. Blocks for the capture (≤2 s) plus the run (≤10 s); `message` = the stamp used + run counts. |
 | `/ds/batch/enqueue` | `std_srvs/srv/Trigger` | Increment pending-enqueue counter; each subsequent grab-probe frame is copied (RGBA numpy + its ntp stamp) into the batch queue until the counter drains. Copied into the **manual** queue. Response `message` = resulting manual depth; `success=false` if it is already full (cap: `batch.capacity`, default 16). The continuous stream has its own queue and cannot consume this budget. |
 | `/ds/batch/clear` | `std_srvs/srv/Trigger` | Empty **both** pending queues, reporting each count — frames already claimed by a running batch are unaffected (see race handling). |
-| `/ds/batch/run_detect` | `std_srvs/srv/Trigger` | Valve `drop=true`; submit a manual run intent to the batch worker, which drains the **manual** queue `batch.engine_batch` frames at a time (newest first, each batch published in stamp order) and emits one `TargetBoxArray` per frame on `/ds/detections`. Blocks until published (≤30 s). `success=false` if the manual queue is empty. Never refused while continuous mode runs — and dispatched **ahead of** it, so it waits at most for the one batch already in flight. |
-| `/ds/batch/run_detect_assess` | `std_srvs/srv/Trigger` | Same, valve `drop=false`; additionally publish `CasualtyImageCompressed` per detected person on `/ds/assessments`. Assessment runs **only** here / in continuous-assess mode. |
+| `/ds/batch/run_detect` | `std_srvs/srv/Trigger` | Valve `drop=true`; submit a manual run intent to the batch worker, which drains the **manual** queue `batch.engine_batch` frames at a time (newest first, each batch published in stamp order) and emits one **detection** `TargetBoxArray` per frame (boxes with empty `annotations`) on `/uas4/target_detections`. Blocks until published (≤30 s). `success=false` if the manual queue is empty. Never refused while continuous mode runs — and dispatched **ahead of** it, so it waits at most for the one batch already in flight. |
+| `/ds/batch/run_detect_assess` | `std_srvs/srv/Trigger` | Same, valve `drop=false`; per frame one **assessment** `TargetBoxArray` on the same `/uas4/target_detections` — the same boxes, with the 8 `clip_rgb_*` heads filled into the `annotations` of every assessed box (the plain detection array is not additionally published). Assessment runs **only** here / in continuous-assess mode. |
 | `/ds/mode/toggle_detection` | `std_srvs/srv/SetBool` | `data=true`: start the continuous stream — grab probe auto-enqueues every `continuous.stride`-th frame (default 3 ≈ 10 Hz at the paced 30 fps); batch worker auto-runs whenever ≥`continuous.run_size` (default 4) frames pend in the continuous queue or the oldest is >200 ms. `data=false`: stop it. Does not touch the assessment flag. Manual run services stay available throughout and are dispatched first. |
 | `/ds/mode/toggle_assessment` | `std_srvs/srv/SetBool` | Open (`true`) or close (`false`) the `v_assess` valve for continuous runs. Strictly independent of `toggle_detection`: it never starts or stops the stream, and never resets the stride clock — mid-stream it only changes whether the next run opens the valve. Set while detection is off it is remembered and applies when detection starts. The two flags are the whole continuous state; `/ds/status` `mode` is their derived view (`off`/`detect`/`detect_assess`). |
 | `/ds/record/start` | `std_srvs/srv/Trigger` | Attach the H.265/MPEG-TS branch (§7). `message` = file path. `success=false` if already recording or source ended. Recording runs seamlessly across loop boundaries (§5, §7). |
@@ -432,12 +449,11 @@ Topics published:
 
 | Topic | Type | QoS | Notes |
 |---|---|---|---|
-| `/mosaic_compressed` | `sensor_msgs/CompressedImage` | RELIABLE, KEEP_LAST 5, **TRANSIENT_LOCAL** | one-shot; durability latches the message so a subscriber joining after the publish still receives it (makes "echo then call" ordering non-fragile) |
-| `/vlm_raw` | `sensor_msgs/Image` | RELIABLE, KEEP_LAST 1, **TRANSIENT_LOCAL** | ~11 MB/msg; depth 1 bounds latched memory to one frame |
+| `/uas4/target_detections/mosaic` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 5, **TRANSIENT_LOCAL** | capture/mosaic output: no boxes, `use_for_mosaic=true`, `source_img` = **full-res** q90 JPEG (not the 640×368 detection image — a mosaic is stitched from these). Durability latches the message so a subscriber joining after the publish still receives it (makes "echo then call" ordering non-fragile) |
 | `/ds/preview/compressed` | `sensor_msgs/CompressedImage` | BEST_EFFORT, KEEP_LAST 1 (sensor-data profile) | continuous ~30 Hz, 640×360 JPEG q75 |
-| `/ds/detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame; `source_img` is a 640×368 JPEG of that frame (message-size hygiene, matches existing bridge) |
-| `/ds/assessments` | `cdcl_umd_msgs/CasualtyImageCompressed` | RELIABLE, KEEP_LAST 10 | one per assessed person; `annotations` = 8 `clip_rgb_*` heads (same shape `ros_bridge.py` emits) |
-| `/ds/status` | `diagnostic_msgs/DiagnosticArray` | RELIABLE, KEEP_LAST 1 | 1 Hz: state (`running`/`ended`), mode, queue depth, recording state, drop counters, loop count (= the feeder's `n_loops`) |
+| `/uas4/target_detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | the shared batch topic, named like `ros_bridge.py`'s detect topic: one per batched frame, detect runs → `annotations` empty, assess runs → the same boxes with the 8 `clip_rgb_*` heads on assessed ones. `source_img` is a 640×368 JPEG of that frame (message-size hygiene, matches existing bridge); boxes are in **`source_img` pixel coordinates**; `use_for_assessment=false` on every box |
+| `/uas4/target_detections/vlm` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10, **TRANSIENT_LOCAL** | capture/vlm output: one for the captured frame, message-identical to what a detect run would put on `/uas4/target_detections` except `use_for_assessment=true` on every box and `do_assessment=true` on the array. Latched like the other one-shot outputs; `seq` is counted separately from the batch topic's |
+| `/ds/status` | `diagnostic_msgs/DiagnosticArray` | RELIABLE, KEEP_LAST 1 | 1 Hz, eleven keys: `state` (`running`/`ended`), `mode`, `queue_depth` (the **manual** queue — the number an `enqueue` caller is counting), `continuous_queue_depth` (reported separately, never folded in, so N enqueues always report N), `recording`, `loop_count` (= the feeder's `n_loops`), `stale_results`, and the four `Grab.counters()` drop counters `enqueue_drops`, `continuous_skips`, `copy_failures`, `resolve_skips` |
 
 Race handling:
 
@@ -458,14 +474,21 @@ Race handling:
 
 ROS parameters (declared in `config.py`, all overridable via `--ros-args -p`):
 `source.uri` (default `file://…/streams/lorton-d4-rgb-nano.mp4`), `source.loop`
-(default true — AU-replay loop, §3.1/§5), `batch.capacity=16`,
-`batch.engine_batch=8`, `continuous.stride=3`, `continuous.run_size=4`,
+(default true — AU-replay loop, §3.1/§5), `source.max_preload_mb=1024`
+(§11 risk 6), `batch.capacity=16`, `batch.engine_batch=8` (frames drained per
+*run* — **not** the mux batch-size, which is 1; see §3.3),
+`continuous.stride=3`, `continuous.run_size=4`, `continuous.capacity=8` (the
+continuous deque's cap, separate from `batch.capacity` so the stream cannot eat
+the operator's enqueue budget; it drops its **oldest** entry when full),
 `preview.width=640`, `preview.height=360`, `preview.quality=75`,
 `record.bitrate=200000000`, `record.output_dir=outputs/ds_ros`,
 `record.stop_timeout=5.0` (seconds to wait for the asynchronous branch drain
 before force-finalizing, §7),
 `snapshot.output_dir=outputs/ds_ros`, `detections.image_width=640`,
-`detections.image_height=368`, `frame_id=ds_camera`.
+`detections.image_height=368`, `frame_id=ds_camera`,
+`detect.min_confidence=0.4` (the pgie's person `pre-cluster-threshold` — baked
+into the generated nvinfer config at startup, so changing it at runtime has no
+effect; see §6 "Detection scope").
 
 ---
 
@@ -568,7 +591,7 @@ before force-finalizing, §7),
   `frame_wire`, not `assessment_runtime`), falling back to the arrival-time
   registry. One function, `timestamps.resolve(pts)`, hides this.
 - **Propagation**:
-  - ROS: every `header.stamp` (and `CasualtyImageCompressed.stamp` /
+  - ROS: every `header.stamp` (and the nested `source_img.header.stamp` /
     `position.header.stamp`) = `sec/nanosec` split of the resolved ntp ns —
     same copy-one-stamp-everywhere discipline as `ros_bridge.py`.
   - Batch: each queued `BatchItem(frame_rgba, ntp_ns, pts)` carries its stamp
@@ -599,24 +622,35 @@ before force-finalizing, §7),
   feeder-assigned pts. Copies happen **only** for signalled/continuous-strided
   frames.
 - **Feeding**: appsrc → `nvvideoconvert` (host→NVMM) → `nvstreammux
-  batch-size=8` → nvinfer, with the pool sizing of §3.3
-  (`output-buffers=16`, `max-bytes=256 MiB`) — without which the default
-  4-buffer convert pool deadlocks the b8 mux, as empirically reproduced.
-  Chosen over TensorRT-direct because it reuses the exact letterboxing
-  (`maintain-aspect-ratio=1 symmetric-padding=1`), the custom parser
+  batch-size=1` → nvinfer, with the pool sizing of §3.3
+  (`output-buffers=16`, `max-bytes=256 MiB`). Chosen over TensorRT-direct
+  because it reuses the exact letterboxing (`maintain-aspect-ratio=1
+  symmetric-padding=1`), the custom parser
   `lib/libnvdsinfer_custom_impl_Yolo.so`, and the SGIE crop-and-assess
-  machinery for free, and keeps one inference stack in the repo. Queues >8
-  frames run as successive ≤8-frame batches (`batched-push-timeout=100000`
-  flushes partial batches after 100 ms).
+  machinery for free, and keeps one inference stack in the repo. A run of k
+  queued frames goes through as k single-frame batches — the single-sink-pad
+  mux cannot batch correctly (§3.3), so `batch.engine_batch` bounds the run,
+  not the mux.
 - **Engines**:
   - **yolo12x: a batch-8 engine is needed** (only
     `yolo12x_640_640x384.onnx_b1_gpu0_fp16.engine` exists). No re-export
     required: `infer_configs.py` writes
     `ds_ros_pipeline/generated/ds_ros_infer_batch_yolo12x_640_640x384_b8.txt`
-    — identical to the existing b1 primary config (same ONNX
+    — the existing b1 primary config (same ONNX
     `models/yolo12x_640_640x384.onnx`, same labels snapshot, same custom
-    parser, `net-scale-factor`, cluster settings) except `batch-size=8` and
-    `model-engine-file=models/yolo12x_640_640x384.onnx_b8_gpu0_fp16.engine`.
+    parser, `net-scale-factor`) with three changes: `batch-size=8`,
+    `model-engine-file=models/yolo12x_640_640x384.onnx_b8_gpu0_fp16.engine`,
+    and the **person-only class filter** below.
+  - **Detection scope: people only.** `render_batch_yolo_config` does not copy
+    the template's cluster settings verbatim. It rewrites `[class-attrs-all]`
+    to an unreachable `pre-cluster-threshold` (`IMPOSSIBLE_THRESHOLD`) and
+    emits a new `[class-attrs-{PERSON_CLASS_ID}]` carrying
+    `detect.min_confidence` plus the template's non-threshold cluster keys.
+    Every other COCO class is therefore suppressed *inside* nvinfer — a
+    non-person never becomes object meta at all, so no downstream filtering is
+    needed and **every published `TargetBox` is a person**. This is why the
+    assessment path can treat every box as assessable. See README, "Detection
+    scope: people only".
     nvinfer builds and caches that engine on first start (~1–3 min, persisted
     via the bind mount). `src/deepstream_yolo/model_cache.py` is *not*
     modified (its writer hardcodes b1); this is the one piece of config logic
@@ -639,6 +673,15 @@ before force-finalizing, §7),
   pts (globally unique, §5) and publishes with each item's own ntp stamp.
   Assessment parsing reuses `parse_assessment_tensor_meta` (8 heads, softmax)
   unchanged.
+- **The detection index**: joining an assessment back to *its* box needs a
+  per-object key, and the pgie assigns none (tracking is off, so `object_id`
+  arrives as the untracked sentinel). `det_collect` therefore *writes* the
+  ordinal into `obj_meta.object_id` as it walks the object list, and
+  `assess_collect` reads it back to join each SGIE result to the box it came
+  from. `_indexed_detections` sorts by `object_id` and warns if the set is not
+  contiguous `0..n-1`, so a silent reindex cannot corrupt the join. Reusing
+  the sentinel field is safe precisely because nothing else populates it. See
+  README, "The detection index".
 - **Run lifecycle & races**: the "batch" worker thread is the **sole runner**;
   service threads submit a `RunRequest` and block on it. The worker claims
   frames at *dispatch*, not at submit, so a queued request covers everything
@@ -808,18 +851,18 @@ loop only (leading-picture discard at cold start, §5) — it is not a drop bug.
 | # | Requirement | Exercise | Observable that proves it |
 |---|---|---|---|
 | 1 | Pacing + continuous preview | `ros2 topic hz /ds/preview/compressed`; watch `/ds/status` loop count | 29–30 Hz steady (NOT ~200 Hz — proves `pace` works); loop count increments every ~9.6 s wall; `ros2 topic echo --no-arr … header` stamps ≈ wall clock now, spaced ~33 ms |
-| 2 | Mosaic one-shot | `ros2 topic echo /mosaic_compressed &` then `ros2 service call /ds/capture/mosaic std_srvs/srv/Trigger` (order-insensitive thanks to TRANSIENT_LOCAL) | Exactly one message per call; response `message` stamp equals the message `header.stamp`; no further messages without a new call; a late-joining echo still receives the latched message |
-| 3 | VLM one-shot raw | `ros2 service call /ds/capture/vlm std_srvs/srv/Trigger`; `ros2 topic echo --no-arr /vlm_raw` | One `Image`, `encoding: rgb8`, `width: 2560, height: 1440`, `step: 7680` |
+| 2 | Mosaic one-shot | `ros2 topic echo --no-arr /uas4/target_detections/mosaic &` then `ros2 service call /ds/capture/mosaic std_srvs/srv/Trigger` (order-insensitive thanks to TRANSIENT_LOCAL) | Exactly one `TargetBoxArray` per call, `use_for_mosaic=true` and an **empty** `uav_target_boxes`; response `message` stamp equals the message `header.stamp`; no further messages without a new call; a late-joining echo still receives the latched message |
+| 3 | VLM one-shot | `ros2 service call /ds/capture/vlm std_srvs/srv/Trigger`; `ros2 topic echo --no-arr /uas4/target_detections/vlm` | One `TargetBoxArray` for the captured frame — the same shape a `run_detect` publishes, with `use_for_assessment=true` on every box and `do_assessment=true` on the array; latched, so the echo receives it even if started after the call |
 | 4 | Coalescing race | Fire two `mosaic` calls in the same shell command backgrounded together | Both succeed with identical stamp in `message`; exactly one topic message |
-| 5 | Enqueue/run-detect (incl. >4 frames — the pool-sizing regression test) | 6× `ros2 service call /ds/batch/enqueue …` (responses show depth 1…6) then `ros2 service call /ds/batch/run_detect …` | Exactly 6 `TargetBoxArray` on `/ds/detections` (one 6-frame batch through the b8 mux — proves `output-buffers=16` fixed the empirical wedge), six distinct ascending stamps; person boxes plausible in Foxglove; depth back to 0 (per `/ds/status`) |
-| 6 | Detect-assess gating | `run_detect` then `ros2 topic echo /ds/assessments` (nothing), then enqueue + `run_detect_assess` | Assessments appear **only** after the assess call; each has 8 `clip_rgb_*` annotations |
-| 7 | Continuous mode | `ros2 service call /ds/mode/toggle_detection std_srvs/srv/SetBool "{data: true}"` | `/ds/detections` at ~10 Hz (stride 3 of paced 30 fps); preview hz unchanged at ~30 (isolation, §3.2); SetBool false stops it |
+| 5 | Enqueue/run-detect (incl. >4 frames — the multi-frame-run regression test) | 6× `ros2 service call /ds/batch/enqueue …` (responses show depth 1…6) then `ros2 service call /ds/batch/run_detect …` | Exactly 6 `TargetBoxArray` on `/uas4/target_detections` — six single-frame batches within the one run (§3.3), six distinct ascending stamps. **Every one of the six carries its own boxes**: this is the observable that pins the `batch-size=1` fix, since the `batch-size=8` mux published boxes on frame 0 and empty arrays on frames 1–5. Person boxes plausible in Foxglove; depth back to 0 (per `/ds/status`) |
+| 6 | Detect-assess gating | `enqueue` + `run_detect`, then `enqueue` + `run_detect_assess`, echoing `/uas4/target_detections --no-arr` throughout | Both runs publish on the same topic; the `run_detect` arrays have **empty** `annotations` on every box, the `run_detect_assess` arrays carry the 8 `clip_rgb_*` heads on each assessed box. Annotations appear **only** after the assess call |
+| 7 | Continuous mode | `ros2 service call /ds/mode/toggle_detection std_srvs/srv/SetBool "{data: true}"` | `/uas4/target_detections` at ~10 Hz (stride 3 of paced 30 fps); preview hz unchanged at ~30 (isolation, §3.2); SetBool false stops it |
 | 8 | Recording + crash tolerance | `/ds/record/start`; after ~6 s `docker kill ds-ros-pipeline` (SIGKILL, no drain; name is fixed by `container_name`) | `ffprobe outputs/ds_ros/rec_*.ts` → playable HEVC 2560×1440; duration within 1 s (one GOP) of kill−start wall time; sidecar line count ≈ ffprobe frame count |
 | 9 | Recording clean stop **across a loop boundary** | start; wait 15 s (guaranteed ≥1 loop wrap at 9.56 s/loop); `/ds/record/stop` **while `ros2 topic hz /ds/preview/compressed` runs in a third shell** | Response reports path + frames ≈ 450 (15 s × 30 fps; §5 measured the wrap gapless, so no boundary tolerance needed beyond leaky-queue drops, which the response counts separately) and `drained=true`; `ffprobe` duration ≈15 s with a monotonic timeline (no discontinuity error at the wrap); bitrate ≈200 Mbps (`ffprobe -show_format` bit_rate ≈ 2.0e8); **preview hz never dips through the stop** (the round-3 drain-under-block design measurably dropped it to ~0.5 Hz — this observable pins the fix) |
 | 10 | Everything at once | With `toggle_detection` on and `record/start` active, call `capture/vlm`, `capture/mosaic` and `snapshot`; then `toggle_assessment true`, then `false` | Every one-shot returns `success=true` while the stream and the recording run; the assess toggles report "stream still running", `/ds/status` `mode` follows, and `/uas4/target_detections` never stops arriving across either switch (`integration/verify_pipes.py` pipe 4) |
 | 11 | Snapshot | `/ds/snapshot` | `snap_*.png` opens, 2560×1440; `.json` sidecar stamp matches response |
 | 12 | Timestamp propagation | Compare stamp of a mosaic, a detection for the same signalled frame, and the snapshot sidecar taken in the same second | Same clock domain (unix now), monotonic per source frame — including across a loop wrap (feeder-assigned pts never repeats) |
-| 13 | Backpressure immunity | While recording *and* running continuous detection with assessment *and* echoing `/vlm_raw`, watch `/ds/status` and preview hz; also `nvidia-smi` for the VRAM budget | Preview stays ~30 Hz; loop cadence stays ~9.6 s (decoder pool never starves — proves the num-extra-surfaces accounting); drop counters may rise on recorder/batch only |
+| 13 | Backpressure immunity | While recording *and* running continuous detection with assessment *and* echoing `/uas4/target_detections`, watch `/ds/status` and preview hz; also `nvidia-smi` for the VRAM budget | Preview stays ~30 Hz; loop cadence stays ~9.6 s (decoder pool never starves — proves the num-extra-surfaces accounting); drop counters may rise on recorder/batch only |
 | 14 | Signal-timing independence | While a `snapshot` call is in flight (blocks ~0.5 s), fire `record/start`, `enqueue`, **and a `capture/vlm`** | All three return without waiting for the snapshot (separate groups for record/enqueue; Reentrant `grp_capture` for the concurrent capture, §4) |
 | 15 | Non-looping EOS behavior (fallback mode, §5) | Relaunch with `-p source.loop:=false`; `/ds/record/start` at t≈2 s; wait past end of media (~10 s); then `/ds/capture/mosaic` and `/ds/record/stop` | `/ds/status` state flips to `ended` (still publishing at 1 Hz); the recording was finalized by the source EOS — `ffprobe` shows a valid ~8 s file; `capture/mosaic` returns `success=false, "source ended"` immediately (no 2 s hang); `record/stop` returns `success=true` with the finalized stats; process still alive |
 | 16 | Stop under drain load never stalls the trunk (§7) | `/ds/record/start`; wait 3 s; `/ds/record/stop` while `ros2 topic hz /ds/preview/compressed` runs | Preview hz shows no gap >~100 ms across the stop instant (the drain runs detached from the tee); loop cadence in `/ds/status` unperturbed; stop response arrives with `drained=true` ≤ `record.stop_timeout`. (The timeout/force-finalize path itself — a wedged disk — is exercised at the unit seam below, not with real hardware) |
@@ -858,11 +901,11 @@ in-container.
    assumed to work post-`nvstreammux` exactly as the existing motion branch
    proves — but that branch is nvof-fed; verify the grab branch mapping at
    bring-up (test 2 is the canary).
-4. **11 MB `/vlm_raw` messages over DDS**: default rmw (Fast DDS) handles
-   large messages but may need `udp_max_size`/shared-memory tuning if
-   subscribers are remote. Localhost + `network_mode: host` should be fine;
-   flag for the day a remote consumer appears. TRANSIENT_LOCAL latching holds
-   one such frame resident per publisher — accepted (bounded, depth 1).
+4. ~~**11 MB `/vlm_raw` messages over DDS**~~ — **retired**. `capture/vlm`
+   publishes a `TargetBoxArray` carrying a 640×368 JPEG, not a raw frame, so
+   the large-message tuning concern (`udp_max_size`, shared memory for remote
+   subscribers) no longer applies. The largest message the node now emits is
+   the full-res q90 mosaic JPEG on `/uas4/target_detections/mosaic`, ~1–2 MB.
 5. **Future IPC source variant**: DS 7.1's GStreamer is 1.20; the `unixfd`
    plugin (and any `nvunixfdsrc`) does not exist in this image (verified by
    gst-inspect — GStreamer's unixfd shipped in 1.24). The factory therefore

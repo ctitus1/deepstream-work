@@ -68,7 +68,6 @@ DETECTION_JPEG_QUALITY = 85  # matches deepstream_yolo.pipeline default
 # ros_bridge.py field-mapping defaults (no metadata source in this process).
 SYSTEM_ID = 0
 DATA_SOURCE_ID = 0
-PLATFORM_NAME = "deepstream"
 
 
 def no_type_description_service() -> list:
@@ -154,7 +153,7 @@ class DsRosNode(Node):
                  loop_count_fn: Callable[[], int]) -> None:
         """Declare parameters were already read (config); create the four
         callback groups, all publishers (exact QoS above +
-        qos_profile_sensor_data for /ds/preview/compressed), all thirteen
+        qos_profile_sensor_data for /ds/preview/compressed), all eleven
         services, and the 1 Hz status timer. Main thread, before spin."""
         super().__init__("ds_pipeline",
                          parameter_overrides=no_type_description_service())

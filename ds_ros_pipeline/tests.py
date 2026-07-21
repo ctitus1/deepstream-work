@@ -627,7 +627,7 @@ class TestIndexedDetections(unittest.TestCase):
     @staticmethod
     def _det(object_id, label="person") -> Detection:
         return Detection(left=object_id, top=0, width=10, height=10,
-                         confidence=0.9, class_id=0, label=label,
+                         confidence=0.9, label=label,
                          object_id=object_id)
 
     def test_already_ordered_passes_through_without_complaint(self):
@@ -691,7 +691,7 @@ class TestBatchPublishDispatch(unittest.TestCase):
         # Stand in for the appsrc push + probe round-trip: feed the collector
         # the detections the pgie probe would have produced for this pts.
         detections = (Detection(left=1, top=2, width=3, height=4,
-                                confidence=0.9, class_id=0, label="person",
+                                confidence=0.9, label="person",
                                 object_id=0),)
 
         def fake_push(items) -> bool:

@@ -60,7 +60,6 @@ class Detection:
     width: float
     height: float
     confidence: float
-    class_id: int
     label: str
     object_id: int
 
@@ -400,7 +399,6 @@ def install_collect_probes(parts: BatchParts, collector: ResultCollector) -> Non
                         width=float(rect.width),
                         height=float(rect.height),
                         confidence=float(obj.confidence),
-                        class_id=int(obj.class_id),
                         label=str(obj.obj_label),
                         object_id=index,
                     ))

@@ -423,6 +423,113 @@ Raw image, detection, and assessment metadata all use the immutable source frame
 timestamp captured before detection. The bridge copies that same timestamp into
 each compressed image and ROS message header for that frame.
 
+### Service calls
+
+Request bodies for the `cdcl_umd_msgs` services, ready to paste into Foxglove's
+**Service Call** panel.
+
+**Nothing in this repo advertises these.** `src/ros_bridge.py` only creates
+publishers, so the stack `scripts/ros.sh` brings up serves no services at all.
+They are defined in `cdcl_umd_msgs` and advertised by other nodes in the wider
+graph — the service *name* below is the type's conventional one, and has to
+match whatever node is actually offering it on your system.
+
+Empty requests:
+
+```json
+{}
+```
+
+for `cdcl_umd_msgs/srv/GetUTMZone`, `cdcl_umd_msgs/srv/SolveRouting` and
+`cdcl_umd_msgs/srv/VantagePointMissionPlan`.
+
+`cdcl_umd_msgs/srv/SetFloat64`:
+
+```json
+{ "data": 0.0 }
+```
+
+`cdcl_umd_msgs/srv/SetUInt8`:
+
+```json
+{ "data": 0 }
+```
+
+`cdcl_umd_msgs/srv/PlaySound`:
+
+```json
+{ "text": "casualty located" }
+```
+
+`cdcl_umd_msgs/srv/UploadMissionPlan`:
+
+```json
+{ "robot": "uav4", "ip": "192.168.1.50" }
+```
+
+`cdcl_umd_msgs/srv/StopListening`:
+
+```json
+{
+  "stop_listen_time":  { "sec": 0, "nanosec": 0 },
+  "start_listen_time": { "sec": 0, "nanosec": 0 }
+}
+```
+
+`cdcl_umd_msgs/srv/UAVDetection` — `num` is how many detections to return,
+`mosaic` marks the frame for mosaicking, `publish` also emits on the usual
+topic:
+
+```json
+{ "mosaic": false, "publish": true, "num": 1 }
+```
+
+`cdcl_umd_msgs/srv/GetRoutingInfo` takes an array of waypoint arrays; empty
+asks for whatever the server already holds:
+
+```json
+{ "solution": [] }
+```
+
+`cdcl_umd_msgs/srv/LLaVAConversation` — `action` selects the operation:
+`0` start, `1` end, `2` evaluate string, `3` evaluate image, `4` finish string.
+Only `3` needs `image` populated:
+
+```json
+{
+  "action": 2,
+  "text": "describe the casualty",
+  "image": { "data_source_id": 0 }
+}
+```
+
+`cdcl_umd_msgs/srv/TBALocalization` takes a whole `TargetBoxArray`, the same
+message this repo publishes on `/uas4/target_detections`:
+
+```json
+{
+  "un_localized": {
+    "seq": 0,
+    "system_id": 0,
+    "uav_compass_hdg": 0.0,
+    "use_for_mosaic": false,
+    "detection_source": 2,
+    "uav_target_boxes": []
+  }
+}
+```
+
+The last two requests embed large nested messages (`CasualtyImage`,
+`sensor_msgs/NavSatFix`, `nav_msgs/Odometry` and more), and the objects above
+name only the fields worth setting. Foxglove pre-fills a full request from the
+schema when you pick the service, so the reliable move for these two is to
+**edit the generated form** rather than paste over it — a partial object may be
+rejected depending on the Foxglove version. The short requests above paste
+cleanly.
+
+An easy way to get a real `TargetBoxArray` to work from: run `scripts/ros.sh`,
+open the raw message on `/uas4/target_detections` in Foxglove, and copy it.
+
 Use `ROS_DOMAIN_ID` if your ROS graph needs a non-default domain:
 
 ```bash

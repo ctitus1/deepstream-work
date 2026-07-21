@@ -33,7 +33,7 @@ ENDED_MESSAGE = "source ended"
 class CaptureKind(enum.Enum):
     """The four independently armed one-shot captures (grp_capture, Sec 4)."""
 
-    MOSAIC = "mosaic"          # -> /mosaic_compressed (JPEG q90, full res)
+    MOSAIC = "mosaic"          # -> /uas4/target_detections/mosaic (q90 full res)
     VLM = "vlm"                # -> detection over the captured frame, then
     #                               one CasualtyImageCompressed (PNG crop +
     #                               detection_id) per detected box

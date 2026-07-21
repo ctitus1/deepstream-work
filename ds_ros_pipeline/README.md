@@ -255,11 +255,12 @@ connect, and the fix there is updating Studio, not a bridge flag.
 Both of these are verified working against a live pipeline:
 
 - **Every topic**, including the two `cdcl_umd_msgs` ones —
-  `/uas4/target_detections` and `/uas4/target_detections/vlm` —
+  `/uas4/target_detections`, `/uas4/target_detections/vlm`, and
+  `/uas4/target_detections/mosaic` —
   deserialize because the colcon overlay is mounted and sourced **and the
   bridge is built for the same ROS distro as the pipeline** (see below). Use an
   Image panel on `/ds/preview/compressed` for the continuous stream,
-  `/mosaic_compressed` for the one-shot, and a Raw Message panel on
+  `/uas4/target_detections/mosaic` for the one-shot, and a Raw Message panel on
   `/ds/status`.
 - **Every signal**, from Studio's Service Call panel — all services are
   advertised and were confirmed callable end to end (`enqueue` answered in
@@ -302,7 +303,7 @@ exception.
 
 | Service | Semantics |
 |---|---|
-| `/ds/capture/mosaic` | Arm one-shot: the **next** frame is JPEG-encoded full-res and published once on `/mosaic_compressed`. Blocks ≤2 s; `message` = the stamp used. |
+| `/ds/capture/mosaic` | Arm one-shot: the **next** frame is JPEG-encoded full-res (q90) and published once as a `TargetBoxArray` on `/uas4/target_detections/mosaic` — the image and its stamp, an **empty** `uav_target_boxes` (nothing is inferred on this path), and `use_for_mosaic=true`. Blocks ≤2 s; `message` = the stamp used. |
 | `/ds/capture/vlm` | Arm one-shot: the **next** frame is run through **detection** (bypassing the batch queue), then one `TargetBoxArray` is published on `/uas4/target_detections/vlm` — field-for-field what `run_detect` would publish for that frame, except every box has `use_for_assessment=true`. Nothing else is published. Blocks for the capture (≤2 s) plus the run (≤10 s); rejected while a continuous mode is on; `message` = the stamp used + run counts. |
 | `/ds/batch/enqueue` | Queue the next frame for batch inference. `message` = resulting depth; `success=false` if the queue (cap `batch.capacity`) is full. N calls queue N distinct frames. |
 | `/ds/batch/clear` | Empty the *pending* queue (a snapshot already taken by a running batch is unaffected). |
@@ -326,10 +327,10 @@ callback groups; a snapshot in flight does not delay a `record/start`, an
 
 | Topic | Type | QoS | Notes |
 |---|---|---|---|
-| `/mosaic_compressed` | `sensor_msgs/CompressedImage` | RELIABLE, KEEP_LAST 5, TRANSIENT_LOCAL | one-shot; latched, so `echo` started *after* the call still receives it |
+| `/uas4/target_detections/mosaic` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 5, TRANSIENT_LOCAL | capture/mosaic output: no boxes, `use_for_mosaic=true`, `source_img` = **full-res** q90 JPEG (not the 640×368 detection image — a mosaic is stitched from these). Latched, so `echo` started *after* the call still receives it |
 | `/ds/preview/compressed` | `sensor_msgs/CompressedImage` | BEST_EFFORT, KEEP_LAST 1 (sensor data) | continuous ~30 Hz, 640×360 JPEG q75 |
 | `/uas4/target_detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame (the shared TBA topic, named like `ros_bridge.py`'s): detect runs → `annotations` empty; assess runs → the same boxes with the 8 `clip_rgb_*` heads on assessed ones; `source_img` = 640×368 JPEG of the frame; boxes are in **`source_img` pixel coordinates** (see below); `use_for_assessment=false` on every box |
-| `/uas4/target_detections/vlm` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10, TRANSIENT_LOCAL | capture/vlm output: one for the captured frame, message-identical to what a detect run would put on `/uas4/target_detections` except `use_for_assessment=true` on every box. Latched, like the other one-shot outputs, so an `echo` started *after* the call still receives it. `seq` is counted separately from the batch topic's |
+| `/uas4/target_detections/vlm` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10, TRANSIENT_LOCAL | capture/vlm output: one for the captured frame, message-identical to what a detect run would put on `/uas4/target_detections` except `use_for_assessment=true` on every box and `do_assessment=true` on the array. Latched, like the other one-shot outputs, so an `echo` started *after* the call still receives it. `seq` is counted separately from the batch topic's |
 | `/ds/status` | `diagnostic_msgs/DiagnosticArray` | RELIABLE, KEEP_LAST 1 | 1 Hz, see below |
 
 Every stamp field in every message is the source frame's resolved ingest

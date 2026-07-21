@@ -6,8 +6,10 @@ name) — detect runs publish plain boxes, assess runs the same boxes with
 annotations filled on the assessed ones. /ds/capture/vlm runs detection over
 the captured frame and publishes the SAME TargetBoxArray a detect run would,
 with use_for_assessment=True on every box, on the sibling topic
-/uas4/target_detections/vlm. /casualty_image/compressed/vlm and /vlm_raw no
-longer exist. Node name ``ds_pipeline``. Thirteen services in
+/uas4/target_detections/vlm. /ds/capture/mosaic publishes a TargetBoxArray
+with no boxes and use_for_mosaic=True on /uas4/target_detections/mosaic.
+/mosaic_compressed, /casualty_image/compressed/vlm and /vlm_raw no longer
+exist. Node name ``ds_pipeline``. Thirteen services in
 four callback groups (grp_fast MutuallyExclusive; grp_capture REENTRANT;
 grp_record MutuallyExclusive; grp_batch MutuallyExclusive — Sec 4 table),
 five publishers with the exact QoS of the README topics table, a 1 Hz
@@ -84,7 +86,7 @@ def no_type_description_service() -> list:
 
 def one_shot_qos(depth: int) -> QoSProfile:
     """RELIABLE, KEEP_LAST depth, TRANSIENT_LOCAL — the latched profile for
-    /mosaic_compressed (depth 5) and the capture/vlm TargetBoxArray
+    the capture/mosaic TargetBoxArray (depth 5) and the capture/vlm one
     (depth 10), so a subscriber attaching after the call still gets it."""
     return QoSProfile(
         reliability=ReliabilityPolicy.RELIABLE,
@@ -169,7 +171,7 @@ class DsRosNode(Node):
         # TargetBoxArray.seq, counted per TBA topic: a consumer watching
         # /uas4/target_detections for gaps must not see phantom ones because
         # a capture/vlm run consumed a number from a shared counter.
-        self._seq = {"batch": 0, "vlm": 0}
+        self._seq = {"batch": 0, "vlm": 0, "mosaic": 0}
         # Coalesced-call publish-once bookkeeping (Sec 4 race handling): per
         # kind, one mutex serializing produce/publish and the last waiter
         # already served, so N callers sharing a waiter yield ONE message and
@@ -182,8 +184,13 @@ class DsRosNode(Node):
         self._grp_record = MutuallyExclusiveCallbackGroup()
         self._grp_batch = MutuallyExclusiveCallbackGroup()
 
+        # capture/mosaic TargetBoxArray: the captured frame with NO boxes and
+        # use_for_mosaic=True -- a "here is a frame to stitch" message, not a
+        # detection result. source_img is the FULL-RES q90 JPEG the topic
+        # always carried, not the 640x368 detection image: a mosaic is built
+        # by stitching these, and stitching wants the pixels.
         self._pub_mosaic = self.create_publisher(
-            CompressedImage, "/mosaic_compressed", one_shot_qos(5))
+            TargetBoxArray, "/uas4/target_detections/mosaic", one_shot_qos(5))
         self._pub_preview = self.create_publisher(
             CompressedImage, "/ds/preview/compressed", qos_profile_sensor_data)
         # One shared TargetBoxArray topic (ros_bridge.py's detect-topic name):
@@ -369,7 +376,10 @@ class DsRosNode(Node):
     def _target_box_array(self, result: batch_pipeline.FrameResult,
                           boxes: list[TargetBox],
                           seq_key: str = "batch",
-                          do_assessment: bool = False) -> TargetBoxArray:
+                          do_assessment: bool = False,
+                          use_for_mosaic: bool = False,
+                          source_img: CompressedImage | None = None,
+                          ) -> TargetBoxArray:
         """TargetBoxArray shell for the TBA topics: header.stamp and
         source_img (the detections.image_width x image_height JPEG of the
         frame, its own header included) all carry the frame's resolved
@@ -380,17 +390,22 @@ class DsRosNode(Node):
 
         ``do_assessment`` is the array-level request flag, set only by the
         capture/vlm path — the array-wide counterpart of the per-box
-        use_for_assessment those same boxes carry."""
+        use_for_assessment those same boxes carry.
+
+        ``use_for_mosaic`` marks the array as a frame to stitch rather than a
+        detection result; ``source_img`` overrides the default downscaled
+        detection JPEG (capture/mosaic passes its full-res one)."""
         msg = TargetBoxArray()
         with self._seq_lock:
             msg.seq = self._seq[seq_key]
             self._seq[seq_key] += 1
         self._fill_header(msg.header, result.item.ntp_ns)
         msg.system_id = SYSTEM_ID
-        msg.source_img = self._source_image(result)
+        msg.source_img = (self._source_image(result)
+                          if source_img is None else source_img)
         msg.gimbal_attitude_quaternion.w = 1.0
         msg.uav_target_boxes = boxes
-        msg.use_for_mosaic = False
+        msg.use_for_mosaic = bool(use_for_mosaic)
         msg.do_assessment = bool(do_assessment)
         msg.detection_source = AerialDetectionSource.DETECTION_YOLO
         return msg
@@ -459,16 +474,27 @@ class DsRosNode(Node):
 
     def on_capture_mosaic(self, request, response):
         """/ds/capture/mosaic (Trigger, grp_capture): arm MOSAIC, wait <= 2 s,
-        JPEG-encode full-res q90 on THIS thread, publish once latched on
-        /mosaic_compressed; message = the stamp used. Coalesced calls share
-        one message/stamp (Sec 4)."""
+        JPEG-encode full-res q90 on THIS thread, and publish one
+        TargetBoxArray latched on /uas4/target_detections/mosaic — the frame
+        and its stamp, an EMPTY box array (nothing is inferred on this path),
+        and use_for_mosaic=True. message = the stamp used. Coalesced calls
+        share one message/stamp (Sec 4)."""
         def produce(captured: frames.CapturedFrame) -> tuple[bool, str]:
-            jpeg = _encode_jpeg(captured.frame_rgba, MOSAIC_JPEG_QUALITY)
-            msg = CompressedImage()
-            self._fill_header(msg.header, captured.ntp_ns)
-            msg.format = "jpeg"
-            msg.data = jpeg
-            self._pub_mosaic.publish(msg)
+            image = CompressedImage()
+            self._fill_header(image.header, captured.ntp_ns)
+            image.format = "jpeg"
+            image.data = _encode_jpeg(captured.frame_rgba, MOSAIC_JPEG_QUALITY)
+            # The array shell keys its stamps off a FrameResult's item, and a
+            # capture has no inference behind it — so wrap the frame in one
+            # carrying no detections rather than duplicate the shell here.
+            result = batch_pipeline.FrameResult(
+                item=frames.BatchItem(frame_rgba=captured.frame_rgba,
+                                      ntp_ns=captured.ntp_ns,
+                                      pts=captured.pts),
+                detections=())
+            self._pub_mosaic.publish(self._target_box_array(
+                result, [], seq_key="mosaic", use_for_mosaic=True,
+                source_img=image))
             return True, _stamp_text(captured.ntp_ns)
 
         return self._answer(

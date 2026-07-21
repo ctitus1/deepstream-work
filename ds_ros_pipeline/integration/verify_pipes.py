@@ -4,6 +4,7 @@ Subscribes to both TargetBoxArray topics, drives the services, and asserts the
 published shape: per-frame message count, detection bboxes, annotations, and
 the use_for_assessment flag.
 """
+import os
 import sys
 import threading
 import time
@@ -21,6 +22,13 @@ from cdcl_umd_msgs.msg import CasualtyImageCompressed, TargetBoxArray
 BATCH_TOPIC = "/uas4/target_detections"
 VLM_TOPIC = "/uas4/target_detections/vlm"
 CASUALTY_TOPIC = "/casualty_image/compressed/vlm"
+
+# The pgie is configured person-only at or above detect.min_confidence
+# (config.py default 0.4, written into the generated nvinfer config as
+# [class-attrs-0] pre-cluster-threshold with every other class given an
+# unreachable one). Override to match if the node was launched with a
+# different -p detect.min_confidence.
+MIN_CONFIDENCE = float(os.environ.get("DS_MIN_CONFIDENCE", "0.4"))
 
 
 def qos(latched):
@@ -108,9 +116,37 @@ def classes(msgs):
 
 
 def person_boxes(msgs):
-    """Boxes the SGIE is configured to assess (operate-on-class-ids=0)."""
-    return [b for m in msgs for b in m.uav_target_boxes
-            if b.detection_class == "person"]
+    """Boxes the SGIE is configured to assess (operate-on-class-ids=0).
+
+    Now that the pgie itself is person-only this is every box, which is the
+    point -- check_detection_gate asserts it rather than assuming it."""
+    return [b for b in all_boxes(msgs) if b.detection_class == "person"]
+
+
+def all_boxes(msgs):
+    return [b for m in msgs for b in m.uav_target_boxes]
+
+
+def check_detection_gate(label, msgs):
+    """The pgie must let nothing but sufficiently-confident people through.
+
+    This is a claim about what nvinfer emitted, not about what we filtered
+    afterwards: non-person classes are dropped during bbox parsing and never
+    become object meta, so a single non-person box here means the class gate
+    is not doing its job.
+    """
+    boxes = all_boxes(msgs)
+    others = sorted({b.detection_class for b in boxes
+                     if b.detection_class != "person"})
+    check(f"{label}: every detection is class 'person'", not others,
+          f"also saw {others}" if others
+          else f"{len(boxes)} boxes, all person")
+    weak = [round(b.detection_confidence, 3) for b in boxes
+            if b.detection_confidence < MIN_CONFIDENCE]
+    check(f"{label}: every detection is >= min_confidence "
+          f"({MIN_CONFIDENCE})", not weak,
+          f"below threshold: {weak}" if weak
+          else f"lowest {min((b.detection_confidence for b in boxes), default=0):.3f}")
 
 
 def run_until_detections(node, service, n_frames, attempts=8, want_person=False):
@@ -174,6 +210,7 @@ def main():
     check("frames are distinct (each its own stamp)",
           len({(m.header.stamp.sec, m.header.stamp.nanosec) for m in got})
           == len(got))
+    check_detection_gate("detect", got)
     check("annotations empty on a detect run",
           all(not b.annotations for m in got for b in m.uav_target_boxes))
     check("use_for_assessment false on a detect run",
@@ -198,6 +235,7 @@ def main():
     check("EVERY frame in the batch carries its own detections",
           all(len(m.uav_target_boxes) > 0 for m in got),
           f"box counts {[len(m.uav_target_boxes) for m in got]}")
+    check_detection_gate("detect+assess", got)
     annotated = [b for m in got for b in m.uav_target_boxes if b.annotations]
     total = [b for m in got for b in m.uav_target_boxes]
     persons = person_boxes(got)
@@ -257,6 +295,7 @@ def main():
         check("carries detection bboxes",
               boxes_well_formed(msg) and msg.uav_target_boxes,
               f"{len(msg.uav_target_boxes)} boxes")
+        check_detection_gate("vlm", got)
         check("use_for_assessment TRUE on every box",
               all(b.use_for_assessment for b in msg.uav_target_boxes))
         check("annotations empty (detection-only, like target_detections)",

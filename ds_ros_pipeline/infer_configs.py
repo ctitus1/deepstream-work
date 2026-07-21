@@ -31,6 +31,19 @@ TEMPLATE_RELPATH = "configs/generated/config_infer_primary_yolo12x_640_640x384.t
 
 GITIGNORE_TEXT = "*\n!.gitignore\n"
 
+# The one class the pipeline detects: COCO 0 = person. The injury SGIE is
+# configured operate-on-class-ids=0, and every consumer of a TargetBoxArray
+# treats a box as a casualty candidate, so a `car` or `bench` box was only
+# ever noise on the topic.
+PERSON_CLASS_ID = 0
+
+# pre-cluster-threshold for every OTHER class. Confidence is a probability,
+# so a threshold above 1.0 can never be met and nvinfer discards those
+# detections during parsing -- they never become object meta, never reach a
+# probe, and never reach a message. This is the filter; it is not a
+# post-hoc drop of boxes we already built.
+IMPOSSIBLE_THRESHOLD = "2.0"
+
 # Top-level repo dirs a template path may point into. The template embeds the
 # container's absolute repo mount (/workspace/deepstream-work/...); existence
 # checks re-anchor at whatever repo_root this process actually sees.
@@ -116,15 +129,31 @@ def batch_yolo_config_path(engine_batch: int, generated_dir: Path = GENERATED_DI
     return generated_dir / f"ds_ros_infer_batch_yolo12x_640_640x384_b{engine_batch}.txt"
 
 
-def render_batch_yolo_config(engine_batch: int, repo_root: Path) -> str:
+def render_batch_yolo_config(engine_batch: int, repo_root: Path,
+                             min_confidence: float = 0.4) -> str:
     """Pure: return the full config text for batch-size ``engine_batch``.
 
-    Derived from the existing b1 primary config's settings with only
-    batch-size and model-engine-file changed (Sec 6). Separated from the
-    writer so the golden test compares strings.
+    Derived from the existing b1 primary config's settings, changing:
+      * ``batch-size`` and ``model-engine-file`` (Sec 6);
+      * the class thresholds, so the pgie emits **only** COCO class 0
+        (person) at or above ``min_confidence``.
+
+    The class filter is expressed the way nvinfer expects: ``[class-attrs-
+    all]`` gets an unreachable pre-cluster-threshold, and ``[class-attrs-0]``
+    overrides it with the real one. Everything not a person is dropped inside
+    nvinfer's bbox parsing, so no object meta is ever created for it --
+    downstream code may therefore assume every Detection is a person.
+    Non-threshold keys from the template's class-attrs (nms-iou-threshold,
+    topk, ...) are copied into the person section so it does not silently
+    inherit a different clustering policy.
+
+    Separated from the writer so the golden test compares strings.
     """
     if engine_batch < 1:
         raise ValueError(f"engine_batch must be >= 1, got {engine_batch}")
+    if not 0.0 < min_confidence <= 1.0:
+        raise ValueError(
+            f"min_confidence must be in (0.0, 1.0], got {min_confidence}")
     template = Path(repo_root) / TEMPLATE_RELPATH
     if not template.is_file():
         raise FileNotFoundError(
@@ -141,15 +170,43 @@ def render_batch_yolo_config(engine_batch: int, repo_root: Path) -> str:
         "model-engine-file": f"{onnx}_b{engine_batch}_gpu0_fp16.engine",
     }
     rewritten = [(key, overrides.get(key, value)) for key, value in entries]
-    return _render_sections(
-        [(name, rewritten if name == "property" else section_entries)
-         for name, section_entries in sections]
+
+    # Template class-attrs, minus its threshold: the person section inherits
+    # the clustering policy, both sections get an explicit threshold below.
+    template_attrs = [
+        (key, value)
+        for name, section_entries in sections if name == "class-attrs-all"
+        for key, value in section_entries if key != "pre-cluster-threshold"
+    ]
+    person_section = (
+        f"class-attrs-{PERSON_CLASS_ID}",
+        [("pre-cluster-threshold", f"{float(min_confidence):g}")]
+        + template_attrs,
     )
+    rendered: list[tuple[str, list[tuple[str, str]]]] = []
+    for name, section_entries in sections:
+        if name == "property":
+            rendered.append((name, rewritten))
+        elif name == "class-attrs-all":
+            rendered.append((name, [("pre-cluster-threshold",
+                                     IMPOSSIBLE_THRESHOLD)] + template_attrs))
+            rendered.append(person_section)
+        elif name == person_section[0]:
+            continue  # replaced by ours
+        else:
+            rendered.append((name, section_entries))
+    if not any(name == person_section[0] for name, _ in rendered):
+        # Template had no [class-attrs-all] to anchor to; append both.
+        rendered.append(("class-attrs-all",
+                         [("pre-cluster-threshold", IMPOSSIBLE_THRESHOLD)]))
+        rendered.append(person_section)
+    return _render_sections(rendered)
 
 
 def write_batch_yolo_config(engine_batch: int = 8,
                             repo_root: Path | None = None,
-                            generated_dir: Path = GENERATED_DIR) -> Path:
+                            generated_dir: Path = GENERATED_DIR,
+                            min_confidence: float = 0.4) -> Path:
     """Write the batch yolo config and return its path (Sec 9 wiring).
 
     Asserts the ONNX, labels file, and custom parser .so exist under
@@ -160,7 +217,7 @@ def write_batch_yolo_config(engine_batch: int = 8,
     --prebuild. Blocking file I/O only.
     """
     root = Path(repo_root) if repo_root is not None else _default_repo_root()
-    text = render_batch_yolo_config(engine_batch, root)
+    text = render_batch_yolo_config(engine_batch, root, min_confidence)
     entries = _property_entries(_parse_sections(text, "rendered config"), "rendered config")
     missing = []
     for key, hint in _ARTIFACT_HINTS.items():

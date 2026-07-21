@@ -38,6 +38,11 @@ class PipelineConfig:
     detections_image_width: int = 640             # detections.image_width (source_img JPEG)
     detections_image_height: int = 368            # detections.image_height
     frame_id: str = "ds_camera"                   # frame_id for every published header
+    # detect.min_confidence -> the pgie's pre-cluster-threshold for person.
+    # Raising it drops weak boxes inside nvinfer, so they never become object
+    # meta at all. Applied at startup (it is baked into the generated nvinfer
+    # config); changing the parameter at runtime has no effect.
+    detect_min_confidence: float = 0.4
 
 
 # ROS parameter name -> dataclass field name, one row per Sec 4 parameter.
@@ -59,6 +64,7 @@ PARAMETER_MAP: dict[str, str] = {
     "detections.image_width": "detections_image_width",
     "detections.image_height": "detections_image_height",
     "frame_id": "frame_id",
+    "detect.min_confidence": "detect_min_confidence",
 }
 
 

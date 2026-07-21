@@ -4,7 +4,9 @@ Run anywhere, either way: ``python3 -m pytest ds_ros_pipeline/tests.py`` or
 ``python3 ds_ros_pipeline/tests.py`` (unittest main). Imports only the pure
 seams — timestamps, frames (logic classes), source (pts schedule),
 infer_configs, disk (DetachSequencer/Recorder finalize with injected
-callables). Never imports Gst, pyds, rclpy, or ros_io/ds_node.
+callables), batch_pipeline (crop_bounds, and BatchWorker's publish dispatch
+over a faked valve/appsrc). Never imports Gst, pyds, rclpy, or
+ros_io/ds_node.
 
 The sys.path insertion below implements the package's flat sibling-import
 convention (see the comment atop ds_node.py).
@@ -25,6 +27,15 @@ import frames
 import infer_configs
 import source
 import timestamps
+from batch_pipeline import (
+    BatchParts,
+    BatchWorker,
+    Detection,
+    ResultCollector,
+    crop_bounds,
+    indexed_detections,
+)
+import config
 from config import PipelineConfig
 from disk import DetachSequencer, Recorder, _Branch
 from frames import CaptureKind, GrabState, Lifecycle, Mode
@@ -261,12 +272,12 @@ class TestGrabState(unittest.TestCase):
 
         # All armed kinds are served from the same frame with ONE copy.
         mosaic = state.arm(CaptureKind.MOSAIC)
-        vlm = state.arm(CaptureKind.VLM)
-        self.assertIsNot(mosaic, vlm)
+        snap_raw = state.arm(CaptureKind.SNAPSHOT_RAW)
+        self.assertIsNot(mosaic, snap_raw)
         state.on_frame(166, 333, copy)
         self.assertEqual(copy.count, 3)
         self.assertIs(mosaic.wait(0).frame_rgba, copy.frames[2])
-        self.assertIs(vlm.wait(0).frame_rgba, copy.frames[2])
+        self.assertIs(snap_raw.wait(0).frame_rgba, copy.frames[2])
 
         # Idle frame: nothing armed, no copy.
         state.on_frame(200, 444, copy)
@@ -459,9 +470,184 @@ class TestGrabState(unittest.TestCase):
         self.assertIsNone(waiter.wait(0))
 
         # Arming after ended returns an already-resolved None waiter.
-        late = state.arm(CaptureKind.VLM)
+        late = state.arm(CaptureKind.SNAPSHOT_RAW)
         self.assertTrue(late._event.is_set())
         self.assertIsNone(late.wait(0))
+
+
+class TestCropBounds(unittest.TestCase):
+
+    @staticmethod
+    def _det(left, top, width, height) -> Detection:
+        return Detection(left=left, top=top, width=width, height=height,
+                         confidence=0.9, class_id=0, label="person",
+                         object_id=0)
+
+    def test_integer_box_passes_through(self):
+        """batch_pipeline.crop_bounds: an in-frame integer bbox maps to its
+        own pixel bounds; a frame-covering box maps to the whole frame."""
+        self.assertEqual(crop_bounds(self._det(10, 20, 30, 40), 2560, 1440),
+                         (10, 20, 40, 60))
+        self.assertEqual(crop_bounds(self._det(0, 0, 2560, 1440), 2560, 1440),
+                         (0, 0, 2560, 1440))
+
+    def test_fractional_box_covers_partial_pixels(self):
+        """Fractional edges floor left/top and ceil right/bottom, so every
+        partially covered pixel lands in the crop."""
+        self.assertEqual(
+            crop_bounds(self._det(10.4, 20.6, 30.2, 40.2), 2560, 1440),
+            (10, 20, 41, 61))
+
+    def test_clamped_to_frame(self):
+        """Boxes overhanging any edge clamp to the frame bounds."""
+        self.assertEqual(crop_bounds(self._det(-5.0, -8.0, 20.0, 30.0), 640, 480),
+                         (0, 0, 15, 22))
+        self.assertEqual(crop_bounds(self._det(630.0, 470.0, 20.0, 30.0), 640, 480),
+                         (630, 470, 640, 480))
+
+    def test_degenerate_and_outside_boxes_return_none(self):
+        """Non-positive size or a box entirely outside the frame yields None
+        (publisher falls back to the full-frame image)."""
+        self.assertIsNone(crop_bounds(self._det(10, 10, 0, 30), 640, 480))
+        self.assertIsNone(crop_bounds(self._det(10, 10, 30, -1), 640, 480))
+        self.assertIsNone(crop_bounds(self._det(640, 100, 20, 20), 640, 480))
+        self.assertIsNone(crop_bounds(self._det(100, 480, 20, 20), 640, 480))
+        self.assertIsNone(crop_bounds(self._det(-50, 100, 20, 20), 640, 480))
+
+
+class TestIndexedDetections(unittest.TestCase):
+    """batch_pipeline.indexed_detections: the array-position contract.
+
+    Position i of uav_target_boxes must be the detection DeepStream indexed
+    i, because assessments and casualty detection_id both key on that index.
+    """
+
+    @staticmethod
+    def _det(object_id, label="person") -> Detection:
+        return Detection(left=object_id, top=0, width=10, height=10,
+                         confidence=0.9, class_id=0, label=label,
+                         object_id=object_id)
+
+    def test_already_ordered_passes_through_without_complaint(self):
+        dets = [self._det(i) for i in range(4)]
+        ordered, complaint = indexed_detections(tuple(dets))
+        self.assertEqual([d.object_id for d in ordered], [0, 1, 2, 3])
+        self.assertIsNone(complaint)
+
+    def test_permuted_input_is_restored_to_index_order(self):
+        """A permuted probe emission must not shift the array: box i stays
+        detection i, otherwise assessments[i] would annotate the wrong box."""
+        dets = [self._det(2), self._det(0), self._det(3), self._det(1)]
+        ordered, complaint = indexed_detections(tuple(dets))
+        self.assertEqual([d.object_id for d in ordered], [0, 1, 2, 3])
+        self.assertIsNone(complaint)
+
+    def test_empty_frame_is_not_a_complaint(self):
+        ordered, complaint = indexed_detections(())
+        self.assertEqual(ordered, [])
+        self.assertIsNone(complaint)
+
+    def test_non_contiguous_indices_complain_but_stay_ordered(self):
+        """A gap means position != detection_id; the join by object_id is
+        still right, so the caller warns rather than dropping data."""
+        dets = [self._det(0), self._det(2)]
+        ordered, complaint = indexed_detections(tuple(dets))
+        self.assertEqual([d.object_id for d in ordered], [0, 2])
+        self.assertIsNotNone(complaint)
+        self.assertIn("not contiguous", complaint)
+
+
+class TestBatchPublishDispatch(unittest.TestCase):
+    """Which publish callbacks each of the three pipes fires (Sec 4).
+
+    BatchWorker._execute_run is the single dispatch point; it only touches
+    Gst through _push_items and parts.v_assess, both faked here, so the
+    pipe->callback mapping is testable without a GPU.
+    """
+
+    class _FakeValve:
+        def __init__(self) -> None:
+            self.drop_history: list[bool] = []
+
+        def set_property(self, name, value) -> None:
+            assert name == "drop"
+            self.drop_history.append(value)
+
+    def setUp(self) -> None:
+        self.valve = self._FakeValve()
+        self.calls: list[str] = []
+        self.item = frames.BatchItem(frame_rgba=object(), ntp_ns=1_000, pts=7)
+        collector = ResultCollector()
+        parts = BatchParts(pipeline=None, src_batch=None, v_assess=self.valve,
+                           pgie=None, sgie=None)
+        grab, _ = _grab_state()
+        self.worker = BatchWorker(
+            PipelineConfig(), grab, parts, collector,
+            publish_detections=lambda r: self.calls.append("detections"),
+            publish_assessments=lambda r: self.calls.append("assessments"),
+            publish_casualties=lambda r: self.calls.append("casualties"),
+            publish_vlm_detections=lambda r: self.calls.append("vlm"))
+        # Stand in for the appsrc push + probe round-trip: feed the collector
+        # the detections the pgie probe would have produced for this pts.
+        detections = (Detection(left=1, top=2, width=3, height=4,
+                                confidence=0.9, class_id=0, label="person",
+                                object_id=0),)
+
+        def fake_push(items) -> bool:
+            for item in items:
+                collector.add_detections(item.pts, detections)
+                collector.add_assessments(item.pts, {0: {"probabilities": [1.0]}})
+            return True
+
+        self.worker._push_items = fake_push
+
+    def test_detect_only_publishes_detections(self):
+        """assess=False -> publish_detections alone; the valve stays dropping
+        so the sgie never sees the frame."""
+        success, _ = self.worker._execute_run([self.item], assess=False,
+                                              wait_timeout=1.0)
+        self.assertTrue(success)
+        self.assertEqual(self.calls, ["detections"])
+        self.assertEqual(self.valve.drop_history, [True, True])
+
+    def test_detect_assess_publishes_assessments_only(self):
+        """assess=True -> publish_assessments alone (the plain detection
+        array is NOT additionally published), valve opened for the run and
+        restored after."""
+        success, message = self.worker._execute_run([self.item], assess=True,
+                                                    wait_timeout=1.0)
+        self.assertTrue(success)
+        self.assertEqual(self.calls, ["assessments"])
+        self.assertEqual(self.valve.drop_history, [False, True])
+        self.assertIn("assessed", message)
+
+    def test_capture_vlm_publishes_both_vlm_boxes_and_casualties(self):
+        """run_capture -> the /uas4/target_detections/vlm TargetBoxArray AND
+        the casualty crops, detection-only (valve dropping throughout)."""
+        success, _ = self.worker.run_capture(self.item, timeout=1.0)
+        self.assertTrue(success)
+        self.assertEqual(self.calls, ["vlm", "casualties"])
+        self.assertEqual(self.valve.drop_history, [True, True])
+
+    def test_capture_vlm_rejected_in_continuous_mode(self):
+        """Continuous mode owns the batch pipeline; the vlm pipe refuses
+        rather than interleaving a run."""
+        self.worker.set_continuous(True, assess=False)
+        success, message = self.worker.run_capture(self.item, timeout=1.0)
+        self.assertFalse(success)
+        self.assertEqual(message, "continuous mode active")
+        self.assertEqual(self.calls, [])
+
+    def test_every_batched_frame_gets_its_own_message(self):
+        """Per frame, not per batch: k queued frames -> k publish calls."""
+        items = [frames.BatchItem(frame_rgba=object(), ntp_ns=1_000 + i,
+                                  pts=100 + i)
+                 for i in range(6)]
+        success, message = self.worker._execute_run(items, assess=False,
+                                                    wait_timeout=1.0)
+        self.assertTrue(success)
+        self.assertEqual(self.calls, ["detections"] * 6)
+        self.assertIn("6/6 frames", message)
 
 
 class TestDetachSequencer(unittest.TestCase):
@@ -618,14 +804,68 @@ symmetric-padding=1
 cluster-mode=2
 
 [class-attrs-all]
-pre-cluster-threshold=0.2
+pre-cluster-threshold=2.0
+nms-iou-threshold=0.45
+topk=300
+
+[class-attrs-0]
+pre-cluster-threshold=0.4
 nms-iou-threshold=0.45
 topk=300
 """
 
+    def _sections(self, text):
+        return {name: dict(entries) for name, entries
+                in infer_configs._parse_sections(text, "rendered")}
+
+    def test_person_only_class_thresholds(self):
+        """Every class but person gets an unreachable threshold, so nvinfer
+        discards those detections during parsing and no object meta is ever
+        created for them — downstream may assume every Detection is a person.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = root / infer_configs.TEMPLATE_RELPATH
+            template.parent.mkdir(parents=True)
+            template.write_text(self._B1_TEMPLATE)
+
+            sections = self._sections(
+                infer_configs.render_batch_yolo_config(8, root, 0.4))
+            # Confidence is a probability, so >1.0 can never be met.
+            self.assertGreater(
+                float(sections["class-attrs-all"]["pre-cluster-threshold"]), 1.0)
+            self.assertEqual(
+                sections["class-attrs-0"]["pre-cluster-threshold"], "0.4")
+            # The person section must not silently inherit a different
+            # clustering policy than the template's.
+            for key in ("nms-iou-threshold", "topk"):
+                self.assertEqual(sections["class-attrs-0"][key],
+                                 sections["class-attrs-all"][key])
+
+    def test_min_confidence_is_settable(self):
+        """detect.min_confidence lands in the person section verbatim."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = root / infer_configs.TEMPLATE_RELPATH
+            template.parent.mkdir(parents=True)
+            template.write_text(self._B1_TEMPLATE)
+
+            for value, expected in ((0.4, "0.4"), (0.25, "0.25"),
+                                    (0.9, "0.9"), (1.0, "1")):
+                sections = self._sections(
+                    infer_configs.render_batch_yolo_config(8, root, value))
+                self.assertEqual(
+                    sections["class-attrs-0"]["pre-cluster-threshold"],
+                    expected)
+
+    def test_config_default_min_confidence_is_0_4(self):
+        self.assertEqual(PipelineConfig().detect_min_confidence, 0.4)
+        self.assertIn("detect.min_confidence", config.PARAMETER_MAP)
+
     def test_infer_config_golden(self):
         """infer_configs.render_batch_yolo_config(8) matches the golden config
-        (b1 settings + batch-size=8 + b8 engine path, Sec 6/10)."""
+        (b1 settings + batch-size=8 + b8 engine path + the person-only class
+        thresholds, Sec 6/10)."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             template = root / infer_configs.TEMPLATE_RELPATH
@@ -635,13 +875,23 @@ topk=300
             rendered = infer_configs.render_batch_yolo_config(8, root)
             self.assertEqual(rendered, self._GOLDEN_B8)
 
-            # b1 round-trips to the template itself: nothing but batch-size
-            # and model-engine-file is ever touched.
-            self.assertEqual(infer_configs.render_batch_yolo_config(1, root),
-                             self._B1_TEMPLATE)
+            # b1 no longer round-trips to the template: the class filter is
+            # applied at every batch size. [property] is still untouched.
+            b1 = infer_configs.render_batch_yolo_config(1, root)
+            self.assertEqual(
+                dict(infer_configs._property_entries(
+                    infer_configs._parse_sections(b1, "b1"), "b1")),
+                dict(infer_configs._property_entries(
+                    infer_configs._parse_sections(self._B1_TEMPLATE, "t"), "t")))
+            self.assertIn("[class-attrs-0]", b1)
 
             with self.assertRaises(ValueError):
                 infer_configs.render_batch_yolo_config(0, root)
+            # Confidence must be a probability.
+            for bad in (0.0, -0.1, 1.5):
+                with self.assertRaises(ValueError):
+                    infer_configs.render_batch_yolo_config(
+                        8, root, min_confidence=bad)
 
         with tempfile.TemporaryDirectory() as empty:
             with self.assertRaises(FileNotFoundError):

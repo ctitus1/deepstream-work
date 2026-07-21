@@ -4,6 +4,7 @@ Prints real values (topic, seq, class, bbox, use_for_assessment, annotation
 heads) rather than assertions, then applies the pass/fail checks at the end
 so the verdict and the raw evidence can be compared against each other.
 """
+import os
 import sys
 import threading
 import time
@@ -21,6 +22,8 @@ from cdcl_umd_msgs.msg import CasualtyImageCompressed, TargetBoxArray
 BATCH = "/uas4/target_detections"
 VLM = "/uas4/target_detections/vlm"
 CAS = "/casualty_image/compressed/vlm"
+# pgie is person-only at or above detect.min_confidence (config default 0.4).
+MIN_CONFIDENCE = float(os.environ.get("DS_MIN_CONFIDENCE", "0.4"))
 FAIL = []
 
 
@@ -111,6 +114,21 @@ def persons(msgs):
             if b.detection_class == "person"]
 
 
+def gate(label, msgs):
+    """The pgie is person-only at or above MIN_CONFIDENCE; anything else in
+    a message means the class/confidence gate is not doing its job."""
+    boxes = [b for m in msgs for b in m.uav_target_boxes]
+    others = sorted({b.detection_class for b in boxes
+                     if b.detection_class != "person"})
+    check(f"{label}: every detection is class 'person'", not others,
+          f"also saw {others}" if others else f"{len(boxes)} boxes, all person")
+    weak = [round(b.detection_confidence, 3) for b in boxes
+            if b.detection_confidence < MIN_CONFIDENCE]
+    check(f"{label}: every detection >= min_confidence ({MIN_CONFIDENCE})",
+          not weak, f"below: {weak}" if weak else
+          f"lowest {min((b.detection_confidence for b in boxes), default=0):.3f}")
+
+
 def main():
     rclpy.init()
     node = N()
@@ -140,6 +158,7 @@ def main():
     check("arrays carry uav_target_boxes",
           all(m.uav_target_boxes for m in g1),
           f"counts {[len(m.uav_target_boxes) for m in g1]}")
+    gate("detect", g1)
     check("NO annotations on any box (detect only)",
           all(not b.annotations for m in g1 for b in m.uav_target_boxes))
     check("use_for_assessment=false on every box",
@@ -167,6 +186,7 @@ def main():
     check("arrays carry uav_target_boxes",
           all(m.uav_target_boxes for m in g2),
           f"counts {[len(m.uav_target_boxes) for m in g2]}")
+    gate("detect+assess", g2)
     ann = [b for m in g2 for b in m.uav_target_boxes if b.annotations]
     check("annotations present", len(ann) > 0, f"{len(ann)} annotated boxes")
     check("every person box annotated with all 8 clip_rgb_* heads",
@@ -203,6 +223,7 @@ def main():
     check("array carries uav_target_boxes",
           bool(g3 and g3[0].uav_target_boxes),
           f"{len(g3[0].uav_target_boxes) if g3 else 0} boxes")
+    gate("vlm", g3)
     check("NO annotations on any box",
           all(not b.annotations for m in g3 for b in m.uav_target_boxes))
     check("use_for_assessment=TRUE on every box",

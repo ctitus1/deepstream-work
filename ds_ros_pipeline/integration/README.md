@@ -27,6 +27,9 @@ Both exit non-zero on failure.
 - **capture/vlm** — one `TargetBoxArray` on `/uas4/target_detections/vlm`,
   no annotations, `use_for_assessment=true`, nothing leaked onto the batch
   topic, and the array still reaches a late (post-call) subscriber.
+- **detection scope** — every published box is class `person` and at or
+  above `detect.min_confidence`. Set `DS_MIN_CONFIDENCE` to match if the
+  node was launched with a non-default threshold.
 - **the detection index** — the invariant that array position *is*
   `detection_id`. Two independent angles: annotations must land position by
   position on exactly the boxes the SGIE operates on, and indexing

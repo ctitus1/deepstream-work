@@ -28,9 +28,25 @@ live pipeline (no inference)
 
 batch pipeline (persistent, idle until fed)
   appsrc ◄─ batch worker ◄─ queued frames from the grab probe
-  ─► nvvideoconvert ─► nvstreammux b8 ─► yolo12x nvinfer ─► valve ─► injury-CLIP nvinfer ─► fakesink
+  ─► nvvideoconvert ─► nvstreammux b1 ─► yolo12x nvinfer ─► valve ─► injury-CLIP nvinfer ─► fakesink
         (valve open only for *_assess runs)
 ```
+
+**Why the mux is `batch-size=1`.** Every batched frame enters on the mux's
+single `sink_0` pad, so the legacy `nvstreammux` labels them all
+`source_id=0`. When it packs several such frames into one batch, `nvinfer`
+annotates only `batch_id=0` and every later frame emerges with zero objects
+— a 6-frame run published boxes on frame 0 and empty arrays on frames 1–5,
+and it did so even when all six pushed buffers were byte-identical copies,
+so this is the mux/`nvinfer` single-source contract, not frame content.
+`batch-size=1` makes the mux emit one frame per batch, which is the case
+`nvinfer` handles correctly for one source; frames still stream through
+back-to-back, they are just no longer inferred 8-up. The nvinfer configs
+stay `b8` (the engine accepts any batch in [1, 8]). Recovering true batched
+inference means giving the mux **one sink pad per frame** — a separate
+`appsrc ! nvvideoconvert` chain per batch slot, so each frame arrives as its
+own source — which is the canonical DeepStream multi-stream topology but
+multiplies the (load-bearing, DESIGN.md §3.3) converter pools.
 
 Every tee branch sits behind its own leaky queue, so no slow consumer can
 stall the source or a sibling (DESIGN.md §3.2). File sources are replayed in
@@ -51,6 +67,10 @@ seamless looping trivial and why the decoder never sees a loop boundary.
   at* (symlink-install workspaces break silently anywhere else — same caveat
   as the root compose). `run.sh` refuses to start if
   `$CDCL_ROS_SETUP` does not exist rather than failing on the first publish.
+  The workspace must include the `CasualtyImageCompressed.detection_id`
+  field (added for the capture/vlm crops) — rebuild `cdcl_umd_msgs` after
+  pulling a message definition without it, in every workspace this stack
+  sources (the bridge's and, on DS 9.0 machines, the Jazzy overlay too).
 - **Host clock NTP-synced.** The container shares the host clock and every
   published stamp is `time.time_ns()` at ingest — if the host loses NTP sync,
   every stamp is wrong. This is an operational prerequisite, not something
@@ -113,6 +133,43 @@ docker compose -f ds_ros_pipeline/compose.yaml run --rm ds-ros-pipeline \
 
 The full validated test matrix (16 scripted checks, one observable each) is
 DESIGN.md §10.
+
+### DeepStream 9.0 machines
+
+The stack defaults to the originally validated DS 7.1 + ROS2 Humble pairing.
+On a machine whose base image is `deepstream-work:9.0` (Ubuntu 24.04 —
+required for Blackwell-generation GPUs, whose sm_120 DS 7.1's TensorRT cannot
+build engines for), select the DS 9.0 + ROS2 Jazzy pairing in an untracked
+`ds_ros_pipeline/.env` (compose reads it automatically):
+
+```
+DS_VERSION=9.0
+DS_ROS_DISTRO=jazzy
+DS_CDCL_ROS_WS=/home/user/ros2_ws_jazzy
+```
+
+`DS_CDCL_ROS_WS` points the **pipeline** container at a `cdcl_umd_msgs`
+workspace built for Jazzy/Python 3.12 — the Humble/3.10 host workspace the
+bridge keeps using cannot be sourced there. Build it once with the ds-ros
+image itself (it carries colcon for exactly this):
+
+```bash
+docker compose -f ds_ros_pipeline/compose.yaml build ds-ros-pipeline
+mkdir -p /home/user/ros2_ws_jazzy
+docker run --rm -v /home/user/ros2_ws/src:/cdcl_src:ro \
+  -v /home/user/ros2_ws_jazzy:/home/user/ros2_ws_jazzy \
+  deepstream-work:ds-ros bash -c 'source /opt/ros/jazzy/setup.bash && \
+    colcon build --paths /cdcl_src/cdcl_umd_msgs \
+      --build-base /tmp/colcon_build \
+      --install-base /home/user/ros2_ws_jazzy/install'
+```
+
+The Humble foxglove bridge interoperates with the Jazzy pipeline over DDS
+unchanged — verified end to end on this pairing: every topic (including both
+`cdcl_umd_msgs` ones) deserializes, every service is callable, preview holds
+~30 Hz, and detection/assessment, recording, and snapshots all pass. The
+node suppresses its Jazzy-only `~/get_type_description` service so the
+humble-era bridge does not log a type-resolution WARN on every graph poll.
 
 ## Foxglove Studio
 
@@ -201,31 +258,20 @@ connect, and the fix there is updating Studio, not a bridge flag.
 
 Both of these are verified working against a live pipeline:
 
-- **Every topic**, including the two `cdcl_umd_msgs` ones —
-  `/ds/detections` and `/ds/assessments` deserialize because the colcon
-  overlay is mounted and sourced. Use an Image panel on
-  `/ds/preview/compressed` for the continuous stream, `/mosaic_compressed`
-  and `/vlm_raw` for the one-shots, and a Raw Message panel on `/ds/status`.
-- **Every signal**, from Studio's Service Call panel — all 25 services are
+- **Every topic**, including the three `cdcl_umd_msgs` ones —
+  `/uas4/target_detections`, `/uas4/target_detections/vlm`, and
+  `/casualty_image/compressed/vlm`
+  deserialize because the colcon overlay is mounted and sourced. Use an
+  Image panel on `/ds/preview/compressed` for the continuous stream,
+  `/mosaic_compressed` for the one-shot, and a Raw Message panel on
+  `/ds/status`.
+- **Every signal**, from Studio's Service Call panel — all services are
   advertised and were confirmed callable end to end (`enqueue` answered in
   0.01 s, `capture/mosaic` in 0.20 s, `snapshot` in 0.22 s). This is the
   fastest way to drive the pipeline by hand: fire `/ds/capture/mosaic` and
-  watch exactly one frame appear.
-
-One thing worth knowing:
-
-- **Large raw frames.** `/vlm_raw` messages are 11,059,256 B, just over
-  `foxglove_bridge`'s 10 MB `send_buffer_limit` default — but that limit caps
-  a per-client *backlog*, not one message, and an A/B against a stock bridge
-  delivered every raw frame either way (including a 6-deep burst at a
-  deliberately non-reading client). The default is therefore left alone. If a
-  remote or slow viewer ever does drop raw frames, raise it without editing
-  anything:
-
-  ```bash
-  FOXGLOVE_ARGS="send_buffer_limit:=67108864" \
-    docker compose -f ds_ros_pipeline/compose.yaml up -d ds-ros-foxglove
-  ```
+  watch exactly one frame appear, or `/ds/capture/vlm` and watch the boxes
+  arrive on `/uas4/target_detections/vlm` and the PNG casualty crops on
+  `/casualty_image/compressed/vlm`.
 
 The bridge itself runs in the existing `deepstream-work:ros-humble` image,
 which already carries `foxglove_bridge` — layering it onto the 21.6 GB
@@ -243,11 +289,11 @@ exception.
 | Service | Semantics |
 |---|---|
 | `/ds/capture/mosaic` | Arm one-shot: the **next** frame is JPEG-encoded full-res and published once on `/mosaic_compressed`. Blocks ≤2 s; `message` = the stamp used. |
-| `/ds/capture/vlm` | Same, but publishes raw `rgb8` on `/vlm_raw` (~11 MB/msg). |
+| `/ds/capture/vlm` | Arm one-shot: the **next** frame is run through **detection** (bypassing the batch queue), then two things are published. (1) One `TargetBoxArray` on `/uas4/target_detections/vlm` — field-for-field what `run_detect` would publish for that frame, except every box has `use_for_assessment=true`. (2) One `CasualtyImageCompressed` per detected box — `image` = lossless PNG crop, `detection_id` = the box's index — on `/casualty_image/compressed/vlm`. Blocks for the capture (≤2 s) plus the run (≤10 s); rejected while a continuous mode is on; `message` = the stamp used + run counts. |
 | `/ds/batch/enqueue` | Queue the next frame for batch inference. `message` = resulting depth; `success=false` if the queue (cap `batch.capacity`) is full. N calls queue N distinct frames. |
 | `/ds/batch/clear` | Empty the *pending* queue (a snapshot already taken by a running batch is unaffected). |
-| `/ds/batch/run_detect` | Run detection over everything queued; one `TargetBoxArray` per frame on `/ds/detections`. Blocks ≤30 s. `success=false` if the queue is empty or a continuous mode is on. |
-| `/ds/batch/run_detect_assess` | Same, plus injury assessment: one `CasualtyImageCompressed` per detected person on `/ds/assessments`. Assessment runs **only** here / in continuous-assess mode. |
+| `/ds/batch/run_detect` | Run detection over everything queued; one **detection** `TargetBoxArray` per frame (boxes with empty `annotations` + compressed frame image) on `/uas4/target_detections`. Blocks ≤30 s. `success=false` if the queue is empty or a continuous mode is on. |
+| `/ds/batch/run_detect_assess` | Same, plus injury assessment; per frame one **assessment** `TargetBoxArray` on `/uas4/target_detections` — the same boxes, with the 8 `clip_rgb_*` heads filled into the `annotations` of every assessed box (the plain detection array is not additionally published). Assessment runs **only** here / in continuous-assess mode. Every detection is a person (see Detection scope), so in practice every box is assessed. |
 | `/ds/mode/continuous_detect` (`SetBool`) | `true`: auto-enqueue every `continuous.stride`-th frame (default 3 ≈ 10 Hz) and auto-run. `false`: stop and discard any not-yet-run pending frames (count reported in the response; a run already in flight completes). Manual run services are rejected while on. |
 | `/ds/mode/continuous_detect_assess` (`SetBool`) | Same with assessment. Turning either mode on turns the other off. |
 | `/ds/record/start` | Attach the H.265/MPEG-TS recorder branch. `message` = file path. `success=false` if already recording or the source ended. Records seamlessly across loop wraps. |
@@ -260,21 +306,98 @@ Two capture calls arriving before the next frame **coalesce**: one message,
 both callers succeed with the same stamp. `enqueue` deliberately does not —
 it is a counter. Blocking services do not serialize unrelated ones (four
 callback groups; a snapshot in flight does not delay a `record/start`, an
-`enqueue`, or a concurrent `capture/vlm`).
+`enqueue`, or a concurrent `capture/mosaic`).
 
 ## Topics
 
 | Topic | Type | QoS | Notes |
 |---|---|---|---|
 | `/mosaic_compressed` | `sensor_msgs/CompressedImage` | RELIABLE, KEEP_LAST 5, TRANSIENT_LOCAL | one-shot; latched, so `echo` started *after* the call still receives it |
-| `/vlm_raw` | `sensor_msgs/Image` | RELIABLE, KEEP_LAST 1, TRANSIENT_LOCAL | full-res `rgb8`, ~11 MB/msg |
 | `/ds/preview/compressed` | `sensor_msgs/CompressedImage` | BEST_EFFORT, KEEP_LAST 1 (sensor data) | continuous ~30 Hz, 640×360 JPEG q75 |
-| `/ds/detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame; `source_img` = 640×368 JPEG of that frame |
-| `/ds/assessments` | `cdcl_umd_msgs/CasualtyImageCompressed` | RELIABLE, KEEP_LAST 10 | one per assessed person; 8 `clip_rgb_*` annotations |
+| `/uas4/target_detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame (the shared TBA topic, named like `ros_bridge.py`'s): detect runs → `annotations` empty; assess runs → the same boxes with the 8 `clip_rgb_*` heads on assessed ones; `source_img` = 640×368 JPEG of the frame; `use_for_assessment=false` on every box |
+| `/uas4/target_detections/vlm` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10, TRANSIENT_LOCAL | capture/vlm output: one for the captured frame, message-identical to what a detect run would put on `/uas4/target_detections` except `use_for_assessment=true` on every box. Latched, like the other one-shot outputs, so an `echo` started *after* the call still receives it. `seq` is counted separately from the batch topic's |
+| `/casualty_image/compressed/vlm` | `cdcl_umd_msgs/CasualtyImageCompressed` | RELIABLE, KEEP_LAST 10, TRANSIENT_LOCAL | capture/vlm output: one per detected box, `image` = full-res PNG crop, `detection_id` + full-frame `bbox_*`; latched depth 10 holds a frame's burst |
 | `/ds/status` | `diagnostic_msgs/DiagnosticArray` | RELIABLE, KEEP_LAST 1 | 1 Hz, see below |
 
-Every `header.stamp` is the frame's resolved ingest time (NTP-synced wall
-clock), copied one-stamp-everywhere like the existing `ros_bridge.py`.
+Every stamp field in every message is the source frame's resolved ingest
+time (NTP-synced wall clock), carried with the frame through the whole
+pipeline — `BatchItem`s travel with their stamp, so a `TargetBoxArray`
+header, its embedded `source_img` header, and a casualty image's `stamp` /
+`image.header.stamp` / `position.header.stamp` all repeat the identical
+value, exactly like the existing `ros_bridge.py`.
+
+### Detection scope: people only
+
+The pgie emits **nothing but COCO class 0 (`person`)**, at or above
+`detect.min_confidence` (default `0.4`). Downstream code may therefore
+assume every `Detection`, every `TargetBox`, and every casualty crop is a
+person — there is no class field to branch on.
+
+This is enforced inside nvinfer, not by filtering afterwards.
+`infer_configs.render_batch_yolo_config` writes:
+
+```ini
+[class-attrs-all]
+pre-cluster-threshold=2.0    ; unreachable — confidence is a probability
+
+[class-attrs-0]
+pre-cluster-threshold=0.4    ; detect.min_confidence
+```
+
+Every non-person class is given a threshold no detection can ever meet, so
+those boxes are discarded during bbox parsing: no object meta is created, no
+probe sees them, nothing reaches a message. The `[class-attrs-0]` section
+also copies the template's `nms-iou-threshold` / `topk` so the person class
+does not silently inherit a different clustering policy.
+
+The model itself is still the 80-class COCO YOLO (`num-detected-classes=80`)
+— only what survives parsing changes. To widen the scope, add a
+`[class-attrs-<id>]` section per class you want back.
+
+Verified live: `integration/verify_pipes.py` asserts on every pipe that no
+non-person class and no sub-threshold confidence ever appears in a published
+message.
+
+### The detection index
+
+One index identifies a detection everywhere it appears, for a given frame.
+`det_collect` (the pgie src-pad probe, upstream of the valve) walks the
+frame's `obj_meta_list` and **writes** each object's ordinal position into
+`obj_meta.object_id` — which is otherwise the untracked sentinel, there
+being no tracker in this pipeline. From then on that number is the identity:
+
+| Where | Field | Meaning |
+|---|---|---|
+| `TargetBoxArray` | position in `uav_target_boxes` | box `i` **is** detection `i` |
+| `FrameResult` | `assessments[i]` | the 8 `clip_rgb_*` heads for box `i` |
+| `CasualtyImageCompressed` | `detection_id` | the box the crop came from |
+
+The point of stamping the index into the meta is the assessment join. The
+SGIE runs *after* the valve, so its probe sees the object list a second
+time; having it read `object_id` back — rather than re-deriving a position
+by counting the list again — means the two sides cannot drift. Two
+independent counters would agree only for as long as the SGIE never
+reorders, inserts, or drops an object meta, and if it ever did, one person's
+injury assessment would be silently attached to a different person's box.
+Reading the index back makes that join correct by construction.
+
+Publication then preserves the ordering explicitly (`_indexed_detections`
+sorts by `object_id` and warns if the indices are not contiguous `0..n-1`),
+so array position never has to be inferred from the order a probe happened
+to emit.
+
+This is verified live, not just asserted: the injury SGIE is configured
+`operate-on-class-ids=0`, so in a frame holding a mix of classes the
+annotations must land on exactly the `person` boxes and no others —
+checked position by position against runs carrying up to 15 people
+interleaved with `car`/`chair`/`truck`/`bottle` boxes. Independently, each
+casualty crop's `detection_id` is used to index `uav_target_boxes` and the
+resulting box's rectangle must equal the crop's own `bbox_*` floats.
+
+Each `image` is the box cropped full-res from the captured frame
+(`floor(left)… ceil(left+width)`, clamped — every partially covered pixel is
+included); a box whose clamped crop would be empty publishes no casualty
+image, which is why `detection_id`, not arrival order, is the join key.
 
 ### `/ds/status` observables
 
@@ -303,7 +426,8 @@ All declared by `config.py`, all overridable via `--ros-args -p name:=value`.
 | `source.loop` | `true` | file variant only: seamless AU-replay loop; `false` = one pass then EOS (see below) |
 | `source.max_preload_mb` | `1024` | refuse (with a clear log) to preload an AU list bigger than this; use `loop:=false` for long files |
 | `batch.capacity` | `16` | batch queue cap (~236 MB host RAM at full) |
-| `batch.engine_batch` | `8` | engine/mux batch size; drop to 4 if VRAM is tight |
+| `batch.engine_batch` | `8` | engine batch size; drop to 4 if VRAM is tight. Not the mux batch size — see Architecture |
+| `detect.min_confidence` | `0.4` | minimum YOLO confidence for a person detection. Applied **inside** nvinfer (`[class-attrs-0] pre-cluster-threshold`), so weaker boxes never become object meta. Baked into the generated config at startup — setting it at runtime does nothing |
 | `continuous.stride` | `3` | continuous mode samples every Nth frame (3 ≈ 10 Hz at paced 30 fps) |
 | `continuous.run_size` | `4` | continuous worker auto-runs at this queue depth |
 | `preview.width` / `preview.height` / `preview.quality` | `640` / `360` / `75` | preview branch geometry / JPEG quality |
@@ -415,9 +539,11 @@ queued. The process runs until SIGINT.
 - **VRAM pressure on an 8 GB GPU** — `nvidia-smi` while recording +
   continuous assess (DESIGN.md §11 risk 1); fallbacks are
   `batch.engine_batch:=4` and shrinking the recorder queue.
-- **`/vlm_raw` subscribers on a remote host miss messages** — ~11 MB
-  messages are fine over localhost (`network_mode: host`); remote DDS
-  consumers may need Fast DDS large-message tuning.
+- **`capture/vlm` succeeds but no casualty images appear** — the captured
+  frame had no detections (the `TargetBoxArray` equivalent would have zero
+  boxes); the response `message` reports the box count. The topic is
+  latched (depth 10), so an `echo` started after the call still receives
+  the previous burst.
 - **Startup refuses a large file for looping** — the AU preload exceeds
   `source.max_preload_mb`; loop RAM cost scales with clip size (~120 MB for
   the 10 s test clip). Use `source.loop:=false` for long files.

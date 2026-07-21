@@ -108,7 +108,11 @@ class App:
         # created after Gst.init are fine once rclpy.init preceded it.
         from rclpy.node import Node
 
-        bootstrap = Node("ds_pipeline")
+        import ros_io
+
+        bootstrap = Node(
+            "ds_pipeline",
+            parameter_overrides=ros_io.no_type_description_service())
         try:
             self.config = config_mod.declare_parameters(bootstrap)
         finally:
@@ -118,7 +122,8 @@ class App:
         Gst.init(None)
         self._loop = GLib.MainLoop()
 
-        pgie_config = infer_configs.write_batch_yolo_config(cfg.batch_engine_batch)
+        pgie_config = infer_configs.write_batch_yolo_config(
+            cfg.batch_engine_batch, min_confidence=cfg.detect_min_confidence)
         sgie_config = infer_configs.sgie_config_path()
 
         self.registry = timestamps.TimestampRegistry()
@@ -144,13 +149,15 @@ class App:
             cfg, self.grab, self.batch, self.collector,
             publish_detections=lambda result:
                 self._node.publish_detections(result),
-            publish_assessment=lambda result, object_id:
-                self._node.publish_assessment(result, object_id))
+            publish_assessments=lambda result:
+                self._node.publish_assessments(result),
+            publish_casualties=lambda result:
+                self._node.publish_casualties(result),
+            publish_vlm_detections=lambda result:
+                self._node.publish_vlm_detections(result))
 
         self.recorder = disk.Recorder(cfg, self.live, self.registry)
         self.disk_worker = disk.DiskWorker()
-
-        import ros_io
 
         self._node = ros_io.DsRosNode(
             cfg, self.lifecycle, self.grab, self.recorder, self.worker,
@@ -383,7 +390,8 @@ def prebuild(engine_batch: int | None = None) -> int:
         cfg = config_mod.PipelineConfig()
     else:
         cfg = config_mod.PipelineConfig(batch_engine_batch=engine_batch)
-    pgie_config = infer_configs.write_batch_yolo_config(cfg.batch_engine_batch)
+    pgie_config = infer_configs.write_batch_yolo_config(
+        cfg.batch_engine_batch, min_confidence=cfg.detect_min_confidence)
     sgie_config = infer_configs.sgie_config_path()
     print(f"prebuild: wrote {pgie_config}", flush=True)
 

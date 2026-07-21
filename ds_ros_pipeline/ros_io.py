@@ -282,9 +282,37 @@ class DsRosNode(Node):
         msg.data = jpeg
         return msg
 
+    def _bbox_scale(self, result: batch_pipeline.FrameResult,
+                    ) -> tuple[float, float]:
+        """(x, y) factors mapping source-pixel detections onto source_img.
+
+        nvinfer reports boxes in FULL source-frame pixels (2560x1440 for the
+        default clip), but source_img is a detections.image_width x
+        image_height JPEG (640x368). Publishing the two together unscaled
+        means any consumer that overlays the boxes on the image it was handed
+        — Foxglove's Image panel included — draws them roughly 4x too large
+        and off-frame. ros_bridge.py has no such gap: its bboxes and its
+        source_img are already the same space.
+
+        x and y are scaled independently because _source_image resizes to
+        exactly (width, height) without preserving aspect: 2560x1440 (1.78)
+        into 640x368 (1.74) is a slight vertical squash, and a single uniform
+        factor would leave boxes progressively misplaced down the frame.
+        """
+        height, width = result.item.frame_rgba.shape[:2]
+        if not width or not height:
+            return 1.0, 1.0
+        return (self._config.detections_image_width / float(width),
+                self._config.detections_image_height / float(height))
+
     def _target_box(self, det: batch_pipeline.Detection,
+                    scale: tuple[float, float],
                     use_for_assessment: bool = False) -> TargetBox:
         """One TargetBox, field mapping per ros_bridge.py:target_box.
+
+        ``scale`` is _bbox_scale's (x, y): the box is emitted in source_img
+        pixel coordinates, not source-frame ones, so it lines up with the
+        image published alongside it.
 
         ``use_for_assessment`` ("flag if a target should be considered for
         assessment", TargetBox.msg) marks the box for a downstream assessor.
@@ -292,11 +320,17 @@ class DsRosNode(Node):
         publish boxes already carrying whatever assessment they ran, so
         flagging them for more would be a request nobody meant to make.
         """
+        scale_x, scale_y = scale
+        left = float(det.left) * scale_x
+        top = float(det.top) * scale_y
+        width = float(det.width) * scale_x
+        height = float(det.height) * scale_y
+
         bbox = BoundingBox2D()
-        bbox.size_x = float(det.width)
-        bbox.size_y = float(det.height)
-        bbox.center.position.x = float(det.left) + float(det.width) / 2.0
-        bbox.center.position.y = float(det.top) + float(det.height) / 2.0
+        bbox.size_x = width
+        bbox.size_y = height
+        bbox.center.position.x = left + width / 2.0
+        bbox.center.position.y = top + height / 2.0
 
         box = TargetBox()
         box.data_source_id = DATA_SOURCE_ID
@@ -338,7 +372,10 @@ class DsRosNode(Node):
         """TargetBoxArray shell for the TBA topics: header.stamp and
         source_img (the detections.image_width x image_height JPEG of the
         frame, its own header included) all carry the frame's resolved
-        ingest time. ``seq_key`` selects the per-topic seq counter."""
+        ingest time. ``seq_key`` selects the per-topic seq counter.
+
+        ``boxes`` are expected in source_img pixel coordinates (_bbox_scale),
+        so the array and the image it carries share one space."""
         msg = TargetBoxArray()
         with self._seq_lock:
             msg.seq = self._seq[seq_key]
@@ -372,7 +409,8 @@ class DsRosNode(Node):
         batched frame on /uas4/target_detections — detections only (every
         box's annotations empty) plus the compressed frame image; all stamps
         = result.item.ntp_ns. Called from the batch worker thread."""
-        boxes = [self._target_box(det)
+        scale = self._bbox_scale(result)
+        boxes = [self._target_box(det, scale)
                  for det in self._indexed_detections(result)]
         self._pub_tba.publish(self._target_box_array(result, boxes))
 
@@ -387,9 +425,10 @@ class DsRosNode(Node):
         use the index det_collect stamped into the object meta: the box at
         position i IS detection i, and assessments[i] is the tensor output
         the SGIE produced for that same object."""
+        scale = self._bbox_scale(result)
         boxes = []
         for det in self._indexed_detections(result):
-            box = self._target_box(det)
+            box = self._target_box(det, scale)
             predictions = result.assessments.get(det.object_id)
             if predictions:
                 box.annotations = self._annotations(predictions)
@@ -403,7 +442,8 @@ class DsRosNode(Node):
         empty annotations, same source_img, all stamps = result.item.ntp_ns),
         except every box carries use_for_assessment=True. Batch worker
         thread."""
-        boxes = [self._target_box(det, use_for_assessment=True)
+        scale = self._bbox_scale(result)
+        boxes = [self._target_box(det, scale, use_for_assessment=True)
                  for det in self._indexed_detections(result)]
         self._pub_tba_vlm.publish(
             self._target_box_array(result, boxes, seq_key="vlm"))

@@ -328,7 +328,7 @@ callback groups; a snapshot in flight does not delay a `record/start`, an
 |---|---|---|---|
 | `/mosaic_compressed` | `sensor_msgs/CompressedImage` | RELIABLE, KEEP_LAST 5, TRANSIENT_LOCAL | one-shot; latched, so `echo` started *after* the call still receives it |
 | `/ds/preview/compressed` | `sensor_msgs/CompressedImage` | BEST_EFFORT, KEEP_LAST 1 (sensor data) | continuous ~30 Hz, 640×360 JPEG q75 |
-| `/uas4/target_detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame (the shared TBA topic, named like `ros_bridge.py`'s): detect runs → `annotations` empty; assess runs → the same boxes with the 8 `clip_rgb_*` heads on assessed ones; `source_img` = 640×368 JPEG of the frame; `use_for_assessment=false` on every box |
+| `/uas4/target_detections` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10 | one per batched frame (the shared TBA topic, named like `ros_bridge.py`'s): detect runs → `annotations` empty; assess runs → the same boxes with the 8 `clip_rgb_*` heads on assessed ones; `source_img` = 640×368 JPEG of the frame; boxes are in **`source_img` pixel coordinates** (see below); `use_for_assessment=false` on every box |
 | `/uas4/target_detections/vlm` | `cdcl_umd_msgs/TargetBoxArray` | RELIABLE, KEEP_LAST 10, TRANSIENT_LOCAL | capture/vlm output: one for the captured frame, message-identical to what a detect run would put on `/uas4/target_detections` except `use_for_assessment=true` on every box. Latched, like the other one-shot outputs, so an `echo` started *after* the call still receives it. `seq` is counted separately from the batch topic's |
 | `/ds/status` | `diagnostic_msgs/DiagnosticArray` | RELIABLE, KEEP_LAST 1 | 1 Hz, see below |
 
@@ -337,6 +337,29 @@ time (NTP-synced wall clock), carried with the frame through the whole
 pipeline — `BatchItem`s travel with their stamp, so a `TargetBoxArray`
 header and its embedded `source_img` header repeat the identical value,
 exactly like the existing `ros_bridge.py`.
+
+### Bounding-box coordinate space
+
+`target_bbox` is expressed in **`source_img` pixels**, not source-frame
+pixels. nvinfer reports boxes against the full frame (2560×1440 for the
+default clip) while `source_img` is a `detections.image_width` ×
+`detections.image_height` JPEG (640×368), so `ros_io` scales every box by
+`(image_width / frame_width, image_height / frame_height)` at publish time.
+
+Without that scaling, anything overlaying the boxes on the image carried in
+the same message — Foxglove's Image panel included — draws them about 4×
+too large and mostly off-frame. This also matches `src/ros_bridge.py`, whose
+bboxes and `source_img` were already the same space.
+
+x and y scale independently, because `source_img` is resized to exactly
+640×368 without preserving aspect (2560×1440 is 1.78, 640×368 is 1.74). A
+single uniform factor would leave boxes progressively misplaced toward the
+bottom of the frame.
+
+Change `detections.image_width` / `image_height` and the boxes follow
+automatically — the factors are derived per frame from the actual frame
+dimensions, not hardcoded. `integration/verify_pipes.py` decodes the
+published JPEG and asserts every box lies inside it.
 
 ### Detection scope: people only
 

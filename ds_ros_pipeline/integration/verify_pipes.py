@@ -124,6 +124,55 @@ def all_boxes(msgs):
     return [b for m in msgs for b in m.uav_target_boxes]
 
 
+def check_bbox_frame(label, msgs):
+    """Boxes must be expressed in source_img pixels, not source-frame ones.
+
+    Decoding source_img gives its real dimensions, so this is a check against
+    the bytes actually published rather than against the configured size. A
+    box in unscaled 2560x1440 coordinates lands far outside a 640x368 image
+    and is caught here; it is exactly what made Foxglove draw boxes ~4x too
+    large and off-frame.
+    """
+    import io
+    import struct
+
+    def jpeg_size(data):
+        """(width, height) from the JPEG SOF marker -- no cv2/PIL needed."""
+        stream = io.BytesIO(bytes(data))
+        if stream.read(2) != b"\xff\xd8":
+            return None
+        while True:
+            marker = stream.read(2)
+            if len(marker) < 2 or marker[0] != 0xFF:
+                return None
+            if 0xC0 <= marker[1] <= 0xCF and marker[1] not in (0xC4, 0xC8, 0xCC):
+                stream.read(3)
+                height, width = struct.unpack(">HH", stream.read(4))
+                return width, height
+            (length,) = struct.unpack(">H", stream.read(2))
+            stream.seek(length - 2, io.SEEK_CUR)
+
+    sizes = {jpeg_size(m.source_img.data) for m in msgs}
+    check(f"{label}: source_img decodes to one known size",
+          len(sizes) == 1 and None not in sizes, f"{sizes}")
+    if len(sizes) != 1 or None in sizes:
+        return
+    img_w, img_h = sizes.pop()
+    outside = []
+    for m in msgs:
+        for i, b in enumerate(m.uav_target_boxes):
+            bb = b.target_bbox
+            left = bb.center.position.x - bb.size_x / 2.0
+            top = bb.center.position.y - bb.size_y / 2.0
+            if (left < -1 or top < -1
+                    or left + bb.size_x > img_w + 1
+                    or top + bb.size_y > img_h + 1):
+                outside.append((i, round(left, 1), round(top, 1),
+                                round(bb.size_x, 1), round(bb.size_y, 1)))
+    check(f"{label}: every bbox lies within source_img ({img_w}x{img_h})",
+          not outside, f"outside: {outside[:4]}")
+
+
 def check_detection_gate(label, msgs):
     """The pgie must let nothing but sufficiently-confident people through.
 
@@ -208,6 +257,7 @@ def main():
           len({(m.header.stamp.sec, m.header.stamp.nanosec) for m in got})
           == len(got))
     check_detection_gate("detect", got)
+    check_bbox_frame("detect", got)
     check("annotations empty on a detect run",
           all(not b.annotations for m in got for b in m.uav_target_boxes))
     check("use_for_assessment false on a detect run",
@@ -233,6 +283,7 @@ def main():
           all(len(m.uav_target_boxes) > 0 for m in got),
           f"box counts {[len(m.uav_target_boxes) for m in got]}")
     check_detection_gate("detect+assess", got)
+    check_bbox_frame("detect+assess", got)
     annotated = [b for m in got for b in m.uav_target_boxes if b.annotations]
     total = [b for m in got for b in m.uav_target_boxes]
     persons = person_boxes(got)
@@ -292,6 +343,7 @@ def main():
               boxes_well_formed(msg) and msg.uav_target_boxes,
               f"{len(msg.uav_target_boxes)} boxes")
         check_detection_gate("vlm", got)
+        check_bbox_frame("vlm", got)
         check("use_for_assessment TRUE on every box",
               all(b.use_for_assessment for b in msg.uav_target_boxes))
         check("annotations empty (detection-only, like target_detections)",

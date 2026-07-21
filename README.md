@@ -445,10 +445,12 @@ decoupled batch detect/assess pipeline — all controlled via ROS2 services.
 
 ```bash
 docker compose -f ds_ros_pipeline/compose.yaml up --build ds-ros-pipeline
+docker compose -f ds_ros_pipeline/compose.yaml up   # same, plus a Foxglove
+                                                    # bridge on ws://localhost:8765
 ```
 
 See [ds_ros_pipeline/README.md](ds_ros_pipeline/README.md) for bring-up,
-services/topics, and outputs, and
+services/topics, outputs, and Foxglove usage, and
 [ds_ros_pipeline/DESIGN.md](ds_ros_pipeline/DESIGN.md) for the design.
 
 ## RTSP Timing

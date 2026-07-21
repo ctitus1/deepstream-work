@@ -97,6 +97,60 @@ docker compose -f ds_ros_pipeline/compose.yaml run --rm ds-ros-pipeline \
 The full validated test matrix (16 scripted checks, one observable each) is
 DESIGN.md §10.
 
+## Poking around with Foxglove Studio
+
+A second, optional service serves the whole ROS graph over a websocket:
+
+```bash
+docker compose -f ds_ros_pipeline/compose.yaml up          # pipeline + bridge
+docker compose -f ds_ros_pipeline/compose.yaml up ds-ros-foxglove   # bridge alone
+```
+
+Then connect Foxglove Studio to **`ws://localhost:8765`**. Naming
+`ds-ros-pipeline` explicitly still starts only the pipeline, so nothing about
+the §10 test commands changes.
+
+The bridge runs in the existing `deepstream-work:ros-humble` image, which
+already carries `foxglove_bridge` — layering it onto the 21.6 GB DeepStream
+image for a pure-visualization add-on would be the expensive way round. The
+two containers find each other over host networking and host IPC, the same
+way the root compose's ROS services already do.
+
+What is usable once connected (all verified against a live pipeline):
+
+- **Every topic**, including the two `cdcl_umd_msgs` ones —
+  `/ds/detections` and `/ds/assessments` deserialize because the colcon
+  overlay is mounted and sourced. Use an Image panel on
+  `/ds/preview/compressed` for the continuous stream, `/mosaic_compressed`
+  and `/vlm_raw` for the one-shots, and a Raw Message panel on `/ds/status`.
+- **Every signal**, from Studio's Service Call panel — all 25 services are
+  advertised and were confirmed callable end to end (`enqueue` answered in
+  0.01 s, `capture/mosaic` in 0.20 s, `snapshot` in 0.22 s). This is the
+  fastest way to drive the pipeline by hand: fire `/ds/capture/mosaic` and
+  watch exactly one frame appear.
+
+Two things worth knowing:
+
+- **Studio version.** This bridge (3.4.2) speaks only the newer
+  `foxglove.sdk.v1` websocket subprotocol; it answers `400 Bad Request` to a
+  client offering the older `foxglove.websocket.v1`. An old Studio build that
+  cannot connect needs updating, not a bridge flag.
+- **Large raw frames.** `/vlm_raw` messages are 11,059,256 B, just over
+  `foxglove_bridge`'s 10 MB `send_buffer_limit` default — but that limit caps
+  a per-client *backlog*, not one message, and an A/B against a stock bridge
+  delivered every raw frame either way (including a 6-deep burst at a
+  deliberately non-reading client). The default is therefore left alone. If a
+  remote or slow viewer ever does drop raw frames, raise it without editing
+  anything:
+
+  ```bash
+  FOXGLOVE_ARGS="send_buffer_limit:=67108864" \
+    docker compose -f ds_ros_pipeline/compose.yaml up ds-ros-foxglove
+  ```
+
+`FOXGLOVE_PORT` moves the websocket off 8765; any other launch argument goes
+through `FOXGLOVE_ARGS`.
+
 ## Services
 
 All are `std_srvs/srv/Trigger` unless noted. Responses carry the observable

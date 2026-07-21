@@ -368,14 +368,19 @@ class DsRosNode(Node):
 
     def _target_box_array(self, result: batch_pipeline.FrameResult,
                           boxes: list[TargetBox],
-                          seq_key: str = "batch") -> TargetBoxArray:
+                          seq_key: str = "batch",
+                          do_assessment: bool = False) -> TargetBoxArray:
         """TargetBoxArray shell for the TBA topics: header.stamp and
         source_img (the detections.image_width x image_height JPEG of the
         frame, its own header included) all carry the frame's resolved
         ingest time. ``seq_key`` selects the per-topic seq counter.
 
         ``boxes`` are expected in source_img pixel coordinates (_bbox_scale),
-        so the array and the image it carries share one space."""
+        so the array and the image it carries share one space.
+
+        ``do_assessment`` is the array-level request flag, set only by the
+        capture/vlm path — the array-wide counterpart of the per-box
+        use_for_assessment those same boxes carry."""
         msg = TargetBoxArray()
         with self._seq_lock:
             msg.seq = self._seq[seq_key]
@@ -386,6 +391,7 @@ class DsRosNode(Node):
         msg.gimbal_attitude_quaternion.w = 1.0
         msg.uav_target_boxes = boxes
         msg.use_for_mosaic = False
+        msg.do_assessment = bool(do_assessment)
         msg.detection_source = AerialDetectionSource.DETECTION_YOLO
         return msg
 
@@ -440,13 +446,14 @@ class DsRosNode(Node):
         /uas4/target_detections/vlm — field-for-field what publish_detections
         would put on /uas4/target_detections for the same frame (same boxes,
         empty annotations, same source_img, all stamps = result.item.ntp_ns),
-        except every box carries use_for_assessment=True. Batch worker
-        thread."""
+        except every box carries use_for_assessment=True and the array itself
+        carries do_assessment=True. Batch worker thread."""
         scale = self._bbox_scale(result)
         boxes = [self._target_box(det, scale, use_for_assessment=True)
                  for det in self._indexed_detections(result)]
         self._pub_tba_vlm.publish(
-            self._target_box_array(result, boxes, seq_key="vlm"))
+            self._target_box_array(result, boxes, seq_key="vlm",
+                                   do_assessment=True))
 
     # -- service callbacks (executor threads, groups as annotated) ----------
 
